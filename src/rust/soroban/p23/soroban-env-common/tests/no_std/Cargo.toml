@@ -1,0 +1,13 @@
+[package]
+name = "test_no_std"
+version.workspace = true
+edition = "2021"
+publish = false
+rust-version.workspace = true
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+soroban-env-common = { path = "../../" }

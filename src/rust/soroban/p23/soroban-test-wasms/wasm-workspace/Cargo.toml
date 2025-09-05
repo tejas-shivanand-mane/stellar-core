@@ -1,0 +1,91 @@
+# This file defines a workspace that is _periodically_ recompiled as part of
+# updating the Wasm files that are then embedded as as bytes constants in the
+# surrounding crate `soroban-test-wasms`.
+#
+# Neither the rust crates in this workspace, nor the workspace itself, are (in
+# cargo's mind) part of the outer workspace containing
+# soroban-env-{host,guest,macros,wasm-tests} etc. The inner workspace is
+# excluded from the outer workspace, and the crates within it must be manually
+# built (and should only be built as Wasm). See the adjacent `Makefile` for
+# invocation.
+#
+# The dependency graph here is complex and subtle and needs to be understood if
+# you're going to use it correctly. There is further explanation in
+# https://rs-soroban-env/soroban-test-wasms/README.md
+
+[workspace]
+resolver = "2"
+
+members = [
+    "add_i32",
+    "add_f32",
+    "alloc",
+    "auth",
+    "fib",
+    "contract_data",
+    "upload_contract",
+    "create_contract",
+    "invoke_contract",
+    "linear_memory",
+    "loadgen",
+    "vec",
+    "hostile",
+    "complex",
+    "fannkuch",
+    "simple_account",
+    "update",
+    "delegated_account",
+    "err",
+    "write_upgrade_bytes",
+    "conditional_account",
+    "sac_reentry_account",
+    "recursive_account",
+    "hostile_large_val",
+    "contract_sac_transfer",
+    "sum_i32",
+    "deployer",
+    "constructor",
+    "no_arg_constructor",
+    "deployer_with_constructor",
+    "constructor_with_return_value",
+    "constructor_with_result",
+    "custom_account_context",
+    "try_call_sac",
+    "invoker_auth"
+]
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+[workspace.package]
+rust-version = "1.84.0"
+
+[workspace.dependencies.soroban-sdk]
+version = "=23.0.0-rc.2.1"
+# git = "https://github.com/stellar/rs-soroban-sdk"
+
+[workspace.dependencies.soroban-env-common]
+version = "=23.0.0-rc.2"
+# git = "https://github.com/stellar/rs-soroban-env"
+
+# Always build from the local instance of env as we need to rebuild test Wasms
+# only due to the env changes.
+# [patch."https://github.com/stellar/rs-soroban-env"]
+[patch.crates-io]
+soroban-env-common = { path = "../../soroban-env-common" }
+soroban-env-guest = { path = "../../soroban-env-guest" }
+soroban-env-host = { path = "../../soroban-env-host" }
+
+# Always build using the local SDK. Usually the env change is accompanied with
+# the corresponding SDK change.
+# [patch."https://github.com/stellar/rs-soroban-sdk"]
+soroban-sdk = { path = "../../../rs-soroban-sdk/soroban-sdk" }
+
+# [patch."https://github.com/stellar/rs-stellar-xdr"]
+stellar-xdr = { path = "../../../rs-stellar-xdr/" }

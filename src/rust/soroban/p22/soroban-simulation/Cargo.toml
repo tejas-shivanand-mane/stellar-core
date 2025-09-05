@@ -1,0 +1,33 @@
+[package]
+name = "soroban-simulation"
+description = "Soroban host invocation simulations."
+homepage = "https://github.com/stellar/rs-soroban-env"
+repository = "https://github.com/stellar/rs-soroban-env"
+authors = ["Stellar Development Foundation <info@stellar.org>"]
+license = "Apache-2.0"
+version.workspace = true
+readme = "../README.md"
+edition = "2021"
+rust-version.workspace = true
+
+# Temporary until we publish, to satisfy cargo-semver-checks
+publish = true
+
+[features]
+testutils = ["soroban-env-host/testutils"]
+
+[dependencies]
+anyhow = { version = "1.0.75", features = [] }
+thiserror = "1.0.40"
+soroban-env-host = { workspace = true,  features = ["recording_mode", "unstable-next-api"]}
+static_assertions = "1.1.0"
+rand = "0.8.5"
+
+[dev-dependencies]
+soroban-env-host = { workspace = true,  features = ["recording_mode", "testutils", "unstable-next-api"]}
+soroban-test-wasms = { package = "soroban-test-wasms", path = "../soroban-test-wasms" }
+pretty_assertions = "1.4"
+tap = "1.0.1"
+
+[package.metadata.docs.rs]
+all-features = true
