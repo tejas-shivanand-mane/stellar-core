@@ -62,14 +62,14 @@ enum CustomMessageType
     CUSTOM_COLLECT = 3,
     CUSTOM_SEND    = 4,
     CUSTOM_ECHO    = 5,
-    CUSTOM_READY   = 6
-    // CUSTOM_CONDREADY = 7 // optional, later
+    CUSTOM_READY   = 6,
+    CUSTOM_CONDREADY = 7 
 };
 
 struct CustomMessage
 {
     CustomMessageType msgType;
-    uint64 view;       // current view (fixed = 1 for now)
+    uint64 view;       // current view 
     Hash blockHash;    // identifies the block
     string data<256>;  // payload
     uint64 vp;    // used in SEND/ECHO/READY for vp
