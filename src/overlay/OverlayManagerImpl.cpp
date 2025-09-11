@@ -894,7 +894,7 @@ OverlayManagerImpl::tick()
 
         else
         {
-            // ⚠️ No committed block from v*-1 → must COLLECT
+            //  No committed block from v*-1 → must COLLECT
             auto msg = std::make_shared<StellarMessage>();
             msg->type(CUSTOM_MESSAGE);
             msg->customMessage().msgType = CUSTOM_COLLECT;
