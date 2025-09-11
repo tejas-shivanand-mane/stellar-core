@@ -862,6 +862,34 @@ OverlayManagerImpl::tick()
             // artificially "desync" latestCommittedView
             latestCommittedView = currentView - 2;  
             forceCollectRound = 1;  // only do this once
+
+
+
+
+
+            std::string shortID = KeyUtils::toShortString(selfID);
+            if (shortID == "GBDOU")   // <-- use actual node ID
+            {
+                BlockKey fakeKey{currentView, latestCommittedBlock};
+                auto& st = g_txn[fakeKey];
+
+                st.preparedView = currentView + 1;        // higher than vp
+                st.preparedBlock = latestCommittedBlock;  // extend last committed
+
+                CLOG_INFO(Overlay,
+                    "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
+                    shortID, st.preparedView, hexAbbrev(st.preparedBlock));
+            }
+
+
+
+
+
+
+
+
+
+
         }
 
 
@@ -1759,31 +1787,35 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_CONDREADY:
-            CLOG_INFO(Overlay, "Received CONDREADY for origin={} (vp={}, bp={}) from {}",
-                      KeyUtils::toShortString(cm.origin),
-                      cm.vp, hexAbbrev(cm.bp),
-                      KeyUtils::toShortString(sender));
+            CLOG_INFO(Overlay, "Received CONDREADY (vp={}, bp={}) for view {} from {}",
+                    cm.vp, hexAbbrev(cm.bp), cm.view,
+                    KeyUtils::toShortString(sender));
 
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
 
+                // Always record the report
+                st.collection[sender] = {cm.vp, cm.bp};
+                CLOG_INFO(Overlay, "Added CONDREADY origin={} (vp={}, bp={}) to collection (size={})",
+                        KeyUtils::toShortString(sender),
+                        cm.vp, hexAbbrev(cm.bp), st.collection.size());
+
                 if (g_ps.count(BlockKey{cm.vp, cm.bp}))
                 {
                     st.readies[vb].insert(sender);
+                    st.readies[vb].insert(selfID);  // ensure self is counted
                     CLOG_INFO(Overlay, "CONDREADY immediately counted for (vp={}, bp={})",
-                              cm.vp, hexAbbrev(cm.bp));
+                            cm.vp, hexAbbrev(cm.bp));
                 }
                 else
                 {
                     st.pendingCondReady[vb].insert(sender);
                     CLOG_INFO(Overlay, "CONDREADY deferred for (vp={}, bp={})",
-                              cm.vp, hexAbbrev(cm.bp));
+                            cm.vp, hexAbbrev(cm.bp));
                 }
 
                 if (st.readies[vb].size() >= 2*f+1)
                 {
-                    st.collection[cm.origin] = {cm.vp, cm.bp};
-
                     if (selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
                         st.collection.size() >= 2*f+1)
                     {
@@ -1799,12 +1831,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         broadcastMessage(msg);
 
                         CLOG_INFO(Overlay,
-                                  "Leader collected 2f+1 (with CondReady), proposing new block {} in view {}",
-                                  hexAbbrev(newBlock), currentView);
+                                "Leader collected 2f+1 (with CondReady), proposing new block {} in view {}",
+                                hexAbbrev(newBlock), currentView);
                     }
                 }
             }
             break;
+
     }
 }
 
