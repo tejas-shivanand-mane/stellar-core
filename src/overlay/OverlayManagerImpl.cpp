@@ -200,7 +200,7 @@ static uint64_t currentView = 1;
 static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
-
+static int pbft_start = 0;
 static int forceCollectRound = 0;
 
 bool
@@ -821,120 +821,10 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-
-
-
-
-    
-
-
-    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    if (pbft_start==0)
     {
-
-        CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
-
-        static auto lastSent = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-
-        // if (std::chrono::duration_cast<std::chrono::seconds>(now - lastSent).count() < 1)
-        // {
-        //     CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE RETURNING HERE");
-
-        //     return;
-
-        // }
-
-        lastSent = now;
-
-        // For now: always let self act as leader in view 1
-        NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-
-        // if (currentView != 1)   // fixed view
-        //     CLOG_INFO(Overlay, "RETURNING");
-
-        //     return;
-
-
-        if (txn_count == 5 && forceCollectRound == 0)
-        {
-            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
-
-            // artificially "desync" latestCommittedView
-            latestCommittedView = currentView - 2;  
-            forceCollectRound = 1;  // only do this once
-
-
-
-
-
-            std::string shortID = KeyUtils::toShortString(selfID);
-            if (shortID == "GBDOU")   // <-- use actual node ID
-            {
-                BlockKey fakeKey{currentView, latestCommittedBlock};
-                auto& st = g_txn[fakeKey];
-
-                st.preparedView = currentView + 1;        // higher than vp
-                st.preparedBlock = latestCommittedBlock;  // extend last committed
-
-                CLOG_INFO(Overlay,
-                    "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
-                    shortID, st.preparedView, hexAbbrev(st.preparedBlock));
-            }
-
-
-
-
-
-
-
-
-
-
-        }
-
-
-        if (latestCommittedView == currentView - 1)
-        {
-
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
-            
-            Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
-            txn_count++;
-
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
-
-
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-
-            msg->customMessage().msgType   = CUSTOM_PROPOSE;
-            msg->customMessage().view      = currentView;
-            msg->customMessage().blockHash = blockHash;
-            msg->customMessage().data      = std::to_string(txn_count);
-
-            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
-                    hexAbbrev(blockHash), currentView);
-
-
-            broadcastMessage(msg);
-
-        }
-
-        else
-        {
-            //  No committed block from v*-1 → must COLLECT
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-            msg->customMessage().msgType = CUSTOM_COLLECT;
-            msg->customMessage().view    = currentView;
-
-            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
-                    currentView);
-
-            broadcastMessage(msg);
-        }
-
-
+        prop();
+        pbft_start = 1;
     }
 
 
@@ -1068,6 +958,111 @@ OverlayManagerImpl::tick()
     {
         connectTo(availablePendingSlots, PeerType::INBOUND);
     }
+}
+
+void
+OverlayManagerImpl::prop()
+{
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+    std::string shortID = KeyUtils::toShortString(selfID);
+    CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
+
+
+    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    {
+
+        CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
+
+        static auto lastSent = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+
+
+        lastSent = now;
+
+
+
+            // if (shortID == "GBDOU")   // <-- use actual node ID
+            // {
+            //     BlockKey fakeKey{currentView, latestCommittedBlock};
+            //     auto& st = g_txn[fakeKey];
+
+            //     st.preparedView = currentView + 1;        // higher than vp
+            //     st.preparedBlock = latestCommittedBlock;  // extend last committed
+
+            //     CLOG_INFO(Overlay,
+            //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
+            //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
+            // }
+
+
+
+        
+
+
+        if (txn_count >= 6000 && txn_count <= 6500) 
+        {
+            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+
+            // artificially "desync" latestCommittedView
+            latestCommittedView = currentView - 2;  
+            forceCollectRound = 1;  // only do this once
+
+
+        }
+
+
+        if (latestCommittedView == currentView - 1)
+        {
+
+            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
+            
+            Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
+            txn_count++;
+
+            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
+
+
+            auto msg = std::make_shared<StellarMessage>();
+            msg->type(CUSTOM_MESSAGE);
+
+            msg->customMessage().msgType   = CUSTOM_PROPOSE;
+            msg->customMessage().view      = currentView;
+            msg->customMessage().blockHash = blockHash;
+            msg->customMessage().data      = std::to_string(txn_count);
+
+            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                    hexAbbrev(blockHash), currentView);
+
+
+            broadcastMessage(msg);
+
+        }
+
+        else
+        {
+            //  No committed block from v*-1 → must COLLECT
+            auto msg = std::make_shared<StellarMessage>();
+            msg->type(CUSTOM_MESSAGE);
+            msg->customMessage().msgType = CUSTOM_COLLECT;
+            msg->customMessage().view    = currentView;
+
+            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
+                    currentView);
+
+            broadcastMessage(msg);
+        }
+
+
+    }
+
+    else
+    {
+        txn_count++;
+    }
+
 }
 
 int
@@ -1595,6 +1590,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 CLOG_INFO(Overlay, "Committed block {} at view {}",
                           hexAbbrev(cm.blockHash), cm.view);
+
+
+                prop();
             }
             break;
 

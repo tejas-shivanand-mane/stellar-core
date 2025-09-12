@@ -99,6 +99,9 @@ class OverlayManagerImpl : public OverlayManager
     RandomEvictionCache<uint64_t, bool> mMessageCache;
 
     void tick();
+    void prop();
+
+
     void updateTimerAndMaybeDropRandomPeer(bool shouldDrop);
     VirtualTimer mTimer;
     VirtualTimer mPeerIPTimer;
