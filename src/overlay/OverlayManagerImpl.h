@@ -127,6 +127,8 @@ class OverlayManagerImpl : public OverlayManager
     bool recvFloodedMsgID(Peer::pointer peer, Hash const& msgID) override;
     void sendPrepare( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendCommit( uint64_t view, Hash const& blockHash, std::string const& data) override;
+    void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data) override;
+
     void recvCustomMessage(StellarMessage const& stellarMsg,
                            std::shared_ptr<Peer> peer) override;
     void recvTransaction(TransactionFrameBasePtr transaction,

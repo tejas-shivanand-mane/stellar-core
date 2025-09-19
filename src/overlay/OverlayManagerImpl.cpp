@@ -152,12 +152,16 @@ struct TxnState {
     uint64_t commitView = 0;     // last view we sent a commit
     uint64_t preparedView = 0;
     uint64_t committedView = 0;
+    uint64_t executedView = 0;
+
 
     Hash preparedBlock;
     Hash committedBlock;
 
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> prepareVoters;
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> commitVoters;
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> executeVoters;
+
 
     // ====== For collection / Bracha-like broadcast ======
 
@@ -964,7 +968,7 @@ void
 OverlayManagerImpl::prop()
 {
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
     std::string shortID = KeyUtils::toShortString(selfID);
@@ -1002,16 +1006,16 @@ OverlayManagerImpl::prop()
         
 
 
-        if (txn_count >= 6000 && txn_count <= 6500) 
-        {
-            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+        // if (txn_count >= 6000 && txn_count <= 6500) 
+        // {
+        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
-            // artificially "desync" latestCommittedView
-            latestCommittedView = currentView - 2;  
-            forceCollectRound = 1;  // only do this once
+        //     // artificially "desync" latestCommittedView
+        //     latestCommittedView = currentView - 2;  
+        //     forceCollectRound = 1;  // only do this once
 
 
-        }
+        // }
 
 
         if (latestCommittedView == currentView - 1)
@@ -1489,6 +1493,26 @@ OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string
     CLOG_INFO(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
 }
 
+void
+OverlayManagerImpl::sendExecute(uint64_t view, Hash const& blockHash, std::string const& data)
+{
+
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+
+    msg->customMessage().msgType   = CUSTOM_EXECUTE;
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+    msg->customMessage().data      = data;
+
+    // Send only if this node is leader (SEND_CUSTOM_MESSAGE == true)
+
+    broadcastMessage(msg);
+    CLOG_INFO(Overlay, "Broadcast EXECUTE for block {} view {}", hexAbbrev(blockHash), view);
+
+
+}
+
 
 
 
@@ -1547,6 +1571,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         {
             CLOG_INFO(Overlay, "Ignoring PROPOSE at view {} (current={})",
                       cm.view, currentView); // 🔹 ignore old/future proposals
+
+                    //   while((cm.view != currentView))
+                    //   {
+
+                    //   }
         }
         break;
 
@@ -1591,6 +1620,28 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_INFO(Overlay, "Committed block {} at view {}",
                           hexAbbrev(cm.blockHash), cm.view);
 
+                sendExecute(cm.view, cm.blockHash, cm.data);
+                // st.executeVoters.insert(sender);
+                
+                // prop();
+            }
+            break;
+
+                // ================================================================
+        case CUSTOM_EXECUTE:
+            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {}",
+                      hexAbbrev(cm.blockHash), cm.view);
+
+            st.executeVoters.insert(sender);
+
+
+            // Ensure we only trigger once
+            if (st.executeVoters.size() >= 2 * f + 1 && st.executedView < cm.view)
+            {
+                st.executedView = cm.view;
+
+                CLOG_INFO(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
+                        hexAbbrev(cm.blockHash), cm.view);
 
                 prop();
             }

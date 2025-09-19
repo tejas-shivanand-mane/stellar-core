@@ -94,6 +94,8 @@ class OverlayManager
 
     virtual void sendPrepare( uint64_t view, Hash const& blockHash, std::string const& data)=0;
     virtual void sendCommit( uint64_t view, Hash const& blockHash, std::string const& data)=0;
+    virtual void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data)=0;
+
     virtual void recvCustomMessage(StellarMessage const& msg, Peer::pointer peer)=0;
     // Process incoming transaction, pass it down to the transaction queue
     virtual void recvTransaction(TransactionFrameBasePtr transaction,

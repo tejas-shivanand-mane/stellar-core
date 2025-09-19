@@ -59,6 +59,7 @@ enum CustomMessageType
     CUSTOM_PROPOSE = 0,
     CUSTOM_PREPARE = 1,
     CUSTOM_COMMIT  = 2,
+    CUSTOM_EXECUTE = 8,
     CUSTOM_COLLECT = 3,
     CUSTOM_SEND    = 4,
     CUSTOM_ECHO    = 5,

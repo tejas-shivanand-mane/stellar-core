@@ -76,6 +76,14 @@ class Peer : public std::enable_shared_from_this<Peer>,
     static constexpr std::chrono::nanoseconds PEER_METRICS_RATE_UNIT =
         std::chrono::seconds(1);
 
+
+
+    Config const& getConfig() const
+    {
+        return mAppConnector.getConfig();
+    }
+
+
     // The reporting will be based on the previous
     // PEER_METRICS_WINDOW_SIZE-second time window.
     static constexpr std::chrono::seconds PEER_METRICS_WINDOW_SIZE =
