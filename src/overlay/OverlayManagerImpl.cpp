@@ -146,6 +146,7 @@ maxPreparedFromCollection(
 
 
 
+
 // Per-block consensus state
 struct TxnState {
     bool preparedSent = false;
@@ -206,6 +207,27 @@ static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
 static int pbft_start = 0;
 static int forceCollectRound = 0;
+
+
+void cleanupOldTxnStates()
+{
+    static const int MAX_HISTORY = 100;
+
+    for (auto it = g_txn.begin(); it != g_txn.end(); )
+    {
+        // BlockKey has a .view (uint64_t) field, right?
+        if (it->first.view + MAX_HISTORY < latestCommittedView)
+        {
+            it = g_txn.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+static const NodeID DUMMY_NODE_ID = NodeID(); 
 
 bool
 OverlayManagerImpl::canAcceptOutboundPeer(PeerBareAddress const& address) const
@@ -1041,6 +1063,14 @@ OverlayManagerImpl::prop()
                     hexAbbrev(blockHash), currentView);
 
 
+
+            BlockKey key{currentView, blockHash};
+            auto& st = g_txn[key];
+            g_ps.insert(key);
+
+            // Self counts as prepare voter
+            st.prepareVoters.insert(selfID);
+
             broadcastMessage(msg);
 
         }
@@ -1055,6 +1085,8 @@ OverlayManagerImpl::prop()
 
             CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
                     currentView);
+
+            
 
             broadcastMessage(msg);
         }
@@ -1582,10 +1614,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_PREPARE:
-            CLOG_INFO(Overlay, "Received PREPARE block {} at view {}",
-                      hexAbbrev(cm.blockHash), cm.view);
+            // CLOG_INFO(Overlay, "Received PREPARE block {} at view {}",
+            //           hexAbbrev(cm.blockHash), cm.view);
 
             st.prepareVoters.insert(sender);
+
+            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+                      hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
                 st.commitView = cm.view;
@@ -1621,6 +1656,44 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                           hexAbbrev(cm.blockHash), cm.view);
 
                 sendExecute(cm.view, cm.blockHash, cm.data);
+
+                // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+
+                {
+                    st.executeVoters.insert(selfID);
+                }
+
+
+                // ---- Ledger close ----
+                auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
+
+                // 1. Build a valid empty TxSet bound to LCL
+                TxSetXDRFrameConstPtr txSetFrame = TxSetXDRFrame::makeEmpty(lcl);
+
+                // 2. Ledger sequence and close time
+                uint32_t ledgerSeq = lcl.header.ledgerSeq + 1;
+                uint64_t closeTime = VirtualClock::to_time_t(mApp.getClock().system_now());
+
+                // 3. Empty upgrades (needed for the call)
+                xdr::xvector<UpgradeType, 6> upgrades;
+
+                // 4. Optional signing key (not needed here)
+                std::optional<SecretKey> noSigner = std::nullopt;
+
+                // 5. Call externalizeValue
+                mApp.getHerder().externalizeValue(
+                    txSetFrame,
+                    ledgerSeq,
+                    closeTime,
+                    upgrades,
+                    noSigner
+                );
+
+
+
+
+
+                cleanupOldTxnStates();
                 // st.executeVoters.insert(sender);
                 
                 // prop();
@@ -1629,14 +1702,15 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 // ================================================================
         case CUSTOM_EXECUTE:
-            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {}",
-                      hexAbbrev(cm.blockHash), cm.view);
+            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
+                      hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
 
             st.executeVoters.insert(sender);
 
-
+            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
+                      hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
             // Ensure we only trigger once
-            if (st.executeVoters.size() >= 2 * f + 1 && st.executedView < cm.view)
+            if (st.executeVoters.size() > 2 * f + 1 && st.executedView < cm.view)
             {
                 st.executedView = cm.view;
 
