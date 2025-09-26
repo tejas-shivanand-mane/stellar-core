@@ -904,7 +904,7 @@ OverlayManagerImpl::tick()
 
     if (pbft_start==0)
     {
-        prop();
+        // prop();
         pbft_start = 1;
     }
 
@@ -1762,7 +1762,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 cleanupOldTxnStates();
                 // st.executeVoters.insert(sender);
                 
-                // prop();
             }
             break;
 
@@ -1783,7 +1782,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_INFO(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
                         hexAbbrev(cm.blockHash), cm.view);
 
-                prop();
+                // prop();
             }
             break;
 
