@@ -607,6 +607,9 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
 #endif
 )
 {
+
+    CLOG_INFO(Herder, "recvTransaction entered");
+
     ZoneScoped;
     TransactionQueue::AddResult result(
         TransactionQueue::AddResultCode::ADD_STATUS_COUNT);
@@ -620,8 +623,16 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     bool hasClassic =
         mTransactionQueue.sourceAccountPending(tx->getSourceID()) &&
         tx->isSoroban();
+
+    CLOG_INFO(Herder, "recvTransaction Step 2");
+
+
+    
     if (hasSoroban || hasClassic)
     {
+
+        CLOG_INFO(Herder, "recvTransaction Step 2.1");
+
         CLOG_DEBUG(Herder,
                    "recv transaction {} for {} rejected due to 1 tx per source "
                    "account per ledger limit",
@@ -632,6 +643,8 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     }
     else if (!tx->isSoroban())
     {
+        CLOG_INFO(Herder, "recvTransaction Step 2.2");
+
         result = mTransactionQueue.tryAdd(tx, submittedFromSelf
 #ifdef BUILD_TESTS
                                           ,
@@ -641,6 +654,9 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     }
     else if (mSorobanTransactionQueue)
     {
+
+        CLOG_INFO(Herder, "recvTransaction Step 2.3");
+
         result = mSorobanTransactionQueue->tryAdd(tx, submittedFromSelf
 #ifdef BUILD_TESTS
                                                   ,
@@ -650,6 +666,8 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     }
     else
     {
+        CLOG_INFO(Herder, "recvTransaction Step 2.4");
+
         // Received Soroban transaction before protocol 20; since this
         // transaction isn't supported yet, return ERROR
         result = TransactionQueue::AddResult(
@@ -657,9 +675,12 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
             txNOT_SUPPORTED);
     }
 
+    CLOG_INFO(Herder, "recvTransaction Step 3");
+
+
     if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING)
     {
-        CLOG_TRACE(Herder, "recv transaction {} for {}",
+        CLOG_INFO(Herder, "recv transaction {} for {}",
                    hexAbbrev(tx->getFullHash()),
                    KeyUtils::toShortString(tx->getSourceID()));
     }

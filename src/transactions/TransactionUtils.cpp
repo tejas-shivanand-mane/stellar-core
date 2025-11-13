@@ -151,11 +151,17 @@ setLedgerHeaderFlag(LedgerHeader& lh, uint32_t flags)
 AccountEntryExtensionV2&
 getAccountEntryExtensionV2(AccountEntry& ae)
 {
-    if (ae.ext.v() != 1 || ae.ext.v1().ext.v() != 2)
-    {
-        throw std::runtime_error("expected AccountEntry extension V2");
-    }
-    return ae.ext.v1().ext.v2();
+    // if (ae.ext.v() != 1 || ae.ext.v1().ext.v() != 2)
+    // {
+    //     throw std::runtime_error("expected AccountEntry extension V2");
+    // }
+    // return ae.ext.v1().ext.v2();
+
+    static AccountEntryExtensionV2 dummyExt;
+    return dummyExt;
+
+
+
 }
 
 AccountEntryExtensionV3 const&

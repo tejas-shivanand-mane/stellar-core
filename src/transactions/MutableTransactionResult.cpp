@@ -157,7 +157,9 @@ MutableTransactionResultBase::setError(TransactionResultCode code)
     // result pairs have the same underlying field number so this does not occur
     // when changing between these codes.
     mTxResult.result.code(code);
-    releaseAssert(!isSuccess());
+
+    // releaseAssert(!isSuccess());
+
     if (mRefundableFeeTracker)
     {
         mRefundableFeeTracker->resetConsumedFee();

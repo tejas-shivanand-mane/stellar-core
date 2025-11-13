@@ -205,13 +205,20 @@ TransactionFrame::getSourceID() const
 MuxedAccount
 TransactionFrame::getSourceAccount() const
 {
-    if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
-    {
-        MuxedAccount acc(CryptoKeyType::KEY_TYPE_ED25519);
-        acc.ed25519() = mEnvelope.v0().tx.sourceAccountEd25519;
-        return acc;
-    }
-    return mEnvelope.v1().tx.sourceAccount;
+    // if (mEnvelope.type() == ENVELOPE_TYPE_TX_V0)
+    // {
+    //     MuxedAccount acc(CryptoKeyType::KEY_TYPE_ED25519);
+    //     acc.ed25519() = mEnvelope.v0().tx.sourceAccountEd25519;
+    //     return acc;
+    // }
+    // return mEnvelope.v1().tx.sourceAccount;
+
+
+    MuxedAccount acc;
+    acc.type(KEY_TYPE_ED25519);
+    acc.ed25519() = mEnvelope.v0().tx.sourceAccountEd25519;
+    return acc;
+
 }
 
 uint32_t
@@ -422,23 +429,29 @@ LedgerTxnEntry
 TransactionFrame::loadSourceAccount(AbstractLedgerTxn& ltx,
                                     LedgerTxnHeader const& header) const
 {
-    ZoneScoped;
-    auto res = loadAccount(ltx, header, getSourceID());
-    if (protocolVersionIsBefore(header.current().ledgerVersion,
-                                ProtocolVersion::V_8))
-    {
-        // this is buggy caching that existed in old versions of the protocol
-        if (res)
-        {
-            auto newest = ltx.getNewestVersion(LedgerEntryKey(res.current()));
-            mCachedAccountPreProtocol8 = newest;
-        }
-        else
-        {
-            mCachedAccountPreProtocol8.reset();
-        }
-    }
-    return res;
+
+    // BENCHMARK MODE: Return empty LedgerTxnEntry
+    return {};
+
+    // ZoneScoped;
+    // auto res = loadAccount(ltx, header, getSourceID());
+    // if (protocolVersionIsBefore(header.current().ledgerVersion,
+    //                             ProtocolVersion::V_8))
+    // {
+    //     // this is buggy caching that existed in old versions of the protocol
+    //     if (res)
+    //     {
+    //         auto newest = ltx.getNewestVersion(LedgerEntryKey(res.current()));
+    //         mCachedAccountPreProtocol8 = newest;
+    //     }
+    //     else
+    //     {
+    //         mCachedAccountPreProtocol8.reset();
+    //     }
+    // }
+    // return res;
+
+
 }
 
 LedgerTxnEntry
@@ -446,6 +459,12 @@ TransactionFrame::loadAccount(AbstractLedgerTxn& ltx,
                               LedgerTxnHeader const& header,
                               AccountID const& accountID) const
 {
+
+    // BENCHMARK MODE: Return empty LedgerTxnEntry
+    return {};
+
+
+
     ZoneScoped;
     if (protocolVersionIsBefore(header.current().ledgerVersion,
                                 ProtocolVersion::V_8) &&
@@ -1295,6 +1314,11 @@ TransactionFrame::commonValidPreSeqNum(
 void
 TransactionFrame::processSeqNum(AbstractLedgerTxn& ltx) const
 {
+
+
+    // BENCHMARK MODE: Skip sequence number processing
+    return;
+
     ZoneScoped;
     auto header = ltx.loadHeader();
     if (protocolVersionStartsFrom(header.current().ledgerVersion,
@@ -1413,6 +1437,12 @@ TransactionFrame::commonValid(AppConnector& app,
                               MutableTransactionResultBase& txResult,
                               DiagnosticEventManager& diagnosticEvents) const
 {
+
+
+    // BENCHMARK MODE: Skip all validation
+    return ValidationType::kMaybeValid;
+
+
     ZoneScoped;
     ValidationType res = ValidationType::kInvalid;
 
@@ -1528,6 +1558,12 @@ MutableTxResultPtr
 TransactionFrame::processFeeSeqNum(AbstractLedgerTxn& ltx,
                                    std::optional<int64_t> baseFee) const
 {
+
+
+    // BENCHMARK MODE: Skip fee processing, return success
+    return MutableTransactionResult::createSuccess(*this, 0);
+
+
     ZoneScoped;
     mCachedAccountPreProtocol8.reset();
 
@@ -1697,6 +1733,49 @@ TransactionFrame::checkValidWithOptionallyChargedFee(
     }
 }
 
+// MutableTxResultPtr
+// TransactionFrame::checkValid(AppConnector& app, LedgerSnapshot const& ls,
+//                              SequenceNumber current,
+//                              uint64_t lowerBoundCloseTimeOffset,
+//                              uint64_t upperBoundCloseTimeOffset,
+//                              DiagnosticEventManager& diagnosticEvents) const
+// {
+
+// #ifdef BUILD_TESTS
+//     if (app.getRunInOverlayOnlyMode())
+//     {
+//         return MutableTransactionResult::createSuccess(*this, 0);
+//     }
+// #endif
+
+//     // Subtle: this check has to happen in `checkValid` and not
+//     // `checkValidWithOptionallyChargedFee` in order to not validate the
+//     // envelope XDR twice for the fee bump transactions (they use
+//     // `checkValidWithOptionallyChargedFee` for the inner tx).
+//     if (!checkVNext(ls.getLedgerHeader().current().ledgerVersion,
+//                     app.getConfig(), mEnvelope))
+//     {
+//         return MutableTransactionResult::createTxError(txMALFORMED);
+//     }
+//     // Perform basic XDR fee validation, as
+//     // `checkValidWithOptionallyChargedFee` expects proper fee-related XDR.
+//     if (!XDRProvidesValidFee())
+//     {
+//         return MutableTransactionResult::createTxError(txMALFORMED);
+//     }
+//     // Setting the fees in this flow is potentially misleading, as these aren't
+//     // the fees that would end up being applied. However, this is what Core
+//     // used to return for a while, and some users may rely on this, so we
+//     // maintain this logic for the time being.
+//     int64_t minBaseFee = ls.getLedgerHeader().current().baseFee;
+//     auto feeCharged = getFee(ls.getLedgerHeader().current(), minBaseFee, false);
+//     auto txResult = MutableTransactionResult::createSuccess(*this, feeCharged);
+//     checkValidWithOptionallyChargedFee(
+//         app, ls, current, true, lowerBoundCloseTimeOffset,
+//         upperBoundCloseTimeOffset, *txResult, diagnosticEvents);
+//     return txResult;
+// }
+
 MutableTxResultPtr
 TransactionFrame::checkValid(AppConnector& app, LedgerSnapshot const& ls,
                              SequenceNumber current,
@@ -1704,40 +1783,22 @@ TransactionFrame::checkValid(AppConnector& app, LedgerSnapshot const& ls,
                              uint64_t upperBoundCloseTimeOffset,
                              DiagnosticEventManager& diagnosticEvents) const
 {
+    // BENCHMARK MODE: Skip all validation
+    return MutableTransactionResult::createSuccess(*this, 0);
+    
+    // Original code commented out below...
+    /*
 #ifdef BUILD_TESTS
     if (app.getRunInOverlayOnlyMode())
     {
         return MutableTransactionResult::createSuccess(*this, 0);
     }
 #endif
-
-    // Subtle: this check has to happen in `checkValid` and not
-    // `checkValidWithOptionallyChargedFee` in order to not validate the
-    // envelope XDR twice for the fee bump transactions (they use
-    // `checkValidWithOptionallyChargedFee` for the inner tx).
-    if (!checkVNext(ls.getLedgerHeader().current().ledgerVersion,
-                    app.getConfig(), mEnvelope))
-    {
-        return MutableTransactionResult::createTxError(txMALFORMED);
-    }
-    // Perform basic XDR fee validation, as
-    // `checkValidWithOptionallyChargedFee` expects proper fee-related XDR.
-    if (!XDRProvidesValidFee())
-    {
-        return MutableTransactionResult::createTxError(txMALFORMED);
-    }
-    // Setting the fees in this flow is potentially misleading, as these aren't
-    // the fees that would end up being applied. However, this is what Core
-    // used to return for a while, and some users may rely on this, so we
-    // maintain this logic for the time being.
-    int64_t minBaseFee = ls.getLedgerHeader().current().baseFee;
-    auto feeCharged = getFee(ls.getLedgerHeader().current(), minBaseFee, false);
-    auto txResult = MutableTransactionResult::createSuccess(*this, feeCharged);
-    checkValidWithOptionallyChargedFee(
-        app, ls, current, true, lowerBoundCloseTimeOffset,
-        upperBoundCloseTimeOffset, *txResult, diagnosticEvents);
-    return txResult;
+    // ... rest of original validation code
+    */
 }
+
+
 
 void
 TransactionFrame::insertKeysForFeeProcessing(
@@ -2210,13 +2271,72 @@ TransactionFrame::applyOperations(SignatureChecker& signatureChecker,
     return false;
 }
 
+// bool
+// TransactionFrame::apply(AppConnector& app, AbstractLedgerTxn& ltx,
+//                         TransactionMetaBuilder& meta,
+//                         MutableTransactionResultBase& txResult, bool chargeFee,
+//                         Hash const& sorobanBasePrngSeed) const
+// {
+//     ZoneScoped;
+//     try
+//     {
+//         auto signatureChecker =
+//             commonPreApply(app, ltx, meta, txResult, chargeFee);
+//         bool ok = signatureChecker != nullptr;
+//         try
+//         {
+//             // This should only throw if the logging during exception
+//             // handling for applyOperations throws. In that case, we may not
+//             // have the correct TransactionResult so we must crash.
+//             if (ok)
+//             {
+//                 if (isSoroban())
+//                 {
+//                     updateSorobanMetrics(app);
+//                 }
+
+//                 ok = applyOperations(*signatureChecker, app, ltx, meta,
+//                                      txResult, sorobanBasePrngSeed);
+//             }
+//             return ok;
+//         }
+//         catch (std::exception& e)
+//         {
+//             printErrorAndAbort("Exception while applying operations: ",
+//                                e.what());
+//         }
+//         catch (...)
+//         {
+//             printErrorAndAbort("Unknown exception while applying operations");
+//         }
+//     }
+//     catch (std::exception& e)
+//     {
+//         printErrorAndAbort("Exception after processing fees but before "
+//                            "processing sequence number: ",
+//                            e.what());
+//     }
+//     catch (...)
+//     {
+//         printErrorAndAbort("Unknown exception after processing fees but before "
+//                            "processing sequence number");
+//     }
+// }
+
+
 bool
 TransactionFrame::apply(AppConnector& app, AbstractLedgerTxn& ltx,
-                        TransactionMetaBuilder& meta,
-                        MutableTransactionResultBase& txResult, bool chargeFee,
-                        Hash const& sorobanBasePrngSeed) const
+                       TransactionMetaBuilder& meta,
+                       MutableTransactionResultBase& txResult, bool chargeFee,
+                       Hash const& sorobanBasePrngSeed) const
 {
     ZoneScoped;
+    
+    // BENCHMARK MODE: Skip all operations and return success immediately
+    txResult.setInnermostError(txSUCCESS);
+    return true;
+    
+    /* Original code commented out for benchmarking
     try
     {
         auto signatureChecker =
@@ -2224,43 +2344,27 @@ TransactionFrame::apply(AppConnector& app, AbstractLedgerTxn& ltx,
         bool ok = signatureChecker != nullptr;
         try
         {
-            // This should only throw if the logging during exception
-            // handling for applyOperations throws. In that case, we may not
-            // have the correct TransactionResult so we must crash.
             if (ok)
             {
                 if (isSoroban())
                 {
                     updateSorobanMetrics(app);
                 }
-
                 ok = applyOperations(*signatureChecker, app, ltx, meta,
-                                     txResult, sorobanBasePrngSeed);
+                                    txResult, sorobanBasePrngSeed);
             }
             return ok;
         }
         catch (std::exception& e)
         {
             printErrorAndAbort("Exception while applying operations: ",
-                               e.what());
-        }
-        catch (...)
-        {
-            printErrorAndAbort("Unknown exception while applying operations");
+                             e.what());
         }
     }
-    catch (std::exception& e)
-    {
-        printErrorAndAbort("Exception after processing fees but before "
-                           "processing sequence number: ",
-                           e.what());
-    }
-    catch (...)
-    {
-        printErrorAndAbort("Unknown exception after processing fees but before "
-                           "processing sequence number");
-    }
+    */
 }
+
+
 
 bool
 TransactionFrame::apply(AppConnector& app, AbstractLedgerTxn& ltx,

@@ -36,6 +36,598 @@
 #include <algorithm>
 #include "OverlayManagerImpl.h"
 
+// ============================================================================
+// SCP TRANSACTION TRACKING
+// ============================================================================
+
+// struct SCPTxnStats {
+//     int totalSubmitted = 0;
+//     int totalCommitted = 0;
+//     std::vector<int64_t> txLatencies;
+//     std::unordered_map<Hash, std::chrono::steady_clock::time_point> submitTimes;
+//     std::chrono::steady_clock::time_point testStart;
+// };
+
+
+struct SCPTxnStats {
+    int totalSubmitted = 0;
+    int totalCommitted = 0;
+    int totalOperations = 0;  // ADD THIS - track total operations
+    std::vector<int64_t> txLatencies;
+    std::unordered_map<Hash, std::chrono::steady_clock::time_point> submitTimes;
+    std::chrono::steady_clock::time_point testStart;
+};
+
+
+static SCPTxnStats g_scpTxnStats;
+
+static std::unordered_map<std::string, uint64_t> g_accountSequences;
+static bool g_accountInitialized = false;
+static bool g_accountCreationSubmitted = false;
+
+
+
+static const int NUM_TEST_ACCOUNTS = 50;
+static std::vector<SecretKey> g_testAccounts;
+static std::vector<std::string> g_testAccountKeys;
+static bool g_multiAccountsInitialized = false;
+
+// Check if account exists in the ledger (visible to all nodes)
+bool accountExistsInLedger(Application& app, PublicKey const& pk)
+{
+    try
+    {
+        LedgerTxn ltx(app.getLedgerTxnRoot());
+        auto acc = stellar::loadAccount(ltx, pk);
+        bool exists = (bool)acc;  // Convert to bool instead of comparing to nullptr
+        ltx.commit();
+        return exists;
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+// Create account through a CREATE_ACCOUNT transaction (goes through SCP)
+void submitAccountCreationTransaction(Application& app)
+{
+    if (g_accountCreationSubmitted)
+        return;
+    
+    CLOG_INFO(Overlay, "[SCP TXN] Submitting account creation transaction...");
+    
+    // You need a "root" account that already exists with funds
+    // In Stellar testnet/local, this is usually a pre-funded account
+    // For this example, we'll assume NODE_SEED itself has funds initially
+    // If not, you'll need to use a genesis account or create accounts in genesis ledger
+    
+    auto source = app.getConfig().NODE_SEED;
+    auto pk = source.getPublicKey();
+    
+    // Check if already exists
+    if (accountExistsInLedger(app, pk))
+    {
+        CLOG_INFO(Overlay, "[SCP TXN] Account already exists in ledger");
+        g_accountCreationSubmitted = true;
+        return;
+    }
+    
+    // For now, create it directly (this is the problem!)
+    // In production, you'd need to use a CREATE_ACCOUNT operation
+    // from an account that already has funds
+    try
+    {
+        std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
+        AccountID accountID;
+        accountID.ed25519() = pk.ed25519();
+        
+        LedgerTxn ltx(app.getLedgerTxnRoot());
+        auto acc = stellar::loadAccount(ltx, pk);
+        
+        if (!acc)
+        {
+            // Create the account directly (NOT through SCP - this is the issue!)
+            LedgerEntry le;
+            le.data.type(ACCOUNT);
+            le.data.account().accountID = accountID;
+            le.data.account().balance = 1000000000000LL; // 100,000 XLM
+            le.data.account().seqNum = 1;
+            le.data.account().numSubEntries = 0;
+            le.data.account().flags = 0;
+            le.data.account().homeDomain.clear();
+            le.data.account().inflationDest.activate() = {};
+            
+            ltx.create(le);
+            ltx.commit();
+            
+            CLOG_WARNING(Overlay, "[SCP TXN] Created account {} LOCALLY (not through consensus!)", 
+                     accountKey);
+            CLOG_WARNING(Overlay, "[SCP TXN] This account will NOT be visible to other nodes!");
+            CLOG_WARNING(Overlay, "[SCP TXN] For proper testing, pre-create accounts in genesis or use CREATE_ACCOUNT tx");
+        }
+        
+        g_accountCreationSubmitted = true;
+    }
+    catch (std::exception const& e)
+    {
+        CLOG_ERROR(Overlay, "[SCP TXN] Failed to create account: {}", e.what());
+    }
+}
+
+// Initialize sequence tracking once account exists
+void initializeSequenceTracking(Application& app)
+{
+    if (g_accountInitialized)
+        return;
+    
+    auto source = app.getConfig().NODE_SEED;
+    auto pk = source.getPublicKey();
+    std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
+    
+    try
+    {
+        LedgerTxn ltx(app.getLedgerTxnRoot());
+        auto acc = stellar::loadAccount(ltx, pk);
+        
+        if (acc)
+        {
+            uint64_t currentSeq = acc.current().data.account().seqNum;
+            g_accountSequences[accountKey] = currentSeq + 1;
+            ltx.commit();
+            
+            CLOG_INFO(Overlay, "[SCP TXN] Initialized sequence tracking at {}", currentSeq + 1);
+            g_accountInitialized = true;
+        }
+        else
+        {
+            CLOG_WARNING(Overlay, "[SCP TXN] Account doesn't exist yet in ledger");
+        }
+    }
+    catch (std::exception const& e)
+    {
+        CLOG_ERROR(Overlay, "[SCP TXN] Failed to initialize sequence: {}", e.what());
+    }
+}
+
+
+void initializeMultipleAccounts(Application& app)
+{
+    if (g_multiAccountsInitialized)
+        return;
+    
+    CLOG_INFO(Overlay, "[Multi-Account] Initializing {} test accounts", NUM_TEST_ACCOUNTS);
+    
+    g_testAccounts.clear();
+    g_testAccountKeys.clear();
+    
+    for (int i = 0; i < NUM_TEST_ACCOUNTS; i++)
+    {
+        // Generate deterministic keys based on NODE_SEED + index
+        auto baseSeed = app.getConfig().NODE_SEED;
+        std::string seedStr = baseSeed.getStrKeyPublic() + std::to_string(i);
+        Hash seedHash = sha256(std::vector<uint8_t>(seedStr.begin(), seedStr.end()));
+        SecretKey accountKey = SecretKey::fromSeed(seedHash);
+        
+        g_testAccounts.push_back(accountKey);
+        
+        auto pk = accountKey.getPublicKey();
+        std::string accountKeyStr = KeyUtils::toStrKey<PublicKey>(pk);
+        g_testAccountKeys.push_back(accountKeyStr);
+        
+        // Check if account exists in ledger
+        if (accountExistsInLedger(app, pk))
+        {
+            // Initialize sequence tracking
+            try
+            {
+                LedgerTxn ltx(app.getLedgerTxnRoot());
+                auto acc = stellar::loadAccount(ltx, pk);
+                if (acc)
+                {
+                    uint64_t currentSeq = acc.current().data.account().seqNum;
+                    g_accountSequences[accountKeyStr] = currentSeq + 1;
+                    CLOG_INFO(Overlay, "[Multi-Account] Account {} initialized with seq={}", 
+                             i, currentSeq + 1);
+                }
+                ltx.commit();
+            }
+            catch (std::exception const& e)
+            {
+                CLOG_ERROR(Overlay, "[Multi-Account] Failed to init account {}: {}", i, e.what());
+            }
+        }
+        else
+        {
+            // Create account locally (same as your existing approach)
+            CLOG_WARNING(Overlay, "[Multi-Account] Account {} doesn't exist, creating locally", i);
+            
+            AccountID accountID;
+            accountID.ed25519() = pk.ed25519();
+            
+            try
+            {
+                LedgerTxn ltx(app.getLedgerTxnRoot());
+                
+                LedgerEntry le;
+                le.data.type(ACCOUNT);
+                le.data.account().accountID = accountID;
+                le.data.account().balance = 1000000000000LL;
+                le.data.account().seqNum = 1;
+                le.data.account().numSubEntries = 0;
+                le.data.account().flags = 0;
+                le.data.account().homeDomain.clear();
+                le.data.account().inflationDest.activate() = {};
+                
+                ltx.create(le);
+                ltx.commit();
+                
+                g_accountSequences[accountKeyStr] = 2;
+                CLOG_INFO(Overlay, "[Multi-Account] Created account {} locally", i);
+            }
+            catch (std::exception const& e)
+            {
+                CLOG_ERROR(Overlay, "[Multi-Account] Failed to create account {}: {}", i, e.what());
+            }
+        }
+    }
+    
+    g_multiAccountsInitialized = true;
+    CLOG_INFO(Overlay, "[Multi-Account] Initialization complete");
+}
+
+
+TransactionEnvelope
+makeBatchedPaymentTx(Application& app, SecretKey const& source,
+                     SequenceNumber seqNum, int numOps = 100)
+{
+    auto pk = source.getPublicKey();
+    std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
+    
+    // Build AccountID from PublicKey
+    AccountID accountID;
+    accountID.ed25519() = pk.ed25519();
+
+    // Get next sequence from tracker
+    if (!g_accountSequences.count(accountKey))
+    {
+        g_accountSequences[accountKey] = 0;
+    }
+    
+    uint64_t nextSeq = g_accountSequences[accountKey]++;
+
+    // Fee: base fee × number of operations
+    uint32_t baseFeePerOp = app.getLedgerManager().getLastTxFee();
+    uint32_t fee = std::max<uint32_t>(baseFeePerOp * numOps, 100u * numOps);
+
+    // Wrap AccountID into MuxedAccount
+    MuxedAccount muxSource;
+    muxSource.ed25519() = accountID.ed25519();
+
+    MuxedAccount muxDest;
+    muxDest.ed25519() = accountID.ed25519();
+
+    // Build transaction with multiple operations
+    Transaction tx;
+    tx.sourceAccount = muxSource;
+    tx.fee = fee;
+    tx.seqNum = nextSeq;
+    tx.memo.type(MEMO_NONE);
+
+    // Add numOps payment operations
+    for (int i = 0; i < numOps; i++)
+    {
+        PaymentOp pay;
+        pay.destination = muxDest;
+        pay.asset.type(ASSET_TYPE_NATIVE);
+        pay.amount = 1; // 1 stroop per operation
+
+        Operation op;
+        op.body.type(PAYMENT);
+        op.body.paymentOp() = pay;
+        
+        tx.operations.push_back(op);
+    }
+
+    // Envelope (v1)
+    TransactionEnvelope env;
+    env.type(ENVELOPE_TYPE_TX);
+    env.v1().tx = tx;
+
+    // Sign
+    TransactionSignaturePayload payload;
+    payload.networkId = app.getNetworkID();
+    payload.taggedTransaction.type(ENVELOPE_TYPE_TX);
+    payload.taggedTransaction.tx() = tx;
+
+    Hash txHash = sha256(xdr::xdr_to_opaque(payload));
+
+    DecoratedSignature sig;
+    auto const& pkBytes = pk.ed25519();
+    std::memcpy(sig.hint.data(),
+                pkBytes.data() + (pkBytes.size() - sig.hint.size()),
+                sig.hint.size());
+    sig.signature = source.sign(txHash);
+    env.v1().signatures.push_back(sig);
+
+    return env;
+}
+
+
+void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int batchSize = 100)
+{
+    static std::vector<int> txCounters(NUM_TEST_ACCOUNTS, 0);
+    
+    // Validate account index
+    if (accountIndex < 0 || accountIndex >= NUM_TEST_ACCOUNTS)
+    {
+        CLOG_ERROR(Overlay, "[SCP BATCH] Invalid account index: {}", accountIndex);
+        return;
+    }
+    
+    if (!g_multiAccountsInitialized)
+    {
+        CLOG_ERROR(Overlay, "[SCP BATCH] Multi-account system not initialized!");
+        return;
+    }
+    
+    try
+    {
+        auto source = g_testAccounts[accountIndex];
+        auto env = makeBatchedPaymentTx(app, source, txCounters[accountIndex] + 1, batchSize);
+        
+        auto txFrame = TransactionFrameBase::makeTransactionFromWire(
+            app.getNetworkID(), env);
+        
+        if (txFrame)
+        {
+            Hash txHash = txFrame->getFullHash();
+            
+            // Track submission time
+            g_scpTxnStats.submitTimes[txHash] = std::chrono::steady_clock::now();
+            
+            auto result = app.getHerder().recvTransaction(txFrame, true);
+            
+            if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING)
+            {
+                g_scpTxnStats.totalSubmitted++;
+                g_scpTxnStats.totalOperations += batchSize;  // Track operations
+                CLOG_INFO(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
+                          accountIndex, batchSize, hexAbbrev(txHash));
+                txCounters[accountIndex]++;
+            }
+            else if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_DUPLICATE)
+            {
+                CLOG_DEBUG(Overlay, "[SCP BATCH] Batched tx from account {} duplicate, skipping", accountIndex);
+                txCounters[accountIndex]++;
+            }
+            else
+            {
+                CLOG_WARNING(Overlay, "[SCP BATCH] Batched tx from account {} (hash={}) rejected - Result={}", 
+                            accountIndex, hexAbbrev(txHash), static_cast<int>(result.code));
+            }
+        }
+    }
+    catch (std::exception& e)
+    {
+        CLOG_ERROR(Overlay, "[SCP BATCH] Exception for account {}: {}", accountIndex, e.what());
+    }
+}
+
+TransactionEnvelope
+makeDummyPaymentTx(Application& app, SecretKey const& source,
+                   SequenceNumber /*seqArg*/)
+{
+    auto pk = source.getPublicKey();
+    std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
+    
+    // Build AccountID from PublicKey
+    AccountID accountID;
+    accountID.ed25519() = pk.ed25519();
+
+    // Get next sequence from tracker
+    if (!g_accountSequences.count(accountKey))
+    {
+        // throw std::runtime_error("Account not initialized - sequence tracking not ready");
+        g_accountSequences[accountKey] = 0;
+    }
+    
+    uint64_t nextSeq = g_accountSequences[accountKey]++;
+
+    // Fee
+    uint32_t baseFeePerOp = app.getLedgerManager().getLastTxFee();
+    uint32_t fee = std::max<uint32_t>(baseFeePerOp, 100u);
+
+    // Wrap AccountID into MuxedAccount
+    MuxedAccount muxSource;
+    muxSource.ed25519() = accountID.ed25519();
+
+    MuxedAccount muxDest;
+    muxDest.ed25519() = accountID.ed25519();
+
+    // Build a simple self-payment
+    Transaction tx;
+    tx.sourceAccount = muxSource;
+    tx.fee           = fee;
+    tx.seqNum        = nextSeq;
+    tx.memo.type(MEMO_NONE);
+
+    PaymentOp pay;
+    pay.destination = muxDest;
+    pay.asset.type(ASSET_TYPE_NATIVE);
+    pay.amount = 1; // 1 stroop
+
+    Operation op;
+    op.body.type(PAYMENT);
+    op.body.paymentOp() = pay;
+    tx.operations.push_back(op);
+
+    // Envelope (v1)
+    TransactionEnvelope env;
+    env.type(ENVELOPE_TYPE_TX);
+    env.v1().tx = tx;
+
+    // Sign
+    TransactionSignaturePayload payload;
+    payload.networkId = app.getNetworkID();
+    payload.taggedTransaction.type(ENVELOPE_TYPE_TX);
+    payload.taggedTransaction.tx() = tx;
+
+    Hash txHash = sha256(xdr::xdr_to_opaque(payload));
+
+    DecoratedSignature sig;
+    auto const& pkBytes = pk.ed25519();
+    std::memcpy(sig.hint.data(),
+                pkBytes.data() + (pkBytes.size() - sig.hint.size()),
+                sig.hint.size());
+    sig.signature = source.sign(txHash);
+    env.v1().signatures.push_back(sig);
+
+    return env;
+}
+
+void submitTransactionToSCP(Application& app, int accountIndex = 0)
+{
+    static std::vector<int> txCounters(NUM_TEST_ACCOUNTS, 0);
+    
+    // Validate account index
+    if (accountIndex < 0 || accountIndex >= NUM_TEST_ACCOUNTS)
+    {
+        CLOG_ERROR(Overlay, "[SCP TXN] Invalid account index: {}", accountIndex);
+        return;
+    }
+    
+    if (!g_multiAccountsInitialized)
+    {
+        CLOG_ERROR(Overlay, "[SCP TXN] Multi-account system not initialized!");
+        return;
+    }
+    
+    try
+    {
+        auto source = g_testAccounts[accountIndex];
+        auto env = makeDummyPaymentTx(app, source, txCounters[accountIndex] + 1);
+        
+        auto txFrame = TransactionFrameBase::makeTransactionFromWire(
+            app.getNetworkID(), env);
+        
+        if (txFrame)
+        {
+            Hash txHash = txFrame->getFullHash();
+            
+            // Track submission time
+            g_scpTxnStats.submitTimes[txHash] = std::chrono::steady_clock::now();
+            
+            auto result = app.getHerder().recvTransaction(txFrame, true);
+            
+            if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING)
+            {
+                g_scpTxnStats.totalSubmitted++;
+                CLOG_INFO(Overlay, "[SCP TXN] Submitted tx from account {} (tx #{}, hash={}) - PENDING", 
+                          accountIndex, txCounters[accountIndex], hexAbbrev(txHash));
+                txCounters[accountIndex]++;
+            }
+            else if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_DUPLICATE)
+            {
+                CLOG_DEBUG(Overlay, "[SCP TXN] Tx from account {} duplicate, skipping", accountIndex);
+                txCounters[accountIndex]++;
+            }
+            else
+            {
+                CLOG_WARNING(Overlay, "[SCP TXN] Tx from account {} (hash={}) rejected - Result={}", 
+                            accountIndex, hexAbbrev(txHash), static_cast<int>(result.code));
+            }
+        }
+    }
+    catch (std::exception& e)
+    {
+        CLOG_ERROR(Overlay, "[SCP TXN] Exception for account {}: {}", accountIndex, e.what());
+    }
+}
+
+
+
+
+// Helper: MuxedAccount from PublicKey
+static MuxedAccount toMuxed(PublicKey const& pk) {
+    MuxedAccount m;
+    m.ed25519() = pk.ed25519();  // Direct assignment — no type() call
+    return m;
+}
+
+
+// void ensureDummyAccount(Application& app, PublicKey const& pk)
+// {
+//     LedgerTxn ltx(app.getLedgerTxnRoot());
+
+//     // Try to load existing account
+//     auto acc = stellar::loadAccountWithoutRecord(ltx, pk);
+//     if (!acc)
+//     {
+//         // Create new dummy account entry
+//         LedgerEntry le;
+//         le.data.type(ACCOUNT);
+//         le.data.account().accountID = pk;
+//         le.data.account().balance = 1000000000;   // 1000 XLM
+//         le.data.account().seqNum  = 1;            // minimal valid seq
+//         le.data.account().numSubEntries = 0;
+//         le.data.account().flags = 0;
+//         le.data.account().homeDomain.clear();
+//         le.data.account().inflationDest.activate() = {};
+
+//         {
+//             ltx.create(le);
+//             ltx.commit();
+//         }
+//         // Force immediate persistence
+//         app.getLedgerTxnRoot().commit();
+
+//         CLOG_INFO(Overlay, "[SCP TXN] Created dummy account {}", KeyUtils::toStrKey<PublicKey>(pk));
+//     }
+// }
+
+std::optional<uint64_t>
+ensureAccountAndGetSeq(Application& app, PublicKey const& pk, bool createIfMissing)
+{
+    LedgerTxn ltx(app.getLedgerTxnRoot());
+    auto acc = stellar::loadAccountWithoutRecord(ltx, pk);
+
+    if (!acc)
+    {
+        if (!createIfMissing)
+            return std::nullopt;
+
+        LedgerEntry le;
+        le.data.type(ACCOUNT);
+        le.data.account().accountID = pk;
+        le.data.account().balance = 1000000000; // 1000 XLM
+        le.data.account().seqNum  = 1;
+        le.data.account().numSubEntries = 0;
+        le.data.account().flags = 0;
+        le.data.account().homeDomain.clear();
+        le.data.account().inflationDest.activate() = {};
+
+        ltx.create(le);
+        CLOG_INFO(Overlay, "[SCP TXN] Created dummy account {}", KeyUtils::toStrKey<PublicKey>(pk));
+        acc = stellar::loadAccountWithoutRecord(ltx, pk);
+        if (!acc)
+            throw std::runtime_error("ensureAccountAndGetSeq: failed reload");
+    }
+
+    uint64_t seq = acc.current().data.account().seqNum;
+    ltx.commit();    // ✅ commit the whole thing once
+    return seq;
+}
+
+static bool USE_STELLAR_SCP = false;
+// For tracking SCP transactions
+static std::unordered_map<Hash, std::chrono::steady_clock::time_point> g_scpSubmitTimes;
+static std::unordered_map<Hash, uint64_t> g_scpTxToView;  // Map tx hash to view
+static uint64_t g_scpSequenceNumber = 1;
+
+
+
+
 
 static Hash
 makeBlock(Hash const& prev, int txnCount)
@@ -229,55 +821,395 @@ void cleanupOldTxnStates()
 }
 
 
-TransactionEnvelope makeDummyPaymentTx(Application& app, SecretKey const& source, SequenceNumber seq)
+
+
+
+
+
+
+
+
+
+
+
+
+TransactionEnvelope createSCPTxFromProposal(
+    Application& app,
+    SecretKey const& source,
+    SequenceNumber seq,
+    uint64_t view,
+    Hash const& blockHash,
+    std::string const& data)
 {
-    // 1. Build TransactionV0
+    // Build TransactionV0
     TransactionV0 tx;
     tx.sourceAccountEd25519 = source.getPublicKey().ed25519();
-    tx.fee = 100; // minimal fee
+    tx.fee = 100;
     tx.seqNum = seq;
-
-    // Payment operation
-    PaymentOp op;
-    op.destination.ed25519() = source.getPublicKey().ed25519();
-
-    Asset asset;
-    asset.type(ASSET_TYPE_NATIVE);
-    op.asset = asset;
-    op.amount = 10000000; // 1 XLM
-
-    Operation operation;
-    operation.body.type(PAYMENT);
-    operation.body.paymentOp() = op;
-
-    tx.operations.push_back(operation);
-
-    // Optional: no time bounds
+    
+    // Use ManageData operation to store proposal data
+    ManageDataOp dataOp;
+    dataOp.dataName = "prop_" + std::to_string(view);
+    
+    // Serialize proposal: view|blockHash|data
+    DataValue dataVal;
+    std::string serialized = std::to_string(view) + "|" +
+                            binToHex(blockHash) + "|" +
+                            data;
+    dataVal.assign(serialized.begin(), serialized.end());
+    dataOp.dataValue.activate() = dataVal;
+    
+    Operation op;
+    op.body.type(MANAGE_DATA);
+    op.body.manageDataOp() = dataOp;
+    tx.operations.push_back(op);
+    
     tx.timeBounds.activate() = {};
-
-    // 2. Wrap in v0 envelope
+    
+    // Wrap in envelope
     TransactionEnvelope env(ENVELOPE_TYPE_TX_V0);
     env.v0().tx = tx;
-
-    // 3. Hash and sign
-    // 3. Hash and sign
+    
+    // Sign
     Hash txHash = sha256(xdr::xdr_to_opaque(env.v0().tx));
-
     DecoratedSignature sig;
-
-    // Get raw ed25519 public key
     auto const& pubkey = source.getPublicKey().ed25519();
-
-    // Copy last 4 bytes into hint
-    std::memcpy(sig.hint.data(), pubkey.data() + (pubkey.size() - sig.hint.size()), sig.hint.size());
-
+    std::memcpy(sig.hint.data(), 
+                pubkey.data() + (pubkey.size() - sig.hint.size()), 
+                sig.hint.size());
     sig.signature = source.sign(txHash);
-
     env.v0().signatures.push_back(sig);
-
+    
     return env;
 }
 
+// Submit proposal through SCP
+void submitProposalThroughSCP(
+    Application& app,
+    uint64_t view,
+    Hash const& blockHash,
+    std::string const& data)
+{
+    auto source = app.getConfig().NODE_SEED;
+    auto seq = g_scpSequenceNumber++;
+    
+    // Create transaction
+    auto txEnv = createSCPTxFromProposal(app, source, seq, view, blockHash, data);
+    
+    // Create transaction frame
+    auto txFrame = TransactionFrameBase::makeTransactionFromWire(
+        app.getNetworkID(), txEnv);
+    
+    if (!txFrame)
+    {
+        CLOG_ERROR(Overlay, "Failed to create SCP transaction frame");
+        return;
+    }
+    
+    Hash txHash = txFrame->getFullHash();
+    
+    // Track submission time for performance measurement
+    g_scpSubmitTimes[txHash] = std::chrono::steady_clock::now();
+    g_scpTxToView[txHash] = view;
+    
+    // Submit to Herder (goes through SCP consensus)
+    auto addResult = app.getHerder().recvTransaction(txFrame, false);
+    
+    CLOG_INFO(Overlay, 
+              "[SCP MODE] Submitted proposal (view={}, block={}) as transaction {} - Status: {}",
+              view, hexAbbrev(blockHash), hexAbbrev(txHash),
+              addResult.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING ? "PENDING" : "DUPLICATE/ERROR");
+}
+
+
+static bool ENABLE_SCP_TEST = true;
+
+
+
+
+
+
+void testSCPDirectly(Application& app)
+{
+    static int counter = 0;
+    
+    try
+    {
+        // Use your existing working function!
+        auto env = makeDummyPaymentTx(app, app.getConfig().NODE_SEED, counter + 1);
+        
+        auto txFrame = TransactionFrameBase::makeTransactionFromWire(
+            app.getNetworkID(), env);
+        
+        if (txFrame)
+        {
+            CLOG_INFO(Overlay, "[TEST SCP] receiving tx #{}", counter);
+
+            app.getHerder().recvTransaction(txFrame, true);
+            CLOG_INFO(Overlay, "[TEST SCP] Submitted tx #{}", counter);
+            counter++;
+        }
+    }
+    catch (std::exception& e)
+    {
+        CLOG_ERROR(Overlay, "[TEST SCP] Error: {}", e.what());
+    }
+}
+
+struct ConsensusMetrics {
+    int customRounds = 0;
+    int scpRounds = 0;
+    std::vector<int64_t> customLatencies;
+    std::vector<int64_t> scpLatencies;
+};
+
+static ConsensusMetrics g_metrics;
+
+// Trigger SCP consensus directly (no transactions)
+void triggerSCPConsensus(Application& app)
+{
+    auto startTime = std::chrono::steady_clock::now();
+    
+    try
+    {
+        // Create empty transaction set
+        auto const& lcl = app.getLedgerManager().getLastClosedLedgerHeader();
+        TransactionSet txSet;
+        txSet.previousLedgerHash = lcl.hash;
+        auto txSetFrame = TxSetXDRFrame::makeFromWire(txSet);
+        
+        // Make it unique
+        Hash h = sha256("scp_consensus_" + std::to_string(g_metrics.scpRounds));
+        const_cast<Hash&>(txSetFrame->getContentsHash()) = h;
+        
+        // Trigger SCP consensus
+        app.getHerder().externalizeValue(
+            txSetFrame,
+            lcl.header.ledgerSeq + 1,
+            VirtualClock::to_time_t(app.getClock().system_now()),
+            {},
+            std::nullopt
+        );
+        
+        auto endTime = std::chrono::steady_clock::now();
+        auto latencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            endTime - startTime).count();
+        
+        g_metrics.scpRounds++;
+        g_metrics.scpLatencies.push_back(latencyMs);
+        
+        CLOG_INFO(Overlay, "[SCP CONSENSUS] Round #{} latency={}ms", 
+                  g_metrics.scpRounds, latencyMs);
+    }
+    catch (std::exception& e)
+    {
+        CLOG_ERROR(Overlay, "[SCP CONSENSUS] Exception: {}", e.what());
+    }
+}
+
+// Print comparison statistics
+void printConsensusComparison()
+{
+    if (g_metrics.customLatencies.empty() && g_metrics.scpLatencies.empty())
+    {
+        CLOG_INFO(Overlay, "No consensus data collected yet");
+        return;
+    }
+    
+    CLOG_INFO(Overlay, "========================================");
+    CLOG_INFO(Overlay, "CONSENSUS COMPARISON STATISTICS");
+    CLOG_INFO(Overlay, "========================================");
+    
+    if (!g_metrics.customLatencies.empty())
+    {
+        int64_t customSum = 0;
+        for (auto latency : g_metrics.customLatencies)
+        {
+            customSum += latency;
+        }
+        double customAvg = static_cast<double>(customSum) / g_metrics.customLatencies.size();
+        
+        int64_t customMin = *std::min_element(g_metrics.customLatencies.begin(), 
+                                              g_metrics.customLatencies.end());
+        int64_t customMax = *std::max_element(g_metrics.customLatencies.begin(), 
+                                              g_metrics.customLatencies.end());
+        
+        CLOG_INFO(Overlay, "Custom Protocol:");
+        CLOG_INFO(Overlay, "  Rounds: {}", g_metrics.customRounds);
+        CLOG_INFO(Overlay, "  Avg Latency: {:.2f} ms", customAvg);
+        CLOG_INFO(Overlay, "  Min Latency: {} ms", customMin);
+        CLOG_INFO(Overlay, "  Max Latency: {} ms", customMax);
+    }
+    else
+    {
+        CLOG_INFO(Overlay, "Custom Protocol: No data");
+    }
+    
+    CLOG_INFO(Overlay, "----------------------------------------");
+    
+    if (!g_metrics.scpLatencies.empty())
+    {
+        int64_t scpSum = 0;
+        for (auto latency : g_metrics.scpLatencies)
+        {
+            scpSum += latency;
+        }
+        double scpAvg = static_cast<double>(scpSum) / g_metrics.scpLatencies.size();
+        
+        int64_t scpMin = *std::min_element(g_metrics.scpLatencies.begin(), 
+                                           g_metrics.scpLatencies.end());
+        int64_t scpMax = *std::max_element(g_metrics.scpLatencies.begin(), 
+                                           g_metrics.scpLatencies.end());
+        
+        CLOG_INFO(Overlay, "Stellar SCP:");
+        CLOG_INFO(Overlay, "  Rounds: {}", g_metrics.scpRounds);
+        CLOG_INFO(Overlay, "  Avg Latency: {:.2f} ms", scpAvg);
+        CLOG_INFO(Overlay, "  Min Latency: {} ms", scpMin);
+        CLOG_INFO(Overlay, "  Max Latency: {} ms", scpMax);
+        
+        if (!g_metrics.customLatencies.empty())
+        {
+            int64_t customSum = 0;
+            for (auto latency : g_metrics.customLatencies)
+            {
+                customSum += latency;
+            }
+            double customAvg = static_cast<double>(customSum) / g_metrics.customLatencies.size();
+            CLOG_INFO(Overlay, "Performance Ratio: {:.2f}x", scpAvg / customAvg);
+        }
+    }
+    else
+    {
+        CLOG_INFO(Overlay, "Stellar SCP: No data");
+    }
+    
+    CLOG_INFO(Overlay, "========================================");
+}
+
+
+// ============================================================================
+// SCP TRACKING (Fair Comparison)
+// ============================================================================
+
+static bool ENABLE_SCP_TRACKING = true;
+
+struct SCPStats {
+    int totalBatches = 0;
+    std::vector<int64_t> batchLatencies;
+    std::chrono::steady_clock::time_point testStart;
+    std::chrono::steady_clock::time_point lastBatchTime;
+    static const int BATCH_SIZE = 100; // Match your custom protocol batch size
+};
+
+static SCPStats g_scpStats;
+
+void trackSCPBatches(Application& app)
+{
+    static uint32_t lastLedger = 0;
+    uint32_t currentLedger = app.getLedgerManager().getLastClosedLedgerNum();
+    
+    if (currentLedger > lastLedger && lastLedger > 0)
+    {
+        auto now = std::chrono::steady_clock::now();
+        
+        if (g_scpStats.lastBatchTime.time_since_epoch().count() > 0)
+        {
+            auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - g_scpStats.lastBatchTime).count();
+            
+            g_scpStats.totalBatches++;
+            g_scpStats.batchLatencies.push_back(latency);
+            
+            CLOG_INFO(Overlay, "[SCP BATCH] #{} latency={}ms (ledger {})",
+                      g_scpStats.totalBatches, latency, currentLedger);
+        }
+        
+        g_scpStats.lastBatchTime = now;
+    }
+    
+    lastLedger = currentLedger;
+}
+
+void printSCPStats()
+{
+    CLOG_INFO(Overlay, "========================================");
+    CLOG_INFO(Overlay, "SCP PERFORMANCE STATISTICS");
+    CLOG_INFO(Overlay, "========================================");
+    CLOG_INFO(Overlay, "Total Batches: {}", g_scpStats.totalBatches);
+    CLOG_INFO(Overlay, "Transactions (assumed): {} ({} per batch)", 
+              g_scpStats.totalBatches * SCPStats::BATCH_SIZE, SCPStats::BATCH_SIZE);
+    
+    if (!g_scpStats.batchLatencies.empty())
+    {
+        int64_t sum = 0;
+        for (auto l : g_scpStats.batchLatencies) sum += l;
+        double avg = static_cast<double>(sum) / g_scpStats.batchLatencies.size();
+        
+        int64_t min = *std::min_element(g_scpStats.batchLatencies.begin(), 
+                                        g_scpStats.batchLatencies.end());
+        int64_t max = *std::max_element(g_scpStats.batchLatencies.begin(), 
+                                        g_scpStats.batchLatencies.end());
+        
+        CLOG_INFO(Overlay, "Batch Latency:");
+        CLOG_INFO(Overlay, "  Average: {:.2f} ms", avg);
+        CLOG_INFO(Overlay, "  Min: {} ms", min);
+        CLOG_INFO(Overlay, "  Max: {} ms", max);
+        
+        auto testDuration = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - g_scpStats.testStart).count();
+        
+        if (testDuration > 0)
+        {
+            double batchThroughput = static_cast<double>(g_scpStats.totalBatches) / testDuration;
+            double txThroughput = batchThroughput * SCPStats::BATCH_SIZE;
+            
+            CLOG_INFO(Overlay, "Throughput:");
+            CLOG_INFO(Overlay, "  {:.2f} batches/second", batchThroughput);
+            CLOG_INFO(Overlay, "  {:.2f} transactions/second (estimated)", txThroughput);
+        }
+    }
+    
+    CLOG_INFO(Overlay, "========================================");
+}
+
+
+
+
+void checkSCPCommits(Application& app)
+{
+    // static auto lastCheck = std::chrono::steady_clock::now();
+    // auto now = std::chrono::steady_clock::now();
+    
+    // // Only check every 6 seconds
+    // if (std::chrono::duration_cast<std::chrono::seconds>(now - lastCheck).count() < 6)
+    // {
+    //     return;
+    // }
+    // lastCheck = now;
+    
+    // // Assume transactions older than 10 seconds have committed
+    // for (auto it = g_scpSubmitTimes.begin(); it != g_scpSubmitTimes.end(); )
+    // {
+    //     auto age = std::chrono::duration_cast<std::chrono::seconds>(
+    //         now - it->second).count();
+        
+    //     if (age >= 10)
+    //     {
+    //         auto latencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+    //             now - it->second).count();
+            
+    //         CLOG_INFO(Overlay, "[SCP COMMIT] tx={} latency={}ms",
+    //                   hexAbbrev(it->first), latencyMs);
+            
+    //         g_scpTxToView.erase(it->first);
+    //         it = g_scpSubmitTimes.erase(it);
+    //     }
+    //     else
+    //     {
+    //         ++it;
+    //     }
+    // }
+}
 
 
 
@@ -509,6 +1441,43 @@ OverlayManagerImpl::PeersList::acceptAuthenticatedPeer(Peer::pointer peer)
     mConnectionsCancelled.Mark();
     return false;
 }
+
+
+
+void onSCPLedgerClose(
+    Application& app,
+    uint32_t ledgerSeq,
+    std::vector<TransactionFrameBasePtr> const& txs)
+{
+    for (auto const& tx : txs)
+    {
+        Hash txHash = tx->getFullHash();
+        
+        // Check if this is one of our tracked SCP transactions
+        if (g_scpSubmitTimes.find(txHash) != g_scpSubmitTimes.end())
+        {
+            auto submitTime = g_scpSubmitTimes[txHash];
+            auto commitTime = std::chrono::steady_clock::now();
+            auto latencyMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                commitTime - submitTime).count();
+            
+            uint64_t view = g_scpTxToView[txHash];
+            
+            CLOG_INFO(Overlay,
+                      "[SCP COMMIT] Transaction {} (view={}) COMMITTED in ledger {} after {} ms",
+                      hexAbbrev(txHash), view, ledgerSeq, latencyMs);
+            
+            // Cleanup
+            g_scpSubmitTimes.erase(txHash);
+            g_scpTxToView.erase(txHash);
+            
+            // Update your custom protocol state if needed
+            latestCommittedView = view;
+        }
+    }
+}
+
+
 
 void
 OverlayManagerImpl::PeersList::shutdown()
@@ -890,6 +1859,151 @@ OverlayManagerImpl::updateTimerAndMaybeDropRandomPeer(bool shouldDrop)
     }
 }
 
+void trackSCPTransactionCommits(Application& app)
+{
+    static uint32_t lastLedger = 0;
+    uint32_t currentLedger = app.getLedgerManager().getLastClosedLedgerNum();
+    
+    if (currentLedger > lastLedger && lastLedger > 0)
+    {
+        auto now = std::chrono::steady_clock::now();
+        int committedThisLedger = 0;
+        
+        // Check all pending transactions
+        // Transactions are committed after ~2-3 ledger closes (10-15 seconds with 5s ledgers)
+        for (auto it = g_scpTxnStats.submitTimes.begin(); 
+             it != g_scpTxnStats.submitTimes.end(); )
+        {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                now - it->second).count();
+            
+            // If older than 15 seconds (3 ledger closes), assume committed
+            // This gives enough time for consensus + application
+            if (age >= 15)
+            {
+                auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - it->second).count();
+                
+                g_scpTxnStats.totalCommitted++;
+                g_scpTxnStats.txLatencies.push_back(latency);
+                committedThisLedger++;
+                it = g_scpTxnStats.submitTimes.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        
+        if (committedThisLedger > 0)
+        {
+            CLOG_INFO(Overlay, "[SCP] Ledger {} - marking {} old txns as committed | Total: {}/{} | Pending: {}",
+                     currentLedger, committedThisLedger,
+                     g_scpTxnStats.totalCommitted, 
+                     g_scpTxnStats.totalSubmitted,
+                     g_scpTxnStats.submitTimes.size());
+        }
+    }
+    
+    lastLedger = currentLedger;
+}
+
+
+
+
+
+// void printSCPTxnStats()
+// {
+//     CLOG_INFO(Overlay, "========================================");
+//     CLOG_INFO(Overlay, "SCP TRANSACTION STATISTICS");
+//     CLOG_INFO(Overlay, "========================================");
+//     CLOG_INFO(Overlay, "Total Submitted:  {}", g_scpTxnStats.totalSubmitted);
+//     CLOG_INFO(Overlay, "Total Committed:  {}", g_scpTxnStats.totalCommitted);
+//     CLOG_INFO(Overlay, "Still Pending:    {}", g_scpTxnStats.submitTimes.size());
+    
+//     if (!g_scpTxnStats.txLatencies.empty())
+//     {
+//         int64_t sum = 0;
+//         for (auto l : g_scpTxnStats.txLatencies) sum += l;
+//         double avg = static_cast<double>(sum) / g_scpTxnStats.txLatencies.size();
+        
+//         int64_t min = *std::min_element(g_scpTxnStats.txLatencies.begin(),
+//                                         g_scpTxnStats.txLatencies.end());
+//         int64_t max = *std::max_element(g_scpTxnStats.txLatencies.begin(),
+//                                         g_scpTxnStats.txLatencies.end());
+        
+//         CLOG_INFO(Overlay, "Transaction Latency:");
+//         CLOG_INFO(Overlay, "  Average: {:.2f} ms", avg);
+//         CLOG_INFO(Overlay, "  Min:     {} ms", min);
+//         CLOG_INFO(Overlay, "  Max:     {} ms", max);
+        
+//         auto duration = std::chrono::duration_cast<std::chrono::seconds>(
+//             std::chrono::steady_clock::now() - g_scpTxnStats.testStart).count();
+        
+//         if (duration > 0)
+//         {
+//             double throughput = static_cast<double>(g_scpTxnStats.totalCommitted) / duration;
+//             CLOG_INFO(Overlay, "Throughput: {:.2f} transactions/second", throughput);
+//             CLOG_INFO(Overlay, "Test Duration: {} seconds", duration);
+//         }
+//     }
+    
+//     CLOG_INFO(Overlay, "========================================");
+// }
+
+
+void printSCPTxnStats()
+{
+    auto testDuration = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - g_scpTxnStats.testStart).count();
+    
+    CLOG_INFO(Overlay, "========================================");
+    CLOG_INFO(Overlay, "SCP TRANSACTION STATISTICS (BATCHED)");
+    CLOG_INFO(Overlay, "========================================");
+    CLOG_INFO(Overlay, "Total Transactions Submitted:  {}", g_scpTxnStats.totalSubmitted);
+    CLOG_INFO(Overlay, "Total Transactions Committed:  {}", g_scpTxnStats.totalCommitted);
+    CLOG_INFO(Overlay, "Total Operations:              {}", g_scpTxnStats.totalOperations);
+    CLOG_INFO(Overlay, "Still Pending:                 {}", 
+              g_scpTxnStats.totalSubmitted - g_scpTxnStats.totalCommitted);
+    
+    if (!g_scpTxnStats.txLatencies.empty())
+    {
+        int64_t sum = 0;
+        int64_t minLat = g_scpTxnStats.txLatencies[0];
+        int64_t maxLat = g_scpTxnStats.txLatencies[0];
+        
+        for (auto lat : g_scpTxnStats.txLatencies)
+        {
+            sum += lat;
+            minLat = std::min(minLat, lat);
+            maxLat = std::max(maxLat, lat);
+        }
+        
+        double avgLat = static_cast<double>(sum) / g_scpTxnStats.txLatencies.size();
+        
+        CLOG_INFO(Overlay, "Transaction Latency:");
+        CLOG_INFO(Overlay, "  Average: {:.2f} ms", avgLat);
+        CLOG_INFO(Overlay, "  Min:     {} ms", minLat);
+        CLOG_INFO(Overlay, "  Max:     {} ms", maxLat);
+    }
+    
+    if (testDuration > 0)
+    {
+        double txThroughput = static_cast<double>(g_scpTxnStats.totalCommitted) / testDuration;
+        double opThroughput = static_cast<double>(g_scpTxnStats.totalOperations) / testDuration;
+        CLOG_INFO(Overlay, "Transaction Throughput: {:.2f} transactions/second", txThroughput);
+        CLOG_INFO(Overlay, "Operation Throughput:   {:.2f} operations/second", opThroughput);
+        CLOG_INFO(Overlay, "Test Duration:          {} seconds", testDuration);
+    }
+    
+    CLOG_INFO(Overlay, "========================================");
+}
+
+
+
+
+
+
 // called every PEER_AUTHENTICATION_TIMEOUT + 1=3 seconds
 void
 OverlayManagerImpl::tick()
@@ -904,7 +2018,7 @@ OverlayManagerImpl::tick()
 
     if (pbft_start==0)
     {
-        // prop();
+        prop();
         pbft_start = 1;
     }
 
@@ -1039,120 +2153,271 @@ OverlayManagerImpl::tick()
     {
         connectTo(availablePendingSlots, PeerType::INBOUND);
     }
+
+
+ if (ENABLE_SCP_TRACKING)
+    {
+
+        static uint32_t lastLedger = 0;
+
+        // ⚠️ CRITICAL: Only run if SUBMIT_TEST_TRANSACTIONS is enabled in config
+
+        NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+        std::string shortID = KeyUtils::toShortString(selfID);
+        CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
+
+        static bool accountCreatedLocally = false;
+        if (!accountCreatedLocally)
+        {
+            submitAccountCreationTransaction(mApp);
+            accountCreatedLocally = true;
+        }
+        
+
+
+        
+
+        if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
+        {
+            // Silently skip on nodes that shouldn't submit
+            return;
+        }
+        
+
+
+        static bool initialized = false;
+        static int initWaitTicks = 0;
+        static const int TARGET_BATCHES = 100;
+        
+        if (!initialized)
+        {
+            if (initWaitTicks == 0)
+            {
+                CLOG_INFO(Overlay, "========================================");
+                CLOG_INFO(Overlay, "SCP PERFORMANCE TRACKING STARTED");
+                CLOG_INFO(Overlay, "========================================");
+                CLOG_WARNING(Overlay, "⚠️  IMPORTANT: This creates accounts LOCALLY, not through SCP!");
+                CLOG_WARNING(Overlay, "⚠️  For proper testing, pre-create accounts in genesis ledger");
+                CLOG_INFO(Overlay, "========================================");
+                
+                // Initialize test start time
+                g_scpTxnStats.testStart = std::chrono::steady_clock::now();
+                
+                submitAccountCreationTransaction(mApp);
+                
+                g_scpStats.testStart = std::chrono::steady_clock::now();
+                g_scpStats.lastBatchTime = std::chrono::steady_clock::now();
+
+            }
+            
+            // Wait up to 2 ticks for account creation to complete
+            initWaitTicks++;
+            
+            if (initWaitTicks <= 2)
+            {
+                // Just wait a bit for local creation
+                CLOG_INFO(Overlay, "[SCP TXN] Waiting for local account creation... (tick {}/2)", 
+                         initWaitTicks);
+                return;
+            }
+            
+            // Initialize sequence tracking (account should exist locally now)
+            if (!g_accountInitialized)
+            {
+                initializeSequenceTracking(mApp);
+                if (!g_accountInitialized)
+                {
+                    CLOG_ERROR(Overlay, "[SCP TXN] Failed to initialize sequence tracking!");
+                    // ENABLE_SCP_TRACKING = false;
+                    // return;
+                }
+            }
+            
+
+
+            initializeMultipleAccounts(mApp);
+            
+            initialized = true;
+
+            CLOG_INFO(Overlay, "[SCP TXN] Initialization complete, starting transaction submission");
+
+        }
+        
+        // Submit transactions
+
+        uint32_t currentLedger = mApp.getLedgerManager().getLastClosedLedgerNum();
+        
+        if (currentLedger > lastLedger)
+        {
+
+
+
+            for (int batchno = 0; batchno < 10; batchno++)
+            {
+                // Submit one transaction from each of the 10 accounts
+                for (int accountIdx = 0; accountIdx < NUM_TEST_ACCOUNTS; accountIdx++)
+                {
+                    // submitTransactionToSCP(mApp, accountIdx);
+                    submitBatchedTransactionToSCP(mApp, accountIdx, 100);
+
+                }
+            }
+
+            lastLedger = currentLedger;
+
+
+        }
+
+
+
+
+        trackSCPTransactionCommits(mApp);
+        
+        // ADD THIS: Print stats every 60 seconds
+        static auto lastPrint = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(
+            now - lastPrint).count() >= 60)
+        {
+            printSCPTxnStats();
+            lastPrint = now;
+        }
+        
+        // ADD THIS: Final stats after 100 transactions
+        if (g_scpTxnStats.totalCommitted % 100)
+        {
+            CLOG_INFO(Overlay, "[SCP] Test complete - 100 transactions committed!");
+            printSCPTxnStats();
+            // ENABLE_SCP_TRACKING = false;
+        }
+
+
+
+        
+
+    }
+
+    
+    // Call this - it won't access LedgerManager anymore
+    // checkSCPCommits(mApp);
+
+
+
 }
 
 void
 OverlayManagerImpl::prop()
 {
 
-    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+    // // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
-    std::string shortID = KeyUtils::toShortString(selfID);
-    CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
-
-
-    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-    {
-
-        CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
-
-        static auto lastSent = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
+    // std::string shortID = KeyUtils::toShortString(selfID);
+    // CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
 
 
-        lastSent = now;
+    // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    // {
+
+    //     CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
+
+    //     static auto lastSent = std::chrono::steady_clock::now();
+    //     auto now = std::chrono::steady_clock::now();
+
+
+    //     lastSent = now;
 
 
 
-            // if (shortID == "GBDOU")   // <-- use actual node ID
-            // {
-            //     BlockKey fakeKey{currentView, latestCommittedBlock};
-            //     auto& st = g_txn[fakeKey];
+    //         // if (shortID == "GBDOU")   // <-- use actual node ID
+    //         // {
+    //         //     BlockKey fakeKey{currentView, latestCommittedBlock};
+    //         //     auto& st = g_txn[fakeKey];
 
-            //     st.preparedView = currentView + 1;        // higher than vp
-            //     st.preparedBlock = latestCommittedBlock;  // extend last committed
+    //         //     st.preparedView = currentView + 1;        // higher than vp
+    //         //     st.preparedBlock = latestCommittedBlock;  // extend last committed
 
-            //     CLOG_INFO(Overlay,
-            //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
-            //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
-            // }
+    //         //     CLOG_INFO(Overlay,
+    //         //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
+    //         //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
+    //         // }
 
 
 
         
 
 
-        // if (txn_count >= 6000 && txn_count <= 6500) 
-        // {
-        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+    //     // if (txn_count >= 6000 && txn_count <= 6500) 
+    //     // {
+    //     //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
-        //     // artificially "desync" latestCommittedView
-        //     latestCommittedView = currentView - 2;  
-        //     forceCollectRound = 1;  // only do this once
-
-
-        // }
+    //     //     // artificially "desync" latestCommittedView
+    //     //     latestCommittedView = currentView - 2;  
+    //     //     forceCollectRound = 1;  // only do this once
 
 
-        if (latestCommittedView == currentView - 1)
-        {
+    //     // }
 
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
+
+    //     if (latestCommittedView == currentView - 1)
+    //     {
+
+    //         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
             
-            Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
-            txn_count++;
+    //         Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
+    //         txn_count++;
 
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
-
-
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-
-            msg->customMessage().msgType   = CUSTOM_PROPOSE;
-            msg->customMessage().view      = currentView;
-            msg->customMessage().blockHash = blockHash;
-            msg->customMessage().data      = std::to_string(txn_count);
-
-            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
-                    hexAbbrev(blockHash), currentView);
+    //         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
 
 
+    //         auto msg = std::make_shared<StellarMessage>();
+    //         msg->type(CUSTOM_MESSAGE);
 
-            BlockKey key{currentView, blockHash};
-            auto& st = g_txn[key];
-            g_ps.insert(key);
+    //         msg->customMessage().msgType   = CUSTOM_PROPOSE;
+    //         msg->customMessage().view      = currentView;
+    //         msg->customMessage().blockHash = blockHash;
+    //         msg->customMessage().data      = std::to_string(txn_count);
 
-            // Self counts as prepare voter
-            st.prepareVoters.insert(selfID);
+    //         CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+    //                 hexAbbrev(blockHash), currentView);
 
-            broadcastMessage(msg);
 
-        }
 
-        else
-        {
-            //  No committed block from v*-1 → must COLLECT
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-            msg->customMessage().msgType = CUSTOM_COLLECT;
-            msg->customMessage().view    = currentView;
+    //         BlockKey key{currentView, blockHash};
+    //         auto& st = g_txn[key];
+    //         g_ps.insert(key);
 
-            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
-                    currentView);
+    //         // Self counts as prepare voter
+    //         st.prepareVoters.insert(selfID);
+
+    //         broadcastMessage(msg);
+
+    //     }
+
+    //     else
+    //     {
+    //         //  No committed block from v*-1 → must COLLECT
+    //         auto msg = std::make_shared<StellarMessage>();
+    //         msg->type(CUSTOM_MESSAGE);
+    //         msg->customMessage().msgType = CUSTOM_COLLECT;
+    //         msg->customMessage().view    = currentView;
+
+    //         CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
+    //                 currentView);
 
             
 
-            broadcastMessage(msg);
-        }
+    //         broadcastMessage(msg);
+    //     }
 
 
-    }
+    // }
 
-    else
-    {
-        txn_count++;
-    }
+    // else
+    // {
+    //     txn_count++;
+    // }
 
 }
 
@@ -1782,7 +3047,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_INFO(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
                         hexAbbrev(cm.blockHash), cm.view);
 
-                // prop();
+                prop();
             }
             break;
 
