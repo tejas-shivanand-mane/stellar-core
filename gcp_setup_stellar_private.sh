@@ -4,7 +4,6 @@ set -e
 STELLAR_CORE=~/tejas/stellar-core/src/stellar-core
 BASE_DIR=~/tejas/stellar-private
 
-
 if [ "$1" == "start" ]; then
         
     # Node ports
@@ -45,47 +44,46 @@ if [ "$1" == "start" ]; then
         for V in node1 node2 node3 node4; do
             if [ "$V" != "$NODE" ]; then
                 VALIDATORS_CFG+="[[VALIDATORS]]
-    NAME=\"$V\"
-    HOME_DOMAIN=\"private\"
-    PUBLIC_KEY=\"${NODE_PUBLIC[$V]}\"
+NAME=\"$V\"
+HOME_DOMAIN=\"private\"
+PUBLIC_KEY=\"${NODE_PUBLIC[$V]}\"
 
+HISTORY=\"local $BASE_DIR/$V/history/{0}\"
 
-    HISTORY=\"local $BASE_DIR/$V/history/{0}\"
-
-    "
+"
             fi
         done
 
-        cat > $CFG <<EOF
-    NODE_SEED="${NODE_SEED[$NODE]}"
-    NODE_IS_VALIDATOR=true
-    NODE_HOME_DOMAIN="private"
-    RUN_STANDALONE=false
-    HTTP_PORT=${HTTP_PORT[$NODE]}
-    PEER_PORT=${PEER_PORT[$NODE]}
+cat > "$CFG" <<EOF
+NODE_SEED="${NODE_SEED[$NODE]}"
+NODE_IS_VALIDATOR=true
+NODE_HOME_DOMAIN="private"
+RUN_STANDALONE=false
+HTTP_PORT=${HTTP_PORT[$NODE]}
+PEER_PORT=${PEER_PORT[$NODE]}
 
-    NETWORK_PASSPHRASE="Private Stellar Network"
+NETWORK_PASSPHRASE="Private Stellar Network"
 
-    DATABASE="sqlite3://$NODE_DIR/db/stellar.db"
-    BUCKET_DIR_PATH="$NODE_DIR/buckets"
-    LOG_FILE_PATH="$NODE_DIR/stellar-core.log"
+DATABASE="sqlite3://$NODE_DIR/db/stellar.db"
+BUCKET_DIR_PATH="$NODE_DIR/buckets"
+LOG_FILE_PATH="$NODE_DIR/stellar-core.log"
 
-    # Known peers
-    KNOWN_PEERS=[
-    "127.0.0.1:${PEER_PORT[node1]}",
-    "127.0.0.1:${PEER_PORT[node2]}",
-    "127.0.0.1:${PEER_PORT[node3]}",
-    "127.0.0.1:${PEER_PORT[node4]}"
-    ]
+# Known peers
+KNOWN_PEERS=[
+"127.0.0.1:${PEER_PORT[node1]}",
+"127.0.0.1:${PEER_PORT[node2]}",
+"127.0.0.1:${PEER_PORT[node3]}",
+"127.0.0.1:${PEER_PORT[node4]}"
+]
 
-    # Home domain (HIGH quality)
-    [[HOME_DOMAINS]]
-    HOME_DOMAIN="private"
-    QUALITY="HIGH"
+# Home domain (HIGH quality)
+[[HOME_DOMAINS]]
+HOME_DOMAIN="private"
+QUALITY="HIGH"
 
-    # Validators (exclude self)
-    $VALIDATORS_CFG
-    EOF
+# Validators (exclude self)
+$VALIDATORS_CFG
+EOF
     done
 
 else
@@ -107,6 +105,5 @@ else
     echo "$STELLAR_CORE run --conf $BASE_DIR/node2/stellar-core.cfg &"
     echo "$STELLAR_CORE run --conf $BASE_DIR/node3/stellar-core.cfg &"
     echo "$STELLAR_CORE run --conf $BASE_DIR/node4/stellar-core.cfg &"
-
 
 fi
