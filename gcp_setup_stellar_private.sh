@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-STELLAR_CORE=~/tejas/stellar-core/src/stellar-core
-BASE_DIR=~/tejas/stellar-private
+STELLAR_CORE=/home/tejas/stellar-core/src/stellar-core
+BASE_DIR=/home/tejas/stellar-private
 
 if [ "$1" == "start" ]; then
         
