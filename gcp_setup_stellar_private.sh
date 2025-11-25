@@ -4,6 +4,9 @@ set -e
 STELLAR_CORE=/home/tejas/stellar-core/src/stellar-core
 BASE_DIR=/home/tejas/stellar-private
 
+
+mapfile -t NODE_IPS < /home/tejas/stellar-core/tsm_ips.txt
+
 if [ "$1" == "start" ]; then
         
     # Node ports
@@ -70,10 +73,10 @@ LOG_FILE_PATH="$NODE_DIR/stellar-core.log"
 
 # Known peers
 KNOWN_PEERS=[
-"127.0.0.1:${PEER_PORT[node1]}",
-"127.0.0.1:${PEER_PORT[node2]}",
-"127.0.0.1:${PEER_PORT[node3]}",
-"127.0.0.1:${PEER_PORT[node4]}"
+"${NODE_IPS[0]}:${PEER_PORT[node1]}",
+"${NODE_IPS[1]}:${PEER_PORT[node2]}",
+"${NODE_IPS[2]}:${PEER_PORT[node3]}",
+"${NODE_IPS[3]}:${PEER_PORT[node4]}"
 ]
 
 # Home domain (HIGH quality)
