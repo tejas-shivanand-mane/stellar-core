@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-STELLAR_CORE=/home/tejas/stellar-core/src/stellar-core
-BASE_DIR=/home/tejas/stellar-private
+STELLAR_CORE=/home/tejas/work/stellar-core/src/stellar-core
+BASE_DIR=/home/tejas/work/stellar-private
 
 
-mapfile -t NODE_IPS < /home/tejas/stellar-core/tsm_ips.txt
+mapfile -t NODE_IPS < /home/tejas/work/stellar-core/tsm_ips.txt
 
 if [ "$1" == "start" ]; then
         
