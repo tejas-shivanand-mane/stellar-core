@@ -1091,7 +1091,7 @@ void printConsensusComparison()
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = true;
+static bool ENABLE_SCP_TRACKING = false;
 
 struct SCPStats {
     int totalBatches = 0;
@@ -1912,44 +1912,6 @@ void trackSCPTransactionCommits(Application& app)
 
 
 
-// void printSCPTxnStats()
-// {
-//     CLOG_INFO(Overlay, "========================================");
-//     CLOG_INFO(Overlay, "SCP TRANSACTION STATISTICS");
-//     CLOG_INFO(Overlay, "========================================");
-//     CLOG_INFO(Overlay, "Total Submitted:  {}", g_scpTxnStats.totalSubmitted);
-//     CLOG_INFO(Overlay, "Total Committed:  {}", g_scpTxnStats.totalCommitted);
-//     CLOG_INFO(Overlay, "Still Pending:    {}", g_scpTxnStats.submitTimes.size());
-    
-//     if (!g_scpTxnStats.txLatencies.empty())
-//     {
-//         int64_t sum = 0;
-//         for (auto l : g_scpTxnStats.txLatencies) sum += l;
-//         double avg = static_cast<double>(sum) / g_scpTxnStats.txLatencies.size();
-        
-//         int64_t min = *std::min_element(g_scpTxnStats.txLatencies.begin(),
-//                                         g_scpTxnStats.txLatencies.end());
-//         int64_t max = *std::max_element(g_scpTxnStats.txLatencies.begin(),
-//                                         g_scpTxnStats.txLatencies.end());
-        
-//         CLOG_INFO(Overlay, "Transaction Latency:");
-//         CLOG_INFO(Overlay, "  Average: {:.2f} ms", avg);
-//         CLOG_INFO(Overlay, "  Min:     {} ms", min);
-//         CLOG_INFO(Overlay, "  Max:     {} ms", max);
-        
-//         auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-//             std::chrono::steady_clock::now() - g_scpTxnStats.testStart).count();
-        
-//         if (duration > 0)
-//         {
-//             double throughput = static_cast<double>(g_scpTxnStats.totalCommitted) / duration;
-//             CLOG_INFO(Overlay, "Throughput: {:.2f} transactions/second", throughput);
-//             CLOG_INFO(Overlay, "Test Duration: {} seconds", duration);
-//         }
-//     }
-    
-//     CLOG_INFO(Overlay, "========================================");
-// }
 
 
 void printSCPTxnStats()
@@ -2310,114 +2272,114 @@ void
 OverlayManagerImpl::prop()
 {
 
-    // // std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    // NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
-    // std::string shortID = KeyUtils::toShortString(selfID);
-    // CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
-
-
-    // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-    // {
-
-    //     CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
-
-    //     static auto lastSent = std::chrono::steady_clock::now();
-    //     auto now = std::chrono::steady_clock::now();
+    std::string shortID = KeyUtils::toShortString(selfID);
+    CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
 
 
-    //     lastSent = now;
+    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    {
+
+        CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
+
+        static auto lastSent = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
+
+
+        lastSent = now;
 
 
 
-    //         // if (shortID == "GBDOU")   // <-- use actual node ID
-    //         // {
-    //         //     BlockKey fakeKey{currentView, latestCommittedBlock};
-    //         //     auto& st = g_txn[fakeKey];
+            // if (shortID == "GBDOU")   // <-- use actual node ID
+            // {
+            //     BlockKey fakeKey{currentView, latestCommittedBlock};
+            //     auto& st = g_txn[fakeKey];
 
-    //         //     st.preparedView = currentView + 1;        // higher than vp
-    //         //     st.preparedBlock = latestCommittedBlock;  // extend last committed
+            //     st.preparedView = currentView + 1;        // higher than vp
+            //     st.preparedBlock = latestCommittedBlock;  // extend last committed
 
-    //         //     CLOG_INFO(Overlay,
-    //         //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
-    //         //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
-    //         // }
+            //     CLOG_INFO(Overlay,
+            //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
+            //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
+            // }
 
 
 
         
 
 
-    //     // if (txn_count >= 6000 && txn_count <= 6500) 
-    //     // {
-    //     //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+        // if (txn_count >= 6000 && txn_count <= 6500) 
+        // {
+        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
-    //     //     // artificially "desync" latestCommittedView
-    //     //     latestCommittedView = currentView - 2;  
-    //     //     forceCollectRound = 1;  // only do this once
-
-
-    //     // }
+        //     // artificially "desync" latestCommittedView
+        //     latestCommittedView = currentView - 2;  
+        //     forceCollectRound = 1;  // only do this once
 
 
-    //     if (latestCommittedView == currentView - 1)
-    //     {
+        // }
 
-    //         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
+
+        if (latestCommittedView == currentView - 1)
+        {
+
+            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
             
-    //         Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
-    //         txn_count++;
+            Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
+            txn_count++;
 
-    //         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
-
-
-    //         auto msg = std::make_shared<StellarMessage>();
-    //         msg->type(CUSTOM_MESSAGE);
-
-    //         msg->customMessage().msgType   = CUSTOM_PROPOSE;
-    //         msg->customMessage().view      = currentView;
-    //         msg->customMessage().blockHash = blockHash;
-    //         msg->customMessage().data      = std::to_string(txn_count);
-
-    //         CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
-    //                 hexAbbrev(blockHash), currentView);
+            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
 
 
+            auto msg = std::make_shared<StellarMessage>();
+            msg->type(CUSTOM_MESSAGE);
 
-    //         BlockKey key{currentView, blockHash};
-    //         auto& st = g_txn[key];
-    //         g_ps.insert(key);
+            msg->customMessage().msgType   = CUSTOM_PROPOSE;
+            msg->customMessage().view      = currentView;
+            msg->customMessage().blockHash = blockHash;
+            msg->customMessage().data      = std::to_string(txn_count);
 
-    //         // Self counts as prepare voter
-    //         st.prepareVoters.insert(selfID);
+            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                    hexAbbrev(blockHash), currentView);
 
-    //         broadcastMessage(msg);
 
-    //     }
 
-    //     else
-    //     {
-    //         //  No committed block from v*-1 → must COLLECT
-    //         auto msg = std::make_shared<StellarMessage>();
-    //         msg->type(CUSTOM_MESSAGE);
-    //         msg->customMessage().msgType = CUSTOM_COLLECT;
-    //         msg->customMessage().view    = currentView;
+            BlockKey key{currentView, blockHash};
+            auto& st = g_txn[key];
+            g_ps.insert(key);
 
-    //         CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
-    //                 currentView);
+            // Self counts as prepare voter
+            st.prepareVoters.insert(selfID);
+
+            broadcastMessage(msg);
+
+        }
+
+        else
+        {
+            //  No committed block from v*-1 → must COLLECT
+            auto msg = std::make_shared<StellarMessage>();
+            msg->type(CUSTOM_MESSAGE);
+            msg->customMessage().msgType = CUSTOM_COLLECT;
+            msg->customMessage().view    = currentView;
+
+            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
+                    currentView);
 
             
 
-    //         broadcastMessage(msg);
-    //     }
+            broadcastMessage(msg);
+        }
 
 
-    // }
+    }
 
-    // else
-    // {
-    //     txn_count++;
-    // }
+    else
+    {
+        txn_count++;
+    }
 
 }
 
