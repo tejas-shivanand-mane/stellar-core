@@ -1983,7 +1983,7 @@ OverlayManagerImpl::tick()
 
 
         size_t authenticatedPeers = getAuthenticatedPeersCount();
-        size_t requiredPeers = (mApp.getConfig().TARGET_PEER_CONNECTIONS * 2) / 3;
+        size_t requiredPeers = mApp.getConfig().TARGET_PEER_CONNECTIONS;
         
         if (authenticatedPeers == requiredPeers)
 
