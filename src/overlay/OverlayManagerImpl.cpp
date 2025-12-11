@@ -1980,8 +1980,17 @@ OverlayManagerImpl::tick()
 
     if (pbft_start==0)
     {
-        prop();
-        pbft_start = 1;
+
+
+        size_t authenticatedPeers = getAuthenticatedPeersCount();
+        size_t requiredPeers = (mApp.getConfig().TARGET_PEER_CONNECTIONS * 2) / 3;
+        
+        if (authenticatedPeers == requiredPeers)
+
+        {
+            prop();
+            pbft_start = 1;
+        }
     }
 
 
