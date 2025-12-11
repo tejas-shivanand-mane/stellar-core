@@ -1987,7 +1987,7 @@ OverlayManagerImpl::tick()
         
         CLOG_INFO(Overlay, "authenticatedPeers,  requiredPeers: {}, {}", authenticatedPeers,  requiredPeers);
 
-        if (authenticatedPeers == requiredPeers)
+        if (authenticatedPeers == requiredPeers-1)
 
         {
             prop();
