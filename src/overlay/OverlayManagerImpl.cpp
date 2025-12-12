@@ -1983,7 +1983,7 @@ OverlayManagerImpl::tick()
 
 
         size_t authenticatedPeers = getAuthenticatedPeersCount();
-        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size() + 1; // +1 for self
+        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
         size_t expectedPeers = totalNodes - 1;
         
         CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
