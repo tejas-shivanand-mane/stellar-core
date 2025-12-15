@@ -3181,34 +3181,25 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         KeyUtils::toShortString(cm.origin));
 
 
-
-                if (st.readies[vb].size() >= 2*f+1)
+                if (st.readies[vb].size() == 2*f+1 &&  // ← Changed to == instead of >=
+                    selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
+                    st.collection.size() >= 2*f+1)
                 {
-                    st.collection[cm.origin] = {cm.vp, cm.bp};
-
-                    CLOG_INFO(Overlay, "Added origin={} with (vp={}, bp={}) to collection (size={})",
-                    KeyUtils::toShortString(cm.origin),
-                    cm.vp, hexAbbrev(cm.bp), st.collection.size());
-
-
-                    if (selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                        st.collection.size() >= 2*f+1)
-                    {
-                        auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
-                        Hash newBlock = makeBlock(maxBlock, txn_count++);
-
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType   = CUSTOM_PROPOSE;
-                        msg->customMessage().view      = currentView;
-                        msg->customMessage().blockHash = newBlock;
-                        msg->customMessage().data      = std::to_string(txn_count);
-                        broadcastMessage(msg);
-
-                        CLOG_INFO(Overlay, "Leader collected 2f+1, proposing new block {} in view {} (extending vp={})",
-                                hexAbbrev(newBlock), currentView, maxView);
-                    }
+                    auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
+                    Hash newBlock = makeBlock(maxBlock, txn_count++);
+                    
+                    auto msg = std::make_shared<StellarMessage>();
+                    msg->type(CUSTOM_MESSAGE);
+                    msg->customMessage().msgType   = CUSTOM_PROPOSE;
+                    msg->customMessage().view      = currentView;
+                    msg->customMessage().blockHash = newBlock;
+                    msg->customMessage().data      = std::to_string(txn_count);
+                    broadcastMessage(msg);
+                    
+                    CLOG_INFO(Overlay, "Leader collected 2f+1, proposing new block {} in view {} (extending vp={})",
+                            hexAbbrev(newBlock), currentView, maxView);
                 }
+
             }
             break;
 
