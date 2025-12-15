@@ -747,6 +747,8 @@ struct TxnState {
     uint64_t committedView = 0;
     uint64_t executedView = 0;
 
+    bool proposalSentForView = false;
+
 
     Hash preparedBlock;
     Hash committedBlock;
@@ -2946,8 +2948,16 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 currentView = cm.view + 1;
 
+
+
+                BlockKey nextKey{currentView, Hash()};
+                g_txn[nextKey].proposalSentForView = false;
+
                 CLOG_INFO(Overlay, "Committed block {} at view {}",
                           hexAbbrev(cm.blockHash), cm.view);
+
+
+                
 
                 sendExecute(cm.view, cm.blockHash, cm.data);
 
@@ -3159,31 +3169,26 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_READY:
-            CLOG_INFO(Overlay, "Received READY (vp={}, bp={}) for view {} from {} (origin={})",
-                      cm.vp, hexAbbrev(cm.bp), cm.view,
-                      KeyUtils::toShortString(sender),
-                      KeyUtils::toShortString(cm.origin));
-
+            CLOG_INFO(Overlay, "Received READY (vp={}, bp={}) for view {} from {}",
+                    cm.vp, hexAbbrev(cm.bp), cm.view,
+                    KeyUtils::toShortString(sender));
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
                 st.readies[vb].insert(sender);
-
-
-
-                //  Always record the origin's report
+                
+                // ✅ Record ONCE - use sender, not origin
                 st.collection[sender] = {cm.vp, cm.bp};
-                CLOG_INFO(Overlay, "Added origin={} with (vp={}, bp={}) to collection (size={})",
-                        KeyUtils::toShortString(cm.origin),
-                        cm.vp, hexAbbrev(cm.bp), st.collection.size());
-
-                CLOG_INFO(Overlay, "st.readies[vb].size(): {} (origin={})",
-                        st.readies[vb].size(),
-                        KeyUtils::toShortString(cm.origin));
-
-
-                if (st.readies[vb].size() == 2*f+1 &&  // ← Changed to == instead of >=
+                
+                CLOG_INFO(Overlay, "Added sender={} with (vp={}, bp={}) to collection (size={}, readies={})",
+                        KeyUtils::toShortString(sender),
+                        cm.vp, hexAbbrev(cm.bp), 
+                        st.collection.size(),
+                        st.readies[vb].size());
+                
+                // ✅ Check if threshold reached AND we haven't proposed yet
+                if (st.readies[vb].size() == 2*f+1 &&  // ← Changed >= to ==
                     selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                    st.collection.size() >= 2*f+1)
+                    !st.proposalSentForView)  // ← Added this check
                 {
                     auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
                     Hash newBlock = makeBlock(maxBlock, txn_count++);
@@ -3196,10 +3201,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     msg->customMessage().data      = std::to_string(txn_count);
                     broadcastMessage(msg);
                     
-                    CLOG_INFO(Overlay, "Leader collected 2f+1, proposing new block {} in view {} (extending vp={})",
+                    st.proposalSentForView = true;  // ✅ Set flag
+                    
+                    CLOG_INFO(Overlay, "Leader proposing new block {} in view {} (extending vp={})",
                             hexAbbrev(newBlock), currentView, maxView);
                 }
-
             }
             break;
 
@@ -3208,38 +3214,29 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_INFO(Overlay, "Received CONDREADY (vp={}, bp={}) for view {} from {}",
                     cm.vp, hexAbbrev(cm.bp), cm.view,
                     KeyUtils::toShortString(sender));
-
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
-
-                // Always record the report
+                
+                // Record vote
                 st.collection[sender] = {cm.vp, cm.bp};
-                CLOG_INFO(Overlay, "Added CONDREADY origin={} (vp={}, bp={}) to collection (size={})",
+                CLOG_INFO(Overlay, "Added CONDREADY sender={} (vp={}, bp={}) to collection (size={})",
                         KeyUtils::toShortString(sender),
                         cm.vp, hexAbbrev(cm.bp), st.collection.size());
-
+                
                 if (g_ps.count(BlockKey{cm.vp, cm.bp}))
                 {
                     st.readies[vb].insert(sender);
-                    st.readies[vb].insert(selfID);  // ensure self is counted
-                    CLOG_INFO(Overlay, "CONDREADY immediately counted for (vp={}, bp={})",
-                            cm.vp, hexAbbrev(cm.bp));
-                }
-                else
-                {
-                    st.pendingCondReady[vb].insert(sender);
-                    CLOG_INFO(Overlay, "CONDREADY deferred for (vp={}, bp={})",
-                            cm.vp, hexAbbrev(cm.bp));
-                }
-
-                if (st.readies[vb].size() >= 2*f+1)
-                {
-                    if (selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                        st.collection.size() >= 2*f+1)
+                    CLOG_INFO(Overlay, "CONDREADY immediately counted for (vp={}, bp={}), readies={}",
+                            cm.vp, hexAbbrev(cm.bp), st.readies[vb].size());
+                    
+                    // ✅ Check threshold with flag
+                    if (st.readies[vb].size() == 2*f+1 &&  // ← Changed >= to ==
+                        selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
+                        !st.proposalSentForView)  // ← Added this check
                     {
                         auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
                         Hash newBlock = makeBlock(maxBlock, txn_count++);
-
+                        
                         auto msg = std::make_shared<StellarMessage>();
                         msg->type(CUSTOM_MESSAGE);
                         msg->customMessage().msgType   = CUSTOM_PROPOSE;
@@ -3247,15 +3244,22 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         msg->customMessage().blockHash = newBlock;
                         msg->customMessage().data      = std::to_string(txn_count);
                         broadcastMessage(msg);
-
+                        
+                        st.proposalSentForView = true;  // ✅ Set flag
+                        
                         CLOG_INFO(Overlay,
-                                "Leader collected 2f+1 (with CondReady), proposing new block {} in view {}",
+                                "Leader proposing new block {} in view {} after CONDREADY",
                                 hexAbbrev(newBlock), currentView);
                     }
                 }
+                else
+                {
+                    st.pendingCondReady[vb].insert(sender);
+                    CLOG_INFO(Overlay, "CONDREADY deferred for (vp={}, bp={})",
+                            cm.vp, hexAbbrev(cm.bp));
+                }
             }
             break;
-
     }
 }
 
