@@ -663,10 +663,10 @@ struct ViewBlockKeyHash {
 };
 
 
+
 static std::chrono::steady_clock::time_point g_testStartTime;
 static bool g_testStartTimeInitialized = false;
-static bool g_collectTriggered = false;
-
+static bool g_collectWindowActive = false;
 
 namespace stellar
 {
@@ -2299,13 +2299,18 @@ OverlayManagerImpl::prop()
     {
 
 
-
         if (!g_testStartTimeInitialized)
         {
             g_testStartTime = std::chrono::steady_clock::now();
             g_testStartTimeInitialized = true;
             CLOG_INFO(Overlay, "Test timer started");
         }
+        
+        //  Calculate elapsed time in seconds
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            now - g_testStartTime).count();
+
 
 
         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
@@ -2348,28 +2353,27 @@ OverlayManagerImpl::prop()
         // }
 
 
-
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(
-            now - g_testStartTime).count();
         
         // Trigger COLLECT between 100-120 seconds
-        if (elapsed_sec >= 100 && elapsed_sec <= 120 && !g_collectTriggered)
+        if (elapsed_sec >= 100 && elapsed_sec <= 120)
         {
+            if (!g_collectWindowActive)
+            {
+                CLOG_INFO(Overlay, "Entering COLLECT window at {}s", elapsed_sec);
+                g_collectWindowActive = true;
+            }
+            
+            // Force desync to trigger COLLECT (just like your txn_count approach)
             CLOG_INFO(Overlay, "Forcing COLLECT at elapsed time {}s (view {})", 
                      elapsed_sec, currentView);
-            
-            // Artificially desync to force COLLECT
             latestCommittedView = currentView - 2;
-            g_collectTriggered = true;  // Only trigger once
         }
-        
-        //  Reset after 120 seconds to resume normal operation
-        if (elapsed_sec > 120 && g_collectTriggered)
+        else if (elapsed_sec > 120 && g_collectWindowActive)
         {
-            CLOG_INFO(Overlay, "COLLECT window closed at {}s, resuming normal consensus", 
+            CLOG_INFO(Overlay, "Exiting COLLECT window at {}s, resuming normal consensus", 
                      elapsed_sec);
-            // Don't reset latestCommittedView here - let COLLECT complete naturally
+            g_collectWindowActive = false;
+            // Don't manually fix latestCommittedView - let it recover naturally
         }
 
 
