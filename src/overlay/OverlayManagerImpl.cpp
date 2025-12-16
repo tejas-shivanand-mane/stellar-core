@@ -663,9 +663,7 @@ struct ViewBlockKeyHash {
 };
 
 
-static std::chrono::steady_clock::time_point g_testStartTime;
-static bool g_testStartTimeInitialized = false;
-static bool g_collectTriggered = false;
+
 
 
 namespace stellar
@@ -2298,23 +2296,13 @@ OverlayManagerImpl::prop()
     if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
     {
 
-
-
-        if (!g_testStartTimeInitialized)
-        {
-            g_testStartTime = std::chrono::steady_clock::now();
-            g_testStartTimeInitialized = true;
-            CLOG_INFO(Overlay, "Test timer started");
-        }
-
-
         CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
 
-        // static auto lastSent = std::chrono::steady_clock::now();
-        // auto now = std::chrono::steady_clock::now();
+        static auto lastSent = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now();
 
 
-        // lastSent = now;
+        lastSent = now;
 
 
 
@@ -2336,51 +2324,16 @@ OverlayManagerImpl::prop()
         
 
 
-        // if (txn_count >= 6000 && txn_count <= 6500) 
-        // {
-        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
-
-        //     // artificially "desync" latestCommittedView
-        //     latestCommittedView = currentView - 2;  
-        //     forceCollectRound = 1;  // only do this once
-
-
-        // }
-
-
-
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_sec = std::chrono::duration_cast<std::chrono::seconds>(
-            now - g_testStartTime).count();
-        
-        // Trigger COLLECT between 100-120 seconds
-        if (elapsed_sec >= 100 && elapsed_sec <= 120 && !g_collectTriggered)
+        if (txn_count >= 6000 && txn_count <= 6500) 
         {
-            CLOG_INFO(Overlay, "Forcing COLLECT at elapsed time {}s (view {})", 
-                     elapsed_sec, currentView);
-            
-            // Artificially desync to force COLLECT
-            latestCommittedView = currentView - 2;
-            g_collectTriggered = true;  // Only trigger once
+            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+
+            // artificially "desync" latestCommittedView
+            latestCommittedView = currentView - 2;  
+            forceCollectRound = 1;  // only do this once
+
+
         }
-        
-        //  Reset after 120 seconds to resume normal operation
-        if (elapsed_sec > 120 && g_collectTriggered)
-        {
-            CLOG_INFO(Overlay, "COLLECT window closed at {}s, resuming normal consensus", 
-                     elapsed_sec);
-            // Don't reset latestCommittedView here - let COLLECT complete naturally
-        }
-
-
-
-
-
-
-
-
-
-
 
 
         if (latestCommittedView == currentView - 1)
