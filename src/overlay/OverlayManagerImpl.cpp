@@ -3161,62 +3161,56 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_ECHO:
-            CLOG_INFO(Overlay, "Received ECHO (vp={}, bp={}) for view {} from {} (origin={})",
-                      cm.vp, hexAbbrev(cm.bp), cm.view,
-                      KeyUtils::toShortString(sender),
-                      KeyUtils::toShortString(cm.origin));
-
-            {
-                ViewBlockKey vb{cm.vp, cm.bp};
-                st.echoes[vb].insert(sender);
-
-                CLOG_INFO(Overlay, "st.echoes[vb].size():  {} (origin={})",
-                st.echoes[vb].size(),
+        CLOG_INFO(Overlay, "Received ECHO (vp={}, bp={}) for view {} from {} (origin={})",
+                cm.vp, hexAbbrev(cm.bp), cm.view,
+                KeyUtils::toShortString(sender),
                 KeyUtils::toShortString(cm.origin));
+        {
+            ViewBlockKey vb{cm.vp, cm.bp};
+            st.echoes[vb].insert(sender);
 
+            CLOG_INFO(Overlay, "st.echoes[vb].size(): {} (origin={})",
+                    st.echoes[vb].size(),
+                    KeyUtils::toShortString(cm.origin));
 
+            if (st.echoes[vb].size() >= 2*f+1 && !st.rSent.count(vb))
+            {
+                st.rSent.insert(vb);
 
-                if (st.echoes[vb].size() >= 2*f+1 && !st.rSent.count(vb))
+                CLOG_INFO(Overlay, "want to send READY MSG");
+
+                if (g_ps.count(BlockKey{cm.vp, cm.bp}))
                 {
-                    st.rSent.insert(vb);
+                    CLOG_INFO(Overlay, "Sending READY MSG");
+                    
+                    auto msg = std::make_shared<StellarMessage>();
+                    msg->type(CUSTOM_MESSAGE);
+                    msg->customMessage().msgType = CUSTOM_READY;
+                    msg->customMessage().view = currentView;  // ✅ CHANGED from cm.view
+                    msg->customMessage().vp = cm.vp;
+                    msg->customMessage().bp = cm.bp;
+                    msg->customMessage().origin = cm.origin;
+                    broadcastMessage(msg);
+                    st.readies[vb].insert(selfID);
+                }
+                else if (cm.vp < st.preparedView)
+                {
+                    CLOG_INFO(Overlay, "Sending CONDREADY MSG");
+                    
+                    auto msg = std::make_shared<StellarMessage>();
+                    msg->type(CUSTOM_MESSAGE);
+                    msg->customMessage().msgType = CUSTOM_CONDREADY;
+                    msg->customMessage().view = currentView;  // ✅ CHANGED from cm.view
+                    msg->customMessage().vp = st.preparedView;
+                    msg->customMessage().bp = st.preparedBlock;
+                    msg->customMessage().origin = cm.origin;
+                    broadcastMessage(msg);
 
-                    CLOG_INFO(Overlay, "want to send READY MSG");
-
-                    if (g_ps.count(BlockKey{cm.vp, cm.bp}))
-                    {
-
-                        CLOG_INFO(Overlay, "Sending READY MSG");
-                        // I prepared it → send READY
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType    = CUSTOM_READY;
-                        msg->customMessage().view       = cm.view;
-                        msg->customMessage().vp         = cm.vp;
-                        msg->customMessage().bp         = cm.bp;
-                        msg->customMessage().origin     = cm.origin;
-                        broadcastMessage(msg);
-                        st.readies[vb].insert(selfID);
-
-
-                    }
-                    else if (cm.vp < st.preparedView)
-                    {
-                        CLOG_INFO(Overlay, "Sending CONDREADY MSG");
-                        // I have higher prepared → send CONDREADY
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType    = CUSTOM_CONDREADY;
-                        msg->customMessage().view       = cm.view;
-                        msg->customMessage().vp         = st.preparedView;
-                        msg->customMessage().bp         = st.preparedBlock;
-                        msg->customMessage().origin     = cm.origin;
-                        broadcastMessage(msg);
-
-                        st.readies[vb].insert(selfID);
-                    }
+                    st.readies[vb].insert(selfID);
                 }
             }
-            break;
+        }
+        break;
 
         // ================================================================
         case CUSTOM_READY:
@@ -3224,6 +3218,17 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 cm.vp, hexAbbrev(cm.bp), cm.view,
                 KeyUtils::toShortString(sender));
         {
+
+
+            if (cm.view != currentView)
+            {
+                CLOG_INFO(Overlay, "Ignoring READY for view {} (current={})",
+                        cm.view, currentView);
+                break;
+            }
+            
+
+
             ViewBlockKey vb{cm.vp, cm.bp};
             st.readies[vb].insert(sender);
             
@@ -3268,6 +3273,15 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 cm.vp, hexAbbrev(cm.bp), cm.view,
                 KeyUtils::toShortString(sender));
         {
+
+            if (cm.view != currentView)
+            {
+                CLOG_INFO(Overlay, "Ignoring CONDREADY for view {} (current={})",
+                        cm.view, currentView);
+                break;
+            }
+
+
             ViewBlockKey vb{cm.vp, cm.bp};
             
             st.collection[sender] = {cm.vp, cm.bp};
