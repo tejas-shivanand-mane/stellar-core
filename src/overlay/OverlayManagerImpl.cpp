@@ -2393,6 +2393,7 @@ OverlayManagerImpl::prop()
 
 
 
+        CLOG_INFO(Overlay, "txn_count={}", txn_count);
         
 
 
@@ -2402,7 +2403,7 @@ OverlayManagerImpl::prop()
 
             // artificially "desync" latestCommittedView
             latestCommittedView = currentView - 2;  
-            forceCollectRound = 1;  // only do this once
+            // forceCollectRound = 1;  // only do this once
 
 
         }
@@ -2483,7 +2484,7 @@ OverlayManagerImpl::prop()
             msg->customMessage().msgType = CUSTOM_COLLECT;
             msg->customMessage().view    = currentView;
 
-            CLOG_DEBUG(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
+            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
                     currentView);
 
             
