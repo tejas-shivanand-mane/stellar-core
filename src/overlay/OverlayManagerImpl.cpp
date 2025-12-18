@@ -2141,7 +2141,7 @@ OverlayManagerImpl::tick()
         NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
         std::string shortID = KeyUtils::toShortString(selfID);
-        CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
+        CLOG_DEBUG(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
 
         static bool accountCreatedLocally = false;
         if (!accountCreatedLocally)
@@ -2290,13 +2290,13 @@ OverlayManagerImpl::prop()
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
     std::string shortID = KeyUtils::toShortString(selfID);
-    CLOG_INFO(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
+    CLOG_DEBUG(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
 
 
     if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
     {
 
-        CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE");
+        CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE");
 
         static auto lastSent = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
@@ -2339,12 +2339,12 @@ OverlayManagerImpl::prop()
         if (latestCommittedView == currentView - 1)
         {
 
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 2");
+            CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
             
             Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
             txn_count++;
 
-            CLOG_INFO(Overlay, "SEND_CUSTOM_MESSAGE 3");
+            CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 3");
 
 
             auto msg = std::make_shared<StellarMessage>();
@@ -2355,7 +2355,7 @@ OverlayManagerImpl::prop()
             msg->customMessage().blockHash = blockHash;
             msg->customMessage().data      = std::to_string(txn_count);
 
-            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+            CLOG_DEBUG(Overlay, "Leader proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
 
 
@@ -2379,7 +2379,7 @@ OverlayManagerImpl::prop()
             msg->customMessage().msgType = CUSTOM_COLLECT;
             msg->customMessage().view    = currentView;
 
-            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
+            CLOG_DEBUG(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
                     currentView);
 
             
@@ -2915,7 +2915,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             st.prepareVoters.insert(sender);
 
-            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
                       hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
@@ -2927,7 +2927,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_COMMIT:
-            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}",
+            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
 
             st.commitVoters.insert(sender);
@@ -3016,19 +3016,19 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 // ================================================================
         case CUSTOM_EXECUTE:
-            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
+            CLOG_DEBUG(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
                       hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
 
             st.executeVoters.insert(sender);
 
-            CLOG_INFO(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
+            CLOG_DEBUG(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
                       hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
             // Ensure we only trigger once
             if (st.executeVoters.size() > 2 * f + 1 && st.executedView < cm.view)
             {
                 st.executedView = cm.view;
 
-                CLOG_INFO(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
+                CLOG_DEBUG(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
                         hexAbbrev(cm.blockHash), cm.view);
 
                 prop();
