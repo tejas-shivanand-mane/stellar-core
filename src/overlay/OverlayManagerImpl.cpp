@@ -49,6 +49,78 @@
 // };
 
 
+struct CustomTransaction
+{
+    uint64_t txnId;           // Unique transaction ID
+    std::string payload;      // Transaction data/payload
+    uint64_t timestamp;       // When transaction was created
+    std::string sender;       // Who created it (could be node ID)
+    
+    // Serialize for transmission
+    std::string serialize() const
+    {
+        return std::to_string(txnId) + ":" + 
+               payload + ":" + 
+               std::to_string(timestamp) + ":" + 
+               sender;
+    }
+    
+    // Deserialize from string
+    static CustomTransaction deserialize(const std::string& data)
+    {
+        CustomTransaction txn;
+        std::istringstream ss(data);
+        std::string token;
+        
+        std::getline(ss, token, ':');
+        txn.txnId = std::stoull(token);
+        
+        std::getline(ss, txn.payload, ':');
+        
+        std::getline(ss, token, ':');
+        txn.timestamp = std::stoull(token);
+        
+        std::getline(ss, txn.sender, ':');
+        
+        return txn;
+    }
+};
+
+struct TransactionBatch
+{
+    std::vector<CustomTransaction> transactions;
+    
+    // Serialize all transactions
+    std::string serialize() const
+    {
+        std::string result;
+        for (size_t i = 0; i < transactions.size(); ++i)
+        {
+            result += transactions[i].serialize();
+            if (i < transactions.size() - 1)
+                result += "|";  // Separator between transactions
+        }
+        return result;
+    }
+    
+    // Deserialize batch
+    static TransactionBatch deserialize(const std::string& data)
+    {
+        TransactionBatch batch;
+        std::istringstream ss(data);
+        std::string txnData;
+        
+        while (std::getline(ss, txnData, '|'))
+        {
+            batch.transactions.push_back(CustomTransaction::deserialize(txnData));
+        }
+        
+        return batch;
+    }
+};
+
+
+
 struct SCPTxnStats {
     int totalSubmitted = 0;
     int totalCommitted = 0;
@@ -2340,9 +2412,38 @@ OverlayManagerImpl::prop()
         {
 
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
+
+
+
+
+            const size_t BATCH_SIZE = 100;
+            TransactionBatch batch;
+            
+            uint64_t currentTime = VirtualClock::to_time_t(mApp.getClock().system_now());
+            
+            for (size_t i = 0; i < BATCH_SIZE; ++i)
+            {
+                CustomTransaction txn;
+                txn.txnId = txn_count + i;
+                txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
+                txn.timestamp = currentTime;
+                txn.sender = shortID;
+                
+                batch.transactions.push_back(txn);
+            }
+
+
+
+
+
+
+
             
             Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
-            txn_count++;
+            // txn_count++;
+            
+            txn_count += BATCH_SIZE;
+
 
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 3");
 
@@ -2353,7 +2454,10 @@ OverlayManagerImpl::prop()
             msg->customMessage().msgType   = CUSTOM_PROPOSE;
             msg->customMessage().view      = currentView;
             msg->customMessage().blockHash = blockHash;
-            msg->customMessage().data      = std::to_string(txn_count);
+
+            
+            // msg->customMessage().data      = std::to_string(txn_count);
+            msg->customMessage().data      = batch.serialize();
 
             CLOG_DEBUG(Overlay, "Leader proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
@@ -2953,9 +3057,28 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 BlockKey nextKey{currentView, Hash()};
                 g_txn[nextKey].proposalSentForView = false;
 
-                CLOG_INFO(Overlay, "Committed block {} at view {}",
-                          hexAbbrev(cm.blockHash), cm.view);
+                // CLOG_INFO(Overlay, "Committed block {} at view {}",
+                //           hexAbbrev(cm.blockHash), cm.view);
 
+
+
+                // ✅ Deserialize and print all transactions in the batch
+                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                
+                CLOG_INFO(Overlay, "========================================");
+                CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
+                        hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
+                CLOG_INFO(Overlay, "========================================");
+                
+                // ✅ Print each transaction's details
+                for (size_t i = 0; i < batch.transactions.size(); ++i)
+                {
+                    const auto& txn = batch.transactions[i];
+                    CLOG_INFO(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
+                            i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
+                }
+                
+                CLOG_INFO(Overlay, "========================================");
 
                 
 
