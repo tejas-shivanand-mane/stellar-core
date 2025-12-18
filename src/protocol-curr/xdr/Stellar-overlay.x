@@ -72,7 +72,7 @@ struct CustomMessage
     CustomMessageType msgType;
     uint64 view;       // current view 
     Hash blockHash;    // identifies the block
-    string data<256>;  // payload
+    string data<100000>;  // payload
     uint64 vp;    // used in SEND/ECHO/READY for vp
     Hash bp; // used in SEND/ECHO/READY for bp
     NodeID origin;     // process p′ that originally sent SEND
