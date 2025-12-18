@@ -2803,7 +2803,7 @@ OverlayManagerImpl::sendPrepare(uint64_t view, Hash const& blockHash, std::strin
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2818,7 +2818,7 @@ OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2836,7 +2836,7 @@ OverlayManagerImpl::sendExecute(uint64_t view, Hash const& blockHash, std::strin
     // Send only if this node is leader (SEND_CUSTOM_MESSAGE == true)
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast EXECUTE for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast EXECUTE for block {} view {}", hexAbbrev(blockHash), view);
 
 
 }
