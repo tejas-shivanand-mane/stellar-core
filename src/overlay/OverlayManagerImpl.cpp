@@ -2396,7 +2396,7 @@ OverlayManagerImpl::prop()
         
 
 
-        if (txn_count == 600000 && txn_count <= 610000) 
+        if (txn_count == 6000 && txn_count <= 6500) 
         {
             CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
@@ -2416,7 +2416,7 @@ OverlayManagerImpl::prop()
 
 
 
-            const size_t BATCH_SIZE = 100;
+            const size_t BATCH_SIZE = 1;
             TransactionBatch batch;
             
             uint64_t currentTime = VirtualClock::to_time_t(mApp.getClock().system_now());
