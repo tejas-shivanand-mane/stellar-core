@@ -2397,7 +2397,7 @@ OverlayManagerImpl::prop()
         
 
 
-        if (currentView >= 2000 && currentView < 2050) 
+        if (txn_count >= 200000 && txn_count < 205000) 
         {
             CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
