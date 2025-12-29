@@ -2208,7 +2208,6 @@ OverlayManagerImpl::tick()
 
         static uint32_t lastLedger = 0;
 
-        // ⚠️ CRITICAL: Only run if SUBMIT_TEST_TRANSACTIONS is enabled in config
 
         NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
@@ -2397,16 +2396,16 @@ OverlayManagerImpl::prop()
         
 
 
-        if (txn_count >= 200000 && txn_count < 200100) 
-        {
-            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+        // if (txn_count >= 200000 && txn_count < 200100) 
+        // {
+        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
-            // artificially "desync" latestCommittedView
-            latestCommittedView = currentView - 2;  
-            // forceCollectRound = 1;  // only do this once
+        //     // artificially "desync" latestCommittedView
+        //     latestCommittedView = currentView - 2;  
+        //     // forceCollectRound = 1;  // only do this once
 
 
-        }
+        // }
 
 
         if (latestCommittedView == currentView - 1)
@@ -2458,7 +2457,9 @@ OverlayManagerImpl::prop()
 
             
             // msg->customMessage().data      = std::to_string(txn_count);
-            msg->customMessage().data      = batch.serialize();
+            // msg->customMessage().data      = batch.serialize();
+            msg->customMessage().data      = "";
+
 
             CLOG_DEBUG(Overlay, "Leader proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
@@ -3096,36 +3097,36 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
                 
-                auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
+                // auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
 
 
-                // Instead of pushing dummyTx into txSet:
-                TransactionSet txSet;
-                txSet.previousLedgerHash = lcl.hash;
-                // DO NOT add invalid txns
+                // // Instead of pushing dummyTx into txSet:
+                // TransactionSet txSet;
+                // txSet.previousLedgerHash = lcl.hash;
+                // // DO NOT add invalid txns
 
-                auto txSetFrame = TxSetXDRFrame::makeFromWire(txSet);
+                // auto txSetFrame = TxSetXDRFrame::makeFromWire(txSet);
 
-                // Inflate the hash (just for uniqueness)
-                Hash h = sha256(xdr::xdr_to_opaque(txSet));
-                const_cast<Hash&>(txSetFrame->getContentsHash()) = h;
+                // // Inflate the hash (just for uniqueness)
+                // Hash h = sha256(xdr::xdr_to_opaque(txSet));
+                // const_cast<Hash&>(txSetFrame->getContentsHash()) = h;
 
-                // Now externalize
-                mApp.getHerder().externalizeValue(
-                    txSetFrame,
-                    lcl.header.ledgerSeq + 1,
-                    VirtualClock::to_time_t(mApp.getClock().system_now()),
-                    {},
-                    std::nullopt
-                );
+                // // Now externalize
+                // mApp.getHerder().externalizeValue(
+                //     txSetFrame,
+                //     lcl.header.ledgerSeq + 1,
+                //     VirtualClock::to_time_t(mApp.getClock().system_now()),
+                //     {},
+                //     std::nullopt
+                // );
 
-                // 🔹 Then patch logging counters manually
-                CLOG_INFO(Ledger, "Got consensus: [seq={}, prev={}, txs={}, ops={}, sv: ...]",
-                        lcl.header.ledgerSeq + 1,
-                        hexAbbrev(lcl.hash),
-                        1000,  // fake tx count
-                        1000   // fake op count
-                );
+                // // 🔹 Then patch logging counters manually
+                // CLOG_INFO(Ledger, "Got consensus: [seq={}, prev={}, txs={}, ops={}, sv: ...]",
+                //         lcl.header.ledgerSeq + 1,
+                //         hexAbbrev(lcl.hash),
+                //         1000,  // fake tx count
+                //         1000   // fake op count
+                // );
 
 
 
