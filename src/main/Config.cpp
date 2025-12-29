@@ -318,7 +318,7 @@ Config::Config() : NODE_SEED(SecretKey::random())
     ENTRY_CACHE_SIZE = 100000;
     PREFETCH_BATCH_SIZE = 1000;
 
-    HISTOGRAM_WINDOW_SIZE = std::chrono::seconds(3600);
+    HISTOGRAM_WINDOW_SIZE = std::chrono::seconds(15);
 
     HALT_ON_INTERNAL_TRANSACTION_ERROR = false;
 
