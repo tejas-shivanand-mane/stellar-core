@@ -3068,8 +3068,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 TransactionBatch batch = TransactionBatch::deserialize(cm.data);
                 
                 CLOG_INFO(Overlay, "========================================");
+                // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
+                //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
                 CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
-                        hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
+                        hexAbbrev(cm.blockHash), cm.view, 100);
+
                 CLOG_INFO(Overlay, "========================================");
                 
                 // ✅ Print each transaction's details
