@@ -2578,6 +2578,9 @@ OverlayManagerImpl::clearLedgersBelow(uint32_t ledgerSeq, uint32_t lclSeq)
 void
 OverlayManagerImpl::updateSizeCounters()
 {
+
+    // return;
+
     mOverlayMetrics.mPendingPeersSize.set_count(getPendingPeersCount());
     mOverlayMetrics.mAuthenticatedPeersSize.set_count(
         getAuthenticatedPeersCount());
@@ -3492,7 +3495,7 @@ OverlayManagerImpl::broadcastMessage(std::shared_ptr<StellarMessage const> msg,
     auto res = mFloodGate.broadcast(msg, hash);
     if (res)
     {
-        mOverlayMetrics.mMessagesBroadcast.Mark();
+        // mOverlayMetrics.mMessagesBroadcast.Mark();
     }
     return res;
 }
@@ -3570,6 +3573,8 @@ OverlayManagerImpl::recordMessageMetric(StellarMessage const& stellarMsg,
 
     releaseAssert(threadIsMain());
     
+
+
     // added return to prevent metrics
     return; 
 
