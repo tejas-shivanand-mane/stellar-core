@@ -3024,7 +3024,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             st.prepareVoters.insert(sender);
 
-            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
                       hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
@@ -3036,7 +3036,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_COMMIT:
-            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}",
+            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
 
             st.commitVoters.insert(sender);
