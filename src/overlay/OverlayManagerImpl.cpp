@@ -2392,7 +2392,7 @@ OverlayManagerImpl::prop()
 
 
 
-        CLOG_INFO(Overlay, "txn_count={}", txn_count);
+        CLOG_INFO(Overlay, "txn_count={}, latestCommittedView: {}, currentView: {}", txn_count, latestCommittedView, currentView);
         
 
 
