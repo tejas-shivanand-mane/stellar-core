@@ -3090,13 +3090,15 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 
 
-                sendExecute(cm.view, cm.blockHash, cm.data);
 
-                // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+                prop();
 
-                {
-                    st.executeVoters.insert(selfID);
-                }
+
+                // sendExecute(cm.view, cm.blockHash, cm.data);
+
+                // {
+                //     st.executeVoters.insert(selfID);
+                // }
 
 
 
