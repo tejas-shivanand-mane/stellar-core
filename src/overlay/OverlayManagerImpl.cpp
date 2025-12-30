@@ -2972,7 +2972,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     {
         // ================================================================
         case CUSTOM_PROPOSE:
-        if (cm.view == currentView)
+        if (cm.view >= currentView)
         {
             CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
