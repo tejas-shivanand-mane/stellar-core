@@ -2977,7 +2977,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
 
-            if (!st.preparedSent && latestCommittedView == cm.view - 1)
+            if (!st.preparedSent && latestCommittedView <= cm.view - 1)
             {
                 st.preparedSent = true;
                 st.preparedView = cm.view;
