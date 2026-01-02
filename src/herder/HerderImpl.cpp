@@ -23,6 +23,9 @@
 #include "main/ErrorMessages.h"
 #include "main/PersistentState.h"
 #include "overlay/OverlayManager.h"
+// import for modified SCP
+#include "overlay/OverlayManagerImpl.h"
+
 #include "process/ProcessManager.h"
 #include "scp/LocalNode.h"
 #include "scp/Slot.h"
@@ -472,9 +475,30 @@ HerderImpl::valueExternalized(uint64 slotIndex, StellarValue const& value,
         // and there is no point in taking a position after the round is over
         mTriggerTimer.cancel();
 
+
+
+
+
+
+
         // This call may cause LedgerManager to close ledger and trigger next
         // ledger
         processExternalized(slotIndex, value, isLatestSlot);
+
+
+
+        // ✅ Print transaction set hash (the complete block hash)
+        auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
+        
+        CLOG_INFO(Herder, "[SCP COMMIT] Ledger {}: txSetHash={}, ledgerHash={}", 
+                 lcl.header.ledgerSeq, hexAbbrev(value.txSetHash), hexAbbrev(lcl.hash));
+        
+
+
+
+
+
+
 
         // Perform cleanups, and maybe process SCP queue
         newSlotExternalized(false, value);
@@ -499,6 +523,11 @@ HerderImpl::valueExternalized(uint64 slotIndex, StellarValue const& value,
         {
             trackingHeartBeat();
         }
+        
+        // tmane
+        submitNextBatchOfTransactions(mApp);
+
+
     }
     else
     {
@@ -608,7 +637,7 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
 )
 {
 
-    CLOG_INFO(Herder, "recvTransaction entered");
+    CLOG_DEBUG(Herder, "recvTransaction entered");
 
     ZoneScoped;
     TransactionQueue::AddResult result(
@@ -624,14 +653,14 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
         mTransactionQueue.sourceAccountPending(tx->getSourceID()) &&
         tx->isSoroban();
 
-    CLOG_INFO(Herder, "recvTransaction Step 2");
+    CLOG_DEBUG(Herder, "recvTransaction Step 2");
 
 
     
     if (hasSoroban || hasClassic)
     {
 
-        CLOG_INFO(Herder, "recvTransaction Step 2.1");
+        CLOG_DEBUG(Herder, "recvTransaction Step 2.1");
 
         CLOG_DEBUG(Herder,
                    "recv transaction {} for {} rejected due to 1 tx per source "
@@ -643,7 +672,7 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     }
     else if (!tx->isSoroban())
     {
-        CLOG_INFO(Herder, "recvTransaction Step 2.2");
+        CLOG_DEBUG(Herder, "recvTransaction Step 2.2");
 
         result = mTransactionQueue.tryAdd(tx, submittedFromSelf
 #ifdef BUILD_TESTS
@@ -655,7 +684,7 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     else if (mSorobanTransactionQueue)
     {
 
-        CLOG_INFO(Herder, "recvTransaction Step 2.3");
+        CLOG_DEBUG(Herder, "recvTransaction Step 2.3");
 
         result = mSorobanTransactionQueue->tryAdd(tx, submittedFromSelf
 #ifdef BUILD_TESTS
@@ -666,7 +695,7 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
     }
     else
     {
-        CLOG_INFO(Herder, "recvTransaction Step 2.4");
+        CLOG_DEBUG(Herder, "recvTransaction Step 2.4");
 
         // Received Soroban transaction before protocol 20; since this
         // transaction isn't supported yet, return ERROR
@@ -675,12 +704,12 @@ HerderImpl::recvTransaction(TransactionFrameBasePtr tx, bool submittedFromSelf
             txNOT_SUPPORTED);
     }
 
-    CLOG_INFO(Herder, "recvTransaction Step 3");
+    CLOG_DEBUG(Herder, "recvTransaction Step 3");
 
 
     if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING)
     {
-        CLOG_INFO(Herder, "recv transaction {} for {}",
+        CLOG_DEBUG(Herder, "recv transaction {} for {}",
                    hexAbbrev(tx->getFullHash()),
                    KeyUtils::toShortString(tx->getSourceID()));
     }

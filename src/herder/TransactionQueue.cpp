@@ -301,9 +301,9 @@ TransactionQueue::canAdd(
 {
 
 
-    CLOG_INFO(Tx, "canAdd() shortcutting start");
+    CLOG_DEBUG(Tx, "canAdd() shortcutting start");
 
-    CLOG_INFO(Tx, "Envelope type (numeric): {}", static_cast<int>(tx->getEnvelope().type()));
+    CLOG_DEBUG(Tx, "Envelope type (numeric): {}", static_cast<int>(tx->getEnvelope().type()));
 
 
     // CLOG_INFO(Tx, "canAdd(): TEST BYPASS enabled, accepting tx {}",
@@ -708,7 +708,7 @@ TransactionQueue::tryAdd(TransactionFrameBasePtr tx, bool submittedFromSelf
 )
 {
 
-    CLOG_INFO(Tx, "starting tryAdd()");
+    CLOG_DEBUG(Tx, "starting tryAdd()");
 
 
 

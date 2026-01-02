@@ -36,6 +36,10 @@ Maintain the set of peers we are connected to
 namespace stellar
 {
 
+
+    void submitNextBatchOfTransactions(Application& app);
+
+
 class OverlayManagerImpl : public OverlayManager
 {
   protected:
@@ -122,6 +126,9 @@ class OverlayManagerImpl : public OverlayManager
   public:
     OverlayManagerImpl(Application& app);
     ~OverlayManagerImpl();
+
+
+
 
     void clearLedgersBelow(uint32_t ledgerSeq, uint32_t lclSeq) override;
     bool recvFloodedMsgID(Peer::pointer peer, Hash const& msgID) override;
