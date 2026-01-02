@@ -464,7 +464,7 @@ void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int b
             {
                 g_scpTxnStats.totalSubmitted++;
                 g_scpTxnStats.totalOperations += batchSize;  // Track operations
-                CLOG_DEBUG(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
+                CLOG_INFO(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
                           accountIndex, batchSize, hexAbbrev(txHash));
                 txCounters[accountIndex]++;
             }
