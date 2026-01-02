@@ -885,7 +885,7 @@ TransactionEnvelope createSCPTxFromProposal(
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = false;
+static bool ENABLE_SCP_TRACKING = true;
 
 struct SCPStats {
     int totalBatches = 0;
@@ -1572,23 +1572,23 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-    if (pbft_start==0)
-    {
+    // if (pbft_start==0)
+    // {
 
 
-        size_t authenticatedPeers = getAuthenticatedPeersCount();
-        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
-        size_t expectedPeers = totalNodes - 1;
+    //     size_t authenticatedPeers = getAuthenticatedPeersCount();
+    //     size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
+    //     size_t expectedPeers = totalNodes - 1;
         
-        CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
+    //     CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
 
-        if (authenticatedPeers == expectedPeers)
+    //     if (authenticatedPeers == expectedPeers)
 
-        {
-            prop();
-            pbft_start = 1;
-        }
-    }
+    //     {
+    //         prop();
+    //         pbft_start = 1;
+    //     }
+    // }
 
 
     auto rescheduleTick = gsl::finally([&]() {
