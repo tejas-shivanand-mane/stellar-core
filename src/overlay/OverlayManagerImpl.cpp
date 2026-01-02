@@ -464,7 +464,7 @@ void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int b
             {
                 g_scpTxnStats.totalSubmitted++;
                 g_scpTxnStats.totalOperations += batchSize;  // Track operations
-                CLOG_INFO(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
+                CLOG_DEBUG(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
                           accountIndex, batchSize, hexAbbrev(txHash));
                 txCounters[accountIndex]++;
             }
@@ -923,7 +923,7 @@ void submitNextBatchOfTransactions(Application& app)
         auto submitTime = std::chrono::steady_clock::now();
         
         CLOG_INFO(Overlay, "[SCP SUBMIT] Submitting {} operations for ledger {} at t={}",
-                 10 * NUM_TEST_ACCOUNTS * 100, currentLedger + 1,
+                  NUM_TEST_ACCOUNTS * 100, currentLedger + 1,
                  std::chrono::duration_cast<std::chrono::milliseconds>(
                      submitTime.time_since_epoch()).count());
 
