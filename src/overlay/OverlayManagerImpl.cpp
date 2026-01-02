@@ -2395,7 +2395,7 @@ OverlayManagerImpl::sendPrepare(uint64_t view, Hash const& blockHash, std::strin
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2410,7 +2410,7 @@ OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2507,7 +2507,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             st.prepareVoters.insert(sender);
 
-            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
                       hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
@@ -2519,7 +2519,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_COMMIT:
-            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}",
+            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
 
             st.commitVoters.insert(sender);
@@ -2553,19 +2553,19 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 // ✅ Deserialize and print all transactions in the batch
                 TransactionBatch batch = TransactionBatch::deserialize(cm.data);
                 
-                CLOG_INFO(Overlay, "========================================");
+                CLOG_DEBUG(Overlay, "========================================");
                 // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
                 //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
                 CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
                         hexAbbrev(cm.blockHash), cm.view, 100);
 
-                CLOG_INFO(Overlay, "========================================");
+                CLOG_DEBUG(Overlay, "========================================");
                 
                 // ✅ Print each transaction's details
                 for (size_t i = 0; i < batch.transactions.size(); ++i)
                 {
                     const auto& txn = batch.transactions[i];
-                    CLOG_INFO(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
+                    CLOG_DEBUG(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
                             i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
                 }
                 
