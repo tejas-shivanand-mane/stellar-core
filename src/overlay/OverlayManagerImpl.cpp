@@ -1884,16 +1884,16 @@ OverlayManagerImpl::prop()
         
 
 
-        // if (txn_count >= 200000 && txn_count < 200100) 
-        // {
-        //     CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+        if (currentView >= 70000 && currentView < 71000) 
+        {
+            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
 
-        //     // artificially "desync" latestCommittedView
-        //     latestCommittedView = currentView - 2;  
-        //     // forceCollectRound = 1;  // only do this once
+            // artificially "desync" latestCommittedView
+            latestCommittedView = currentView - 2;  
+            // forceCollectRound = 1;  // only do this once
 
 
-        // }
+        }
 
 
         if (latestCommittedView == currentView - 1)
