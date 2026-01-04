@@ -1898,7 +1898,8 @@ OverlayManagerImpl::prop()
 
                 collectWindowArmed  = true;
                 collectWindowActive = true;
-                collectWindowStartView = currentView;
+                collectAttempts     = 0;
+
 
                 CLOG_INFO(Overlay,
                         "⏱️ Forcing COLLECT for next {} views starting at view {}",
@@ -1907,6 +1908,11 @@ OverlayManagerImpl::prop()
         }
                 
 
+        // If window active, force COLLECT by desync
+        if (collectWindowActive)
+        {
+            latestCommittedView = currentView - 2;
+        }
 
 
 
@@ -1981,11 +1987,6 @@ OverlayManagerImpl::prop()
             {
                 lastCollectSentView = currentView;
 
-                // If window active, force COLLECT by desync
-                if (collectWindowActive)
-                {
-                    latestCommittedView = currentView - 2;
-                }
 
                 auto msg = std::make_shared<StellarMessage>();
                 msg->type(CUSTOM_MESSAGE);
