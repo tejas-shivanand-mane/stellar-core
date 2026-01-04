@@ -44,7 +44,7 @@ static bool pbftStartTimeSet = false;
 static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 static constexpr uint64_t COLLECT_WINDOW_VIEWS = 1000;
-
+constexpr int FORCE_COLLECT_AFTER_SEC = 60;
 
 
 struct CustomTransaction
@@ -1887,7 +1887,7 @@ OverlayManagerImpl::prop()
             auto elapsed =
                 std::chrono::duration_cast<std::chrono::seconds>(now - pbftStartTime);
 
-            if (elapsed.count() >= 30)
+            if (elapsed.count() >= FORCE_COLLECT_AFTER_SEC)
             {
                 collectWindowActive = true;
                 collectWindowStartView = currentView;
