@@ -1895,6 +1895,8 @@ OverlayManagerImpl::prop()
 
             if (elapsed.count() >= FORCE_COLLECT_AFTER_SEC)
             {
+
+                collectWindowArmed  = true;
                 collectWindowActive = true;
                 collectWindowStartView = currentView;
 
