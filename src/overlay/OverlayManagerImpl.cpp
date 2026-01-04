@@ -36,17 +36,15 @@
 #include <algorithm>
 #include "OverlayManagerImpl.h"
 
-// ============================================================================
-// SCP TRANSACTION TRACKING
-// ============================================================================
 
-// struct SCPTxnStats {
-//     int totalSubmitted = 0;
-//     int totalCommitted = 0;
-//     std::vector<int64_t> txLatencies;
-//     std::unordered_map<Hash, std::chrono::steady_clock::time_point> submitTimes;
-//     std::chrono::steady_clock::time_point testStart;
-// };
+// ---- Forced COLLECT window control ----
+static std::chrono::steady_clock::time_point pbftStartTime;
+static bool pbftStartTimeSet = false;
+
+static bool collectWindowActive = false;
+static uint64_t collectWindowStartView = 0;
+static constexpr uint64_t COLLECT_WINDOW_VIEWS = 1000;
+
 
 
 struct CustomTransaction
@@ -1587,6 +1585,15 @@ OverlayManagerImpl::tick()
         {
             prop();
             pbft_start = 1;
+
+            pbftStartTime = std::chrono::steady_clock::now();
+            pbftStartTimeSet = true;
+
+            CLOG_INFO(Overlay, "PBFT started — timer armed");
+
+
+
+
         }
     }
 
@@ -1841,6 +1848,8 @@ OverlayManagerImpl::tick()
 
 }
 
+
+
 void
 OverlayManagerImpl::prop()
 {
@@ -1865,34 +1874,54 @@ OverlayManagerImpl::prop()
 
 
 
-            // if (shortID == "GBDOU")   // <-- use actual node ID
-            // {
-            //     BlockKey fakeKey{currentView, latestCommittedBlock};
-            //     auto& st = g_txn[fakeKey];
-
-            //     st.preparedView = currentView + 1;        // higher than vp
-            //     st.preparedBlock = latestCommittedBlock;  // extend last committed
-
-            //     CLOG_INFO(Overlay,
-            //         "Node {} artificially bumped preparedView={} at COLLECT (block={}) to trigger CONDREADY",
-            //         shortID, st.preparedView, hexAbbrev(st.preparedBlock));
-            // }
-
-
 
         CLOG_INFO(Overlay, "txn_count={}, latestCommittedView: {}, currentView: {}", txn_count, latestCommittedView, currentView);
-        
 
 
-        if (currentView >= 20000 && currentView < 20100) 
+
+
+        // ---- Activate forced COLLECT window after 30s ----
+        if (pbftStartTimeSet && !collectWindowActive)
         {
-            CLOG_INFO(Overlay, "Forcing COLLECT round at txn_count={}", txn_count);
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(now - pbftStartTime);
 
-            // artificially "desync" latestCommittedView
-            latestCommittedView = currentView - 2;  
-            // forceCollectRound = 1;  // only do this once
+            if (elapsed.count() >= 30)
+            {
+                collectWindowActive = true;
+                collectWindowStartView = currentView;
+
+                CLOG_INFO(Overlay,
+                        "⏱️ Forcing COLLECT for next {} views starting at view {}",
+                        COLLECT_WINDOW_VIEWS, collectWindowStartView);
+            }
+        }
+                
 
 
+        // ---- Forced COLLECT window logic ----
+        if (collectWindowActive)
+        {
+            uint64_t viewsElapsed = currentView - collectWindowStartView;
+
+            if (viewsElapsed < COLLECT_WINDOW_VIEWS)
+            {
+                // Artificially desync to force COLLECT
+                latestCommittedView = currentView - 2;
+
+                CLOG_DEBUG(Overlay,
+                        "Forced COLLECT active (view {} / {})",
+                        viewsElapsed + 1, COLLECT_WINDOW_VIEWS);
+            }
+            else
+            {
+                collectWindowActive = false;
+
+                CLOG_INFO(Overlay,
+                        "Forced COLLECT window ended at view {}",
+                        currentView);
+            }
         }
 
 
