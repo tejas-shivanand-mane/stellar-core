@@ -48,7 +48,7 @@ static uint64_t collectAttempts = 0;
 static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 100;
 
 
-constexpr int FORCE_COLLECT_AFTER_SEC = 60;
+constexpr int FORCE_COLLECT_AFTER_SEC = 100;
 
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
@@ -1964,7 +1964,7 @@ OverlayManagerImpl::prop()
 
             // msg->customMessage().data      = std::string(19000, 'X');
 
-            CLOG_DEBUG(Overlay, "Leader proposing block {} in view {}",
+            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
 
 
