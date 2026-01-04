@@ -49,6 +49,8 @@ static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 1000;
 
 
 constexpr int FORCE_COLLECT_AFTER_SEC = 60;
+
+static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
 
 struct CustomTransaction
@@ -1885,7 +1887,7 @@ OverlayManagerImpl::prop()
 
 
         // ---- Activate forced COLLECT window after 30s ----
-        if (pbftStartTimeSet && !collectWindowActive)
+        if (pbftStartTimeSet && !collectWindowArmed)
         {
             auto now = std::chrono::steady_clock::now();
             auto elapsed =
@@ -1903,28 +1905,6 @@ OverlayManagerImpl::prop()
         }
                 
 
-
-        // ---- Forced COLLECT window logic ----
-        if (collectWindowActive)
-        {
-            if (collectAttempts < MAX_COLLECT_ATTEMPTS)
-            {
-                latestCommittedView = currentView - 2;
-                collectAttempts++;
-
-                CLOG_DEBUG(Overlay,
-                        "Forced COLLECT attempt {}/{} at view {}",
-                        collectAttempts, MAX_COLLECT_ATTEMPTS, currentView);
-            }
-            else
-            {
-                collectWindowActive = false;
-
-                CLOG_INFO(Overlay,
-                        "Forced COLLECT window ended after {} attempts",
-                        MAX_COLLECT_ATTEMPTS);
-            }
-        }
 
 
 
@@ -1999,6 +1979,12 @@ OverlayManagerImpl::prop()
             {
                 lastCollectSentView = currentView;
 
+                // If window active, force COLLECT by desync
+                if (collectWindowActive)
+                {
+                    latestCommittedView = currentView - 2;
+                }
+
                 auto msg = std::make_shared<StellarMessage>();
                 msg->type(CUSTOM_MESSAGE);
                 msg->customMessage().msgType = CUSTOM_COLLECT;
@@ -2009,12 +1995,25 @@ OverlayManagerImpl::prop()
                         currentView);
 
                 broadcastMessage(msg);
-            }
-            else
-            {
-                CLOG_DEBUG(Overlay,
-                        "COLLECT already sent for view {}, skipping",
-                        currentView);
+
+                //  Count ONLY real COLLECT sends
+                if (collectWindowActive)
+                {
+                    collectAttempts++;
+
+                    CLOG_DEBUG(Overlay,
+                            "Forced COLLECT attempt {}/{}",
+                            collectAttempts, MAX_COLLECT_ATTEMPTS);
+
+                    if (collectAttempts >= MAX_COLLECT_ATTEMPTS)
+                    {
+                        collectWindowActive = false;
+
+                        CLOG_INFO(Overlay,
+                                "Forced COLLECT window ended after {} attempts",
+                                MAX_COLLECT_ATTEMPTS);
+                    }
+                }
             }
         }
 
