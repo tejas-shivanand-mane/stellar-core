@@ -43,7 +43,11 @@ static bool pbftStartTimeSet = false;
 
 static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
-static constexpr uint64_t COLLECT_WINDOW_VIEWS = 1000;
+
+static uint64_t collectAttempts = 0;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 1000;
+
+
 constexpr int FORCE_COLLECT_AFTER_SEC = 60;
 static uint64_t lastCollectSentView = UINT64_MAX;
 
@@ -793,7 +797,7 @@ static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
 static int pbft_start = 0;
-static int forceCollectRound = 0;
+// static int forceCollectRound = 0;
 
 
 void cleanupOldTxnStates()
@@ -1894,7 +1898,7 @@ OverlayManagerImpl::prop()
 
                 CLOG_INFO(Overlay,
                         "⏱️ Forcing COLLECT for next {} views starting at view {}",
-                        COLLECT_WINDOW_VIEWS, collectWindowStartView);
+                        MAX_COLLECT_ATTEMPTS, collectWindowStartView);
             }
         }
                 
@@ -1903,26 +1907,25 @@ OverlayManagerImpl::prop()
         // ---- Forced COLLECT window logic ----
         if (collectWindowActive)
         {
-            uint64_t viewsElapsed = currentView - collectWindowStartView;
-
-            if (viewsElapsed < COLLECT_WINDOW_VIEWS)
+            if (collectAttempts < MAX_COLLECT_ATTEMPTS)
             {
-                // Artificially desync to force COLLECT
                 latestCommittedView = currentView - 2;
+                collectAttempts++;
 
                 CLOG_DEBUG(Overlay,
-                        "Forced COLLECT active (view {} / {})",
-                        viewsElapsed + 1, COLLECT_WINDOW_VIEWS);
+                        "Forced COLLECT attempt {}/{} at view {}",
+                        collectAttempts, MAX_COLLECT_ATTEMPTS, currentView);
             }
             else
             {
                 collectWindowActive = false;
 
                 CLOG_INFO(Overlay,
-                        "Forced COLLECT window ended at view {}",
-                        currentView);
+                        "Forced COLLECT window ended after {} attempts",
+                        MAX_COLLECT_ATTEMPTS);
             }
         }
+
 
 
         if (latestCommittedView == currentView - 1)
