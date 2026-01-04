@@ -45,7 +45,7 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 static constexpr uint64_t COLLECT_WINDOW_VIEWS = 1000;
 constexpr int FORCE_COLLECT_AFTER_SEC = 60;
-
+static uint64_t lastCollectSentView = UINT64_MAX;
 
 struct CustomTransaction
 {
@@ -1991,18 +1991,28 @@ OverlayManagerImpl::prop()
 
         else
         {
-            //  No committed block from v*-1 → must COLLECT
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-            msg->customMessage().msgType = CUSTOM_COLLECT;
-            msg->customMessage().view    = currentView;
+            // ---- COLLECT (once per view) ----
+            if (lastCollectSentView != currentView)
+            {
+                lastCollectSentView = currentView;
 
-            CLOG_INFO(Overlay, "Leader initiating COLLECT for view {} (no committed block at v*-1)",
-                    currentView);
+                auto msg = std::make_shared<StellarMessage>();
+                msg->type(CUSTOM_MESSAGE);
+                msg->customMessage().msgType = CUSTOM_COLLECT;
+                msg->customMessage().view    = currentView;
 
-            
+                CLOG_INFO(Overlay,
+                        "Leader initiating COLLECT for view {}",
+                        currentView);
 
-            broadcastMessage(msg);
+                broadcastMessage(msg);
+            }
+            else
+            {
+                CLOG_DEBUG(Overlay,
+                        "COLLECT already sent for view {}, skipping",
+                        currentView);
+            }
         }
 
 
