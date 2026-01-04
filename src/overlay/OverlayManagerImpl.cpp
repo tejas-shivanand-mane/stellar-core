@@ -2863,8 +2863,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     
                     st.proposalSentForView = true;  // ✅ Set flag
                     
-                    CLOG_INFO(Overlay, "Leader proposing new block {} in view {} (extending vp={})",
-                            hexAbbrev(newBlock), currentView, maxView);
+                    // CLOG_INFO(Overlay, "Leader proposing new block {} in view {} (extending vp={})",
+                    //         hexAbbrev(newBlock), currentView, maxView);
+
+                    CLOG_INFO(Overlay, "CUSTOM_READY");
+
+                    CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                    hexAbbrev(newBlock), currentView);
+
                 }
             }
             break;
@@ -2906,10 +2912,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         broadcastMessage(msg);
                         
                         st.proposalSentForView = true;  // ✅ Set flag
-                        
-                        CLOG_INFO(Overlay,
-                                "Leader proposing new block {} in view {} after CONDREADY",
-                                hexAbbrev(newBlock), currentView);
+
+                        CLOG_INFO(Overlay, "CUSTOM_COND_READY");
+                        CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                        hexAbbrev(newBlock), currentView);
+
+
+
                     }
                 }
                 else
