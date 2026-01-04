@@ -1909,10 +1909,10 @@ OverlayManagerImpl::prop()
                 
 
         // // If window active, force COLLECT by desync
-        // if (collectWindowActive)
-        // {
-        //     latestCommittedView = currentView - 2;
-        // }
+        if (collectWindowActive)
+        {
+            latestCommittedView = currentView - 2;
+        }
 
 
 
