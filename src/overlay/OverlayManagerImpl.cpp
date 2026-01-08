@@ -48,7 +48,7 @@ static uint64_t collectAttempts = 0;
 static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 100;
 
 
-constexpr int FORCE_COLLECT_AFTER_SEC = 100;
+constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
 
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
@@ -889,7 +889,7 @@ TransactionEnvelope createSCPTxFromProposal(
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = true;
+static bool ENABLE_SCP_TRACKING = false;
 
 struct SCPStats {
     int totalBatches = 0;
@@ -1576,32 +1576,32 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-    // if (pbft_start==0)
-    // {
+    if (pbft_start==0)
+    {
 
 
-    //     size_t authenticatedPeers = getAuthenticatedPeersCount();
-    //     size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
-    //     size_t expectedPeers = totalNodes - 1;
+        size_t authenticatedPeers = getAuthenticatedPeersCount();
+        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
+        size_t expectedPeers = totalNodes - 1;
         
-    //     CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
+        CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
 
-    //     if (authenticatedPeers == expectedPeers)
+        if (authenticatedPeers == expectedPeers)
 
-    //     {
-    //         prop();
-    //         pbft_start = 1;
+        {
+            prop();
+            pbft_start = 1;
 
-    //         pbftStartTime = std::chrono::steady_clock::now();
-    //         pbftStartTimeSet = true;
+            pbftStartTime = std::chrono::steady_clock::now();
+            pbftStartTimeSet = true;
 
-    //         CLOG_INFO(Overlay, "PBFT started — timer armed");
-
-
+            CLOG_INFO(Overlay, "PBFT started — timer armed");
 
 
-    //     }
-    // }
+
+
+        }
+    }
 
 
     auto rescheduleTick = gsl::finally([&]() {
