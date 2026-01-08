@@ -36,6 +36,28 @@
 #include <algorithm>
 #include "OverlayManagerImpl.h"
 
+#include <fstream>
+#include <string>
+
+size_t
+getRSS_MB()
+{
+    std::ifstream status("/proc/self/status");
+    std::string line;
+
+    while (std::getline(status, line))
+    {
+        if (line.rfind("VmRSS:", 0) == 0)
+        {
+            // Format: VmRSS:   123456 kB
+            size_t kb = std::stoul(line.substr(6));
+            return kb / 1024;
+        }
+    }
+    return 0;
+}
+
+
 
 // ---- Forced COLLECT window control ----
 static std::chrono::steady_clock::time_point pbftStartTime;
@@ -1569,8 +1591,7 @@ void
 OverlayManagerImpl::tick()
 {
     ZoneScoped;
-    CLOG_INFO(Overlay, "OverlayManagerImpl tick");
-
+    CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB", getRSS_MB());
 
     // auto nodeID = mApp.getNodeID();  // returns NodeID
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
