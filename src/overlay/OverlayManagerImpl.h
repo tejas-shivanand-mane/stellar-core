@@ -138,6 +138,10 @@ class OverlayManagerImpl : public OverlayManager
 
     void recvCustomMessage(StellarMessage const& stellarMsg,
                            std::shared_ptr<Peer> peer) override;
+
+    void recvCustomMessageInternal(StellarMessage const& stellarMsg,
+                        NodeID const& sender) override;
+
     void recvTransaction(TransactionFrameBasePtr transaction,
                          Peer::pointer peer, Hash const& index) override;
     void forgetFloodedMsg(Hash const& msgID) override;

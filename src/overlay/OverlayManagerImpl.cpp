@@ -1990,14 +1990,87 @@ OverlayManagerImpl::prop()
 
 
 
-            BlockKey key{currentView, blockHash};
-            auto& st = g_txn[key];
-            g_ps.insert(key);
 
-            // Self counts as prepare voter
-            st.prepareVoters.insert(selfID);
+
+
+            BlockKey key{currentView, blockHash};
+
+
+
+
+
+
+            // recvCustomMessageInternal(*msg, selfID);
+
+
+
+
+
+
+
+
+
+
+
+
+
 
             broadcastMessage(msg);
+
+
+
+
+            // =====================================================
+            // Option B: LOCAL handling of CUSTOM_PROPOSE (no network)
+            // =====================================================
+            {
+                BlockKey key{currentView, blockHash};
+                auto& st = g_txn[key];
+
+                if (!st.preparedSent && latestCommittedView <= currentView - 1)
+                {
+                    CLOG_INFO(Overlay,
+                            "[SELF-LOCAL] PROPOSE block {} at view {}",
+                            hexAbbrev(blockHash), currentView);
+
+                    // Local prepared state
+                    st.preparedSent  = true;
+                    st.preparedView  = currentView;
+                    st.preparedBlock = blockHash;
+
+                    // Track prepared set
+                    g_ps.insert(key);
+
+                    // Self prepare vote ONLY (no network)
+                    st.prepareVoters.insert(selfID);
+
+                    auto const& cm = (*msg).customMessage();
+
+                    sendPrepare(cm.view, cm.blockHash, cm.data);
+
+                    // Activate deferred CONDREADY votes
+                    ViewBlockKey vb{st.preparedView, st.preparedBlock};
+                    if (st.pendingCondReady.count(vb))
+                    {
+                        auto& voters = st.pendingCondReady[vb];
+                        st.readies[vb].insert(voters.begin(), voters.end());
+                        st.pendingCondReady.erase(vb);
+
+                        CLOG_INFO(Overlay,
+                                "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
+                                voters.size(),
+                                st.preparedView,
+                                hexAbbrev(st.preparedBlock));
+                    }
+                }
+            }
+
+
+
+
+
+            
+
 
         }
 
@@ -2460,7 +2533,7 @@ OverlayManagerImpl::sendPrepare(uint64_t view, Hash const& blockHash, std::strin
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_INFO(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2475,7 +2548,7 @@ OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_INFO(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2596,17 +2669,16 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_PREPARE:
-            // CLOG_INFO(Overlay, "Received PREPARE block {} at view {}",
-            //           hexAbbrev(cm.blockHash), cm.view);
 
             st.prepareVoters.insert(sender);
 
-            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
                       hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
                 st.commitView = cm.view;
                 st.prepareVoters.insert(selfID); // self vote
+                st.commitVoters.insert(selfID);
                 sendCommit(cm.view, cm.blockHash, cm.data);
             }
             break;
@@ -2614,19 +2686,15 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_COMMIT:
 
-
-
-
-
-            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
+            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
             // CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
-            if (mApp.getConfig().MEMORY_PROF && cm.view > 10000)
-            {
-                return;
-            }
+            // if (mApp.getConfig().MEMORY_PROF && cm.view > 10000)
+            // {
+            //     return;
+            // }
             
 
             st.commitVoters.insert(sender);
@@ -2996,6 +3064,102 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 }
 
 
+
+void
+OverlayManagerImpl::recvCustomMessageInternal(StellarMessage const& stellarMsg,
+    NodeID const& sender)
+{
+
+
+
+
+
+    // In any handler where you need the index:
+    auto computeNodeIndex = [this]() {
+        NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+        std::vector<NodeID> allNodes;
+        allNodes.push_back(selfID);
+        
+        auto authenticatedPeers = getAuthenticatedPeers();
+        for (auto const& peer : authenticatedPeers)
+        {
+            allNodes.push_back(peer.first);
+        }
+        
+        std::sort(allNodes.begin(), allNodes.end());
+        auto it = std::find(allNodes.begin(), allNodes.end(), selfID);
+        return it != allNodes.end() ? std::distance(allNodes.begin(), it) : 0;
+    };
+
+
+
+
+
+
+
+
+    auto const& cm = stellarMsg.customMessage();
+    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+    BlockKey key{cm.view, cm.blockHash};
+    auto& st = g_txn[key];
+
+    size_t N = getAuthenticatedPeersCount() + 1;
+    size_t f = (N - 1) / 3;
+
+
+
+    switch (cm.msgType)
+    {
+        // ================================================================
+        case CUSTOM_PROPOSE:
+        if (cm.view >= currentView)
+        {
+            CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
+                      hexAbbrev(cm.blockHash), cm.view);
+
+            if (!st.preparedSent && latestCommittedView <= cm.view - 1)
+            {
+                st.preparedSent = true;
+                st.preparedView = cm.view;
+                st.preparedBlock = cm.blockHash;
+
+                g_ps.insert(BlockKey{cm.view, cm.blockHash});
+
+                // Self counts as prepare voter
+                st.prepareVoters.insert(selfID);
+                sendPrepare(cm.view, cm.blockHash, cm.data);
+
+                // 🔹 Activate deferred CondReady votes for this (vp,bp)
+                ViewBlockKey vb{st.preparedView, st.preparedBlock};
+                if (st.pendingCondReady.count(vb))
+                {
+                    auto& voters = st.pendingCondReady[vb];
+                    st.readies[vb].insert(voters.begin(), voters.end());
+                    st.pendingCondReady.erase(vb);
+
+                    CLOG_INFO(Overlay,
+                              "Activated {} deferred CONDREADY votes for (vp={}, bp={})",
+                              voters.size(),
+                              st.preparedView, hexAbbrev(st.preparedBlock));
+                }
+            }
+        }
+        else
+        {
+            CLOG_INFO(Overlay, "Ignoring PROPOSE at view {} (current={})",
+                      cm.view, currentView); // 🔹 ignore old/future proposals
+
+                    //   while((cm.view != currentView))
+                    //   {
+
+                    //   }
+        }
+        break;
+
+
+    }
+}
 
 
 
