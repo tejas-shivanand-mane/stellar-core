@@ -2506,6 +2506,35 @@ void
 OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                                       Peer::pointer peer)
 {
+
+
+
+
+
+    // In any handler where you need the index:
+    auto computeNodeIndex = [this]() {
+        NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+        std::vector<NodeID> allNodes;
+        allNodes.push_back(selfID);
+        
+        auto authenticatedPeers = getAuthenticatedPeers();
+        for (auto const& peer : authenticatedPeers)
+        {
+            allNodes.push_back(peer.first);
+        }
+        
+        std::sort(allNodes.begin(), allNodes.end());
+        auto it = std::find(allNodes.begin(), allNodes.end(), selfID);
+        return it != allNodes.end() ? std::distance(allNodes.begin(), it) : 0;
+    };
+
+
+
+
+
+
+
+
     auto const& cm = stellarMsg.customMessage();
     NodeID sender = peer->getPeerID();
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
@@ -2584,8 +2613,18 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_COMMIT:
-            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}",
-                      hexAbbrev(cm.blockHash), cm.view);
+
+
+
+
+
+            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
+                      hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
+
+
+
+
+            
 
             st.commitVoters.insert(sender);
 
@@ -2689,7 +2728,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-                // cleanupOldTxnStates();
+                cleanupOldTxnStates();
                 // st.executeVoters.insert(sender);
                 
             }
