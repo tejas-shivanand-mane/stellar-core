@@ -2622,7 +2622,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
-            CLOG_INFO(Overlay, "MEMORY_PROF: ", mApp.getConfig().MEMORY_PROF);
+            CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
 
             
 
