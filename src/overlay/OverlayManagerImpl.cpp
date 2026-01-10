@@ -1996,29 +1996,7 @@ OverlayManagerImpl::prop()
             BlockKey key{currentView, blockHash};
 
 
-
-
-
-
-            // recvCustomMessageInternal(*msg, selfID);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             broadcastMessage(msg);
-
-
-
 
             // =====================================================
             // Option B: LOCAL handling of CUSTOM_PROPOSE (no network)
@@ -2029,7 +2007,7 @@ OverlayManagerImpl::prop()
 
                 if (!st.preparedSent && latestCommittedView <= currentView - 1)
                 {
-                    CLOG_INFO(Overlay,
+                    CLOG_DEBUG(Overlay,
                             "[SELF-LOCAL] PROPOSE block {} at view {}",
                             hexAbbrev(blockHash), currentView);
 
@@ -2056,7 +2034,7 @@ OverlayManagerImpl::prop()
                         st.readies[vb].insert(voters.begin(), voters.end());
                         st.pendingCondReady.erase(vb);
 
-                        CLOG_INFO(Overlay,
+                        CLOG_DEBUG(Overlay,
                                 "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
                                 voters.size(),
                                 st.preparedView,
@@ -2533,7 +2511,7 @@ OverlayManagerImpl::sendPrepare(uint64_t view, Hash const& blockHash, std::strin
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2548,7 +2526,7 @@ OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string
     msg->customMessage().data      = data;
 
     broadcastMessage(msg);
-    CLOG_INFO(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
 }
 
 void
@@ -2672,7 +2650,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             st.prepareVoters.insert(sender);
 
-            CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
                       hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
             if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
             {
@@ -2686,12 +2664,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_COMMIT:
 
-            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
+            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
             // CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
-            // if (mApp.getConfig().MEMORY_PROF && cm.view > 10000)
+            // if (mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view%30000 < 15000)
             // {
             //     return;
             // }
@@ -3062,105 +3040,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             break;
     }
 }
-
-
-
-void
-OverlayManagerImpl::recvCustomMessageInternal(StellarMessage const& stellarMsg,
-    NodeID const& sender)
-{
-
-
-
-
-
-    // In any handler where you need the index:
-    auto computeNodeIndex = [this]() {
-        NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-        std::vector<NodeID> allNodes;
-        allNodes.push_back(selfID);
-        
-        auto authenticatedPeers = getAuthenticatedPeers();
-        for (auto const& peer : authenticatedPeers)
-        {
-            allNodes.push_back(peer.first);
-        }
-        
-        std::sort(allNodes.begin(), allNodes.end());
-        auto it = std::find(allNodes.begin(), allNodes.end(), selfID);
-        return it != allNodes.end() ? std::distance(allNodes.begin(), it) : 0;
-    };
-
-
-
-
-
-
-
-
-    auto const& cm = stellarMsg.customMessage();
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-
-    BlockKey key{cm.view, cm.blockHash};
-    auto& st = g_txn[key];
-
-    size_t N = getAuthenticatedPeersCount() + 1;
-    size_t f = (N - 1) / 3;
-
-
-
-    switch (cm.msgType)
-    {
-        // ================================================================
-        case CUSTOM_PROPOSE:
-        if (cm.view >= currentView)
-        {
-            CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
-                      hexAbbrev(cm.blockHash), cm.view);
-
-            if (!st.preparedSent && latestCommittedView <= cm.view - 1)
-            {
-                st.preparedSent = true;
-                st.preparedView = cm.view;
-                st.preparedBlock = cm.blockHash;
-
-                g_ps.insert(BlockKey{cm.view, cm.blockHash});
-
-                // Self counts as prepare voter
-                st.prepareVoters.insert(selfID);
-                sendPrepare(cm.view, cm.blockHash, cm.data);
-
-                // 🔹 Activate deferred CondReady votes for this (vp,bp)
-                ViewBlockKey vb{st.preparedView, st.preparedBlock};
-                if (st.pendingCondReady.count(vb))
-                {
-                    auto& voters = st.pendingCondReady[vb];
-                    st.readies[vb].insert(voters.begin(), voters.end());
-                    st.pendingCondReady.erase(vb);
-
-                    CLOG_INFO(Overlay,
-                              "Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                              voters.size(),
-                              st.preparedView, hexAbbrev(st.preparedBlock));
-                }
-            }
-        }
-        else
-        {
-            CLOG_INFO(Overlay, "Ignoring PROPOSE at view {} (current={})",
-                      cm.view, currentView); // 🔹 ignore old/future proposals
-
-                    //   while((cm.view != currentView))
-                    //   {
-
-                    //   }
-        }
-        break;
-
-
-    }
-}
-
 
 
 
