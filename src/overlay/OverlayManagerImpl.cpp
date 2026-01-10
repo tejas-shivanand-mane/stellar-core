@@ -2669,7 +2669,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
             // CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
-            // if (mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view%30000 < 10000)
+            // if (mApp.getConfig().MEMORY_PROF && cm.view > 3000 && cm.view%30000 < 10000)
             // {
             //     return;
             // }
@@ -2777,7 +2777,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-                cleanupOldTxnStates();
+                // cleanupOldTxnStates();
                 // st.executeVoters.insert(sender);
                 
             }
