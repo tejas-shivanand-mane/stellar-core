@@ -2667,10 +2667,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
-            if (mApp.getConfig().MEMORY_PROF && cm.view > 30000 && cm.view%30000<20000 )
-            {
-                return;
-            }
+            // if (mApp.getConfig().MEMORY_PROF && cm.view > 30000 && cm.view%30000<20000 )
+            // {
+            //     return;
+            // }
             
 
             st.commitVoters.insert(sender);
