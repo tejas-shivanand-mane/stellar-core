@@ -2618,11 +2618,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
+            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
-
+            CLOG_INFO(Overlay, "MEMORY_PROF: ", mApp.getConfig().MEMORY_PROF);
 
             
 

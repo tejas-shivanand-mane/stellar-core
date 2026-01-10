@@ -41,6 +41,7 @@ bool gIsProductionNetwork = false;
 static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
     "RUN_STANDALONE",
     "SEND_CUSTOM_MESSAGE",
+    "MEMORY_PROF",
     "MANUAL_CLOSE",
     "ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING",
     "LOADGEN_PREGENERATED_TRANSACTIONS_FILE",
@@ -167,6 +168,7 @@ Config::Config() : NODE_SEED(SecretKey::random())
     // configurable
     RUN_STANDALONE = false;
     SEND_CUSTOM_MESSAGE = false;
+    MEMORY_PROF = false;
 
     MANUAL_CLOSE = false;
     CATCHUP_COMPLETE = false;
@@ -1166,6 +1168,7 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                  [&]() { METADATA_DEBUG_LEDGERS = readInt<uint32_t>(item); }},
                 {"RUN_STANDALONE", [&]() { RUN_STANDALONE = readBool(item); }},
                 {"SEND_CUSTOM_MESSAGE", [&]() { SEND_CUSTOM_MESSAGE = readBool(item); }},
+                {"MEMORY_PROF", [&]() { MEMORY_PROF = readBool(item); }},
                 {"CATCHUP_COMPLETE",
                  [&]() { CATCHUP_COMPLETE = readBool(item); }},
                 {"CATCHUP_RECENT",
@@ -2465,6 +2468,8 @@ Config::setNoListen()
     // prevent opening up a port for other peers
     RUN_STANDALONE = true;
     SEND_CUSTOM_MESSAGE = false;
+    MEMORY_PROF = false;
+
     HTTP_PORT = 0;
     HTTP_QUERY_PORT = 0;
     MANUAL_CLOSE = true;

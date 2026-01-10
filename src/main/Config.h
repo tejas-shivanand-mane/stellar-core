@@ -186,6 +186,7 @@ class Config : public std::enable_shared_from_this<Config>
     bool RUN_STANDALONE;
 
     bool SEND_CUSTOM_MESSAGE;
+    bool MEMORY_PROF;
 
 
     // Mode for testing. Ledger will only close when told to over http
