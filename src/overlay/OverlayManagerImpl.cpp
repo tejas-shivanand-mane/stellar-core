@@ -2618,7 +2618,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
+            CLOG_INFO(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
