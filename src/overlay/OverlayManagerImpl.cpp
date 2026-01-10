@@ -1591,7 +1591,6 @@ void
 OverlayManagerImpl::tick()
 {
     ZoneScoped;
-    CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB", getRSS_MB());
 
     // auto nodeID = mApp.getNodeID();  // returns NodeID
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
@@ -2712,6 +2711,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         hexAbbrev(cm.blockHash), cm.view, 100);
 
                 CLOG_DEBUG(Overlay, "========================================");
+
+                CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
+
                 
                 // ✅ Print each transaction's details
                 for (size_t i = 0; i < batch.transactions.size(); ++i)
