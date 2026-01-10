@@ -2622,8 +2622,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                       hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
 
 
-            CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
-
+            // CLOG_INFO(Overlay, "MEMORY_PROF: {}", int(mApp.getConfig().MEMORY_PROF));
+            if (mApp.getConfig().MEMORY_PROF && cm.view > 10000)
+            {
+                return;
+            }
             
 
             st.commitVoters.insert(sender);
