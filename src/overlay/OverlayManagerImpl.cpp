@@ -2778,7 +2778,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-                cleanupOldTxnStates();
+                // cleanupOldTxnStates();
                 // st.executeVoters.insert(sender);
                 
             }
