@@ -2604,6 +2604,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
 
+            CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
+            
+
             if (!st.preparedSent && latestCommittedView <= cm.view - 1)
             {
                 st.preparedSent = true;
@@ -2712,7 +2715,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 CLOG_DEBUG(Overlay, "========================================");
 
-                CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
 
                 
                 // ✅ Print each transaction's details
