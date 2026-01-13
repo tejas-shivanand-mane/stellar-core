@@ -1984,7 +1984,7 @@ OverlayManagerImpl::prop()
 
             // msg->customMessage().data      = std::string(19000, 'X');
 
-            CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+            CLOG_INFO(Overlay, "prop(): Leader proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
 
 
@@ -2980,7 +2980,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     CLOG_INFO(Overlay, "CUSTOM_READY");
 
-                    CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                    CLOG_INFO(Overlay, "CUSTOM_READY: Leader proposing block {} in view {}",
                     hexAbbrev(newBlock), currentView);
 
                 }
@@ -3026,7 +3026,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         st.proposalSentForView = true;  // ✅ Set flag
 
                         CLOG_INFO(Overlay, "CUSTOM_COND_READY");
-                        CLOG_INFO(Overlay, "Leader proposing block {} in view {}",
+                        CLOG_INFO(Overlay, "CUSTOM_CONDREADY: Leader proposing block {} in view {}",
                         hexAbbrev(newBlock), currentView);
 
 
