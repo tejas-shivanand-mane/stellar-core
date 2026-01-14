@@ -75,6 +75,8 @@ constexpr int FORCE_COLLECT_AFTER_SEC = 100;
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
 
+static bool force_collect = false;
+
 struct CustomTransaction
 {
     uint64_t txnId;           // Unique transaction ID
@@ -1931,12 +1933,14 @@ OverlayManagerImpl::prop()
         // // If window active, force COLLECT by desync
         if (collectWindowActive)
         {
-            latestCommittedView = currentView - 2;
+            // latestCommittedView = currentView - 2;
+            force_collect = true;
+
         }
 
 
 
-        if (latestCommittedView == currentView - 1)
+        if (latestCommittedView == currentView - 1 && force_collect == false)
         {
 
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
@@ -2054,7 +2058,7 @@ OverlayManagerImpl::prop()
         else
         {
             // ---- COLLECT (once per view) ----
-            if (lastCollectSentView != currentView)
+            // if (lastCollectSentView != currentView)
             {
                 lastCollectSentView = currentView;
 
@@ -2082,6 +2086,7 @@ OverlayManagerImpl::prop()
                     if (collectAttempts >= MAX_COLLECT_ATTEMPTS)
                     {
                         collectWindowActive = false;
+                        force_collect = false;
 
                         CLOG_INFO(Overlay,
                                 "Forced COLLECT window ended after {} attempts",
@@ -2732,57 +2737,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 prop();
 
-
-                // sendExecute(cm.view, cm.blockHash, cm.data);
-
-                // {
-                //     st.executeVoters.insert(selfID);
-                // }
-
-
-
-
-
-                
-                // auto const& lcl = mApp.getLedgerManager().getLastClosedLedgerHeader();
-
-
-                // // Instead of pushing dummyTx into txSet:
-                // TransactionSet txSet;
-                // txSet.previousLedgerHash = lcl.hash;
-                // // DO NOT add invalid txns
-
-                // auto txSetFrame = TxSetXDRFrame::makeFromWire(txSet);
-
-                // // Inflate the hash (just for uniqueness)
-                // Hash h = sha256(xdr::xdr_to_opaque(txSet));
-                // const_cast<Hash&>(txSetFrame->getContentsHash()) = h;
-
-                // // Now externalize
-                // mApp.getHerder().externalizeValue(
-                //     txSetFrame,
-                //     lcl.header.ledgerSeq + 1,
-                //     VirtualClock::to_time_t(mApp.getClock().system_now()),
-                //     {},
-                //     std::nullopt
-                // );
-
-                // // 🔹 Then patch logging counters manually
-                // CLOG_INFO(Ledger, "Got consensus: [seq={}, prev={}, txs={}, ops={}, sv: ...]",
-                //         lcl.header.ledgerSeq + 1,
-                //         hexAbbrev(lcl.hash),
-                //         1000,  // fake tx count
-                //         1000   // fake op count
-                // );
-
-
-
-
-
-
-                // cleanupOldTxnStates();
-                // st.executeVoters.insert(sender);
-                
             }
             break;
 
