@@ -2696,8 +2696,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 latestCommittedView = cm.view;
                 latestCommittedBlock = cm.blockHash;
+                
 
                 currentView = cm.view + 1;
+                
 
 
 
@@ -2911,10 +2913,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         st.collection.size(),
                         st.readies[vb].size());
                 
-                // ✅ Check if threshold reached AND we haven't proposed yet
+                //  Check if threshold reached AND we haven't proposed yet
                 if (st.readies[vb].size() == 2*f+1 &&  // ← Changed >= to ==
                     selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                    !st.proposalSentForView)  // ← Added this check
+                    !st.proposalSentForView && mApp.getConfig().SEND_CUSTOM_MESSAGE)  // ← Added this check
                 {
                     auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
                     Hash newBlock = makeBlock(maxBlock, txn_count++);
@@ -2925,9 +2927,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     msg->customMessage().view      = currentView;
                     msg->customMessage().blockHash = newBlock;
                     msg->customMessage().data      = std::to_string(txn_count);
+
                     broadcastMessage(msg);
                     
-                    st.proposalSentForView = true;  // ✅ Set flag
+                    st.proposalSentForView = true;  // Set flag
                     
                     // CLOG_INFO(Overlay, "Leader proposing new block {} in view {} (extending vp={})",
                     //         hexAbbrev(newBlock), currentView, maxView);
