@@ -67,7 +67,7 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 500;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 50;
 
 
 constexpr int FORCE_COLLECT_AFTER_SEC = 100;
