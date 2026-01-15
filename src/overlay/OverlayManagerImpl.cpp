@@ -2750,7 +2750,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_INFO(Overlay, "========================================");
 
                 
-                // cleanupOldTxnStates();
+                cleanupOldTxnStates();
 
                 prop();
 
