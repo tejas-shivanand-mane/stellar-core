@@ -2870,12 +2870,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 if (st.echoes[vb].size() >= 2*f+1 && !st.rSent.count(vb))
                 {
-                    st.rSent.insert(vb);
 
                     CLOG_INFO(Overlay, "want to send READY MSG");
 
                     if (g_ps.count(BlockKey{cm.vp, cm.bp}))
                     {
+                        st.rSent.insert(vb);
 
                         CLOG_INFO(Overlay, "Sending READY MSG");
                         // I prepared it → send READY
@@ -2893,6 +2893,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                     else if (cm.vp < st.preparedView)
                     {
+                        st.rSent.insert(vb);
+
                         CLOG_INFO(Overlay, "Sending CONDREADY MSG");
                         // I have higher prepared → send CONDREADY
                         auto msg = std::make_shared<StellarMessage>();
