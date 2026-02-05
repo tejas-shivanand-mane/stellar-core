@@ -1,5 +1,6 @@
 ## Stellar-O3RUBC:
 
+On an ubuntu system:
 ```bash
 # --- Update system and install basic tools ---
 sudo apt update
