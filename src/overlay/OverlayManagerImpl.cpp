@@ -2757,26 +2757,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             }
             break;
 
-                // ================================================================
-        case CUSTOM_EXECUTE:
-            CLOG_DEBUG(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
-                      hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
-
-            st.executeVoters.insert(sender);
-
-            CLOG_DEBUG(Overlay, "Received EXECUTE block {} at view {} with st.executeVoters.size(): {}, st.executedView: {}",
-                      hexAbbrev(cm.blockHash), cm.view, st.executeVoters.size(), st.executedView);
-            // Ensure we only trigger once
-            if (st.executeVoters.size() > 2 * f + 1 && st.executedView < cm.view)
-            {
-                st.executedView = cm.view;
-
-                CLOG_DEBUG(Overlay, "Going to propose next block if leader after receiving execs for block {} at view {}",
-                        hexAbbrev(cm.blockHash), cm.view);
-
-                prop();
-            }
-            break;
 
         // ================================================================
         case CUSTOM_COLLECT:
