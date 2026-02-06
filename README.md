@@ -1,5 +1,9 @@
 ## Stellar-O3RUBC:
 
+This is the repository for project titled "Common-case latency-optimum Responsive Unauthenticated Byzantine Consensus"
+
+## Setup
+
 On an ubuntu system:
 ```bash
 # --- Update system and install basic tools ---
@@ -42,7 +46,7 @@ cd stellar-core
 make -j"$(nproc)"
 ```
 
-### Key Modified Files
+### Key Modified Files compared to Stellar-core by Stellar
 
 OverlayManagerImpl.cpp
 
