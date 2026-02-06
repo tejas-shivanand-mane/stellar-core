@@ -2627,7 +2627,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     {
         // ================================================================
         case CUSTOM_PROPOSE:
-        if (cm.view >= currentView)
+        if (cm.view == currentView)
         {
             CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
@@ -2679,7 +2679,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         case CUSTOM_PREPARE:
 
 
-            if (2>1)//(cm.view == currentView)
+            if (cm.view == currentView)
             {
 
                 st.prepareVoters.insert(sender);
@@ -2722,7 +2722,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             // }
             
 
-            if (2>1)//(cm.view == currentView)
+            if (cm.view == currentView)
 
             {
 
