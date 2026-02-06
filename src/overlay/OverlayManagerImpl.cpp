@@ -39,6 +39,14 @@
 #include <fstream>
 #include <string>
 
+
+
+namespace {
+
+    // Memory management
+    constexpr uint64_t MAX_VIEW_HISTORY = 1000;      // Views to keep in memory
+}
+
 size_t
 getRSS_MB()
 {
@@ -828,7 +836,7 @@ static int pbft_start = 0;
 
 void cleanupOldTxnStates()
 {
-    static const int MAX_HISTORY = 100;
+    static const int MAX_HISTORY = MAX_VIEW_HISTORY;
 
     for (auto it = g_txn.begin(); it != g_txn.end(); )
     {
@@ -2619,7 +2627,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     {
         // ================================================================
         case CUSTOM_PROPOSE:
-        if (cm.view >= currentView)
+        if (cm.view == currentView)
         {
             CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
                       hexAbbrev(cm.blockHash), cm.view);
@@ -2670,18 +2678,36 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_PREPARE:
 
-            st.prepareVoters.insert(sender);
 
-            CLOG_DEBUG(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
-                      hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
-            if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
+            if (cm.view == currentView)
             {
-                st.commitView = cm.view;
-                st.prepareVoters.insert(selfID); // self vote
-                st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data);
+
+                st.prepareVoters.insert(sender);
+
+                CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
+                        hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
+                if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
+                {
+                    st.commitView = cm.view;
+                    st.prepareVoters.insert(selfID); // self vote
+                    st.commitVoters.insert(selfID);
+                    sendCommit(cm.view, cm.blockHash, cm.data);
+                }
+
+            }
+            else if (cm.view < currentView)
+            {
+                CLOG_INFO(Overlay, "Ignoring old PREPARE from view {} (current={})",
+                        cm.view, currentView);
+            }
+            else
+            {
+                CLOG_INFO(Overlay, "Received PREPARE from future view {} (current={})",
+                            cm.view, currentView);
             }
             break;
+
+
 
         // ================================================================
         case CUSTOM_COMMIT:
@@ -2696,65 +2722,82 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             // }
             
 
-            st.commitVoters.insert(sender);
+            if (cm.view == currentView)
 
-            if (st.commitVoters.size() >= f + 1 && st.commitView < cm.view)
             {
-                st.commitView = cm.view;
-                st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data); // amplify
-            }
-            if (st.commitVoters.size() >= 2*f + 1 && st.committedView < cm.view)
-            {
-                st.committedView = cm.view;
-                st.committedBlock = cm.blockHash;
 
-                latestCommittedView = cm.view;
-                latestCommittedBlock = cm.blockHash;
-                
+                st.commitVoters.insert(sender);
 
-                currentView = cm.view + 1;
-                
-
-
-
-                BlockKey nextKey{currentView, Hash()};
-                g_txn[nextKey].proposalSentForView = false;
-
-                // CLOG_INFO(Overlay, "Committed block {} at view {}",
-                //           hexAbbrev(cm.blockHash), cm.view);
-
-
-
-                // ✅ Deserialize and print all transactions in the batch
-                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
-                
-                CLOG_DEBUG(Overlay, "========================================");
-                // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
-                //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
-                CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
-                        hexAbbrev(cm.blockHash), cm.view, 100);
-
-                CLOG_DEBUG(Overlay, "========================================");
-
-
-                
-                // ✅ Print each transaction's details
-                for (size_t i = 0; i < batch.transactions.size(); ++i)
+                if (st.commitVoters.size() >= f + 1 && st.commitView < cm.view)
                 {
-                    const auto& txn = batch.transactions[i];
-                    CLOG_DEBUG(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
-                            i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
+                    st.commitView = cm.view;
+                    st.commitVoters.insert(selfID);
+                    sendCommit(cm.view, cm.blockHash, cm.data); // amplify
                 }
-                
-                CLOG_INFO(Overlay, "========================================");
+                if (st.commitVoters.size() >= 2*f + 1 && st.committedView < cm.view)
+                {
+                    st.committedView = cm.view;
+                    st.committedBlock = cm.blockHash;
 
-                
-                // cleanupOldTxnStates();
+                    latestCommittedView = cm.view;
+                    latestCommittedBlock = cm.blockHash;
+                    
 
-                prop();
+                    currentView = cm.view + 1;
+                    
+
+
+
+                    BlockKey nextKey{currentView, Hash()};
+                    g_txn[nextKey].proposalSentForView = false;
+
+                    // CLOG_INFO(Overlay, "Committed block {} at view {}",
+                    //           hexAbbrev(cm.blockHash), cm.view);
+
+
+
+                    // ✅ Deserialize and print all transactions in the batch
+                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                    
+                    CLOG_DEBUG(Overlay, "========================================");
+                    // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
+                    //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
+                    CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
+                            hexAbbrev(cm.blockHash), cm.view, 100);
+
+                    CLOG_DEBUG(Overlay, "========================================");
+
+
+                    
+                    // ✅ Print each transaction's details
+                    for (size_t i = 0; i < batch.transactions.size(); ++i)
+                    {
+                        const auto& txn = batch.transactions[i];
+                        CLOG_DEBUG(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
+                                i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
+                    }
+                    
+                    CLOG_INFO(Overlay, "========================================");
+
+                    
+                    cleanupOldTxnStates();
+
+                    prop();
+
+                }
 
             }
+            else if (cm.view < currentView)
+            {
+                CLOG_INFO(Overlay, "Ignoring old COMMIT from view {} (current={})",
+                        cm.view, currentView);
+            }
+            else
+            {
+                CLOG_INFO(Overlay, "Received COMMIT from future view {} (current={})",
+                            cm.view, currentView);
+            }
+            
             break;
 
 
