@@ -48,22 +48,31 @@ make -j"$(nproc)"
 
 ### Key Modified Files compared to Stellar-core by Stellar
 
-OverlayManagerImpl.cpp
-
-Stellar-overlay.x
-
-Peer.cpp
-
-Config.cpp
+Stellar-overlay.x, OverlayManagerImpl.cpp ,Peer.cpp, Config.cpp
 
 and their corresponding .h files
 
-### Setup
 
-The script base.sh contains helper commands to create the required node directories and configuration files.
+## Running Experiments
 
-These commands are initially commented out:
+The codebase setup and installation are similar to stellar-core, but additional scripts are provided to run experiments on Google Cloud Platform (GCP).
 
-Uncomment them during the first setup.
+SetupGCP.ipynb contains the code required to run experiments using Google Cloud Compute Engine. The experiment configuration (e.g., regions and number of nodes) is defined in the notebook, as shown below:
 
-After the setup is complete, re-comment them to avoid re-creating the directories on subsequent runs.
+```python
+default_region = ['us-west1-b']
+regions = ['us-west1-b', 'us-west1-b', 'us-west1-b', 'us-west1-b']
+
+zone_no = 0
+for num_nodes in [4]:
+```
+
+The network latency for half of the nodes can be controlled by selecting zone_no. Half of the nodes are deployed in the default_region, while the other half are deployed in regions[zone_no].
+
+Each run (without any iterations) produces log files for one specific configuration.
+
+## Post-Processing
+
+post.ipynb contains the post-processing code used to evaluate experiments and extract throughput and latency metrics from the experiment log files.
+
+
