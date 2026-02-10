@@ -57,7 +57,7 @@ and their corresponding .h files
 
 The codebase setup and installation are similar to stellar-core, but additional scripts are provided to run experiments on Google Cloud Platform (GCP).
 
-SetupGCP.ipynb contains the code required to run experiments using Google Cloud Compute Engine. The experiment configuration (e.g., regions and number of nodes) is defined in the notebook, as shown below:
+RunGCP.ipynb contains the code required to run experiments using Google Cloud Compute Engine. The experiment configuration (e.g., regions and number of nodes) is defined in the notebook, as shown below:
 
 ```python
 default_region = ['us-west1-b']
@@ -73,6 +73,6 @@ Each run (without any iterations) produces log files for one specific configurat
 
 ## Post-Processing
 
-post.ipynb contains the post-processing code used to evaluate experiments and extract throughput and latency metrics from the experiment log files.
+PostProcess.ipynb contains the post-processing code used to evaluate experiments and extract throughput and latency metrics from the experiment log files.
 
 
