@@ -2694,6 +2694,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     sendCommit(cm.view, cm.blockHash, cm.data);
                 }
 
+                cleanupOldTxnStates();
+
             }
             else if (cm.view < currentView)
             {
@@ -2805,7 +2807,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         case CUSTOM_COLLECT:
             CLOG_INFO(Overlay, "Received COLLECT for view {} from {}",
                     cm.view, KeyUtils::toShortString(sender));
-
+            if (cm.view == currentView)
             {
                 uint64_t vp = st.preparedView;
                 Hash bp = st.preparedBlock;
@@ -2847,6 +2849,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                       KeyUtils::toShortString(sender),
                       KeyUtils::toShortString(cm.origin));
 
+            if (cm.view == currentView)
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
                 if (!st.eSent.count(vb))
@@ -2881,6 +2884,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                       KeyUtils::toShortString(sender),
                       KeyUtils::toShortString(cm.origin));
 
+            if (cm.view == currentView)
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
                 st.echoes[vb].insert(sender);
@@ -2940,6 +2944,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_INFO(Overlay, "Received READY (vp={}, bp={}) for view {} from {}",
                     cm.vp, hexAbbrev(cm.bp), cm.view,
                     KeyUtils::toShortString(sender));
+
+            if (cm.view == currentView)
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
                 st.readies[vb].insert(sender);
@@ -2989,6 +2995,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_INFO(Overlay, "Received CONDREADY (vp={}, bp={}) for view {} from {}",
                     cm.vp, hexAbbrev(cm.bp), cm.view,
                     KeyUtils::toShortString(sender));
+            if (cm.view == currentView)
             {
                 ViewBlockKey vb{cm.vp, cm.bp};
                 
