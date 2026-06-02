@@ -830,7 +830,7 @@ static uint64_t currentView = 1;
 static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
-static int pbft_start = 0;
+static int pbft_start = -1;
 // static int forceCollectRound = 0;
 
 
@@ -936,7 +936,7 @@ TransactionEnvelope createSCPTxFromProposal(
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = false;
+static bool ENABLE_SCP_TRACKING = true;
 
 struct SCPStats {
     int totalBatches = 0;
