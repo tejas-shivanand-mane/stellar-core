@@ -1621,32 +1621,32 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-    if (pbft_start==0)
-    {
+    // if (pbft_start==0)
+    // {
 
 
-        size_t authenticatedPeers = getAuthenticatedPeersCount();
-        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
-        size_t expectedPeers = totalNodes - 1;
+    //     size_t authenticatedPeers = getAuthenticatedPeersCount();
+    //     size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
+    //     size_t expectedPeers = totalNodes - 1;
         
-        CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
+    //     CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
 
-        if (authenticatedPeers == expectedPeers)
+    //     if (authenticatedPeers == expectedPeers)
 
-        {
-            prop();
-            pbft_start = 1;
+    //     {
+    //         prop();
+    //         pbft_start = 1;
 
-            pbftStartTime = std::chrono::steady_clock::now();
-            pbftStartTimeSet = true;
+    //         pbftStartTime = std::chrono::steady_clock::now();
+    //         pbftStartTimeSet = true;
 
-            CLOG_INFO(Overlay, "PBFT started — timer armed");
-
-
+    //         CLOG_INFO(Overlay, "PBFT started — timer armed");
 
 
-        }
-    }
+
+
+    //     }
+    // }
 
 
     auto rescheduleTick = gsl::finally([&]() {
@@ -2011,7 +2011,7 @@ OverlayManagerImpl::prop()
 
             // msg->customMessage().data      = std::string(19000, 'X');
 
-            CLOG_INFO(Overlay, "prop(): Leader proposing block {} in view {}",
+            CLOG_INFO(Overlay, "prop(): Leaderp proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
 
 
@@ -2977,7 +2977,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     CLOG_INFO(Overlay, "CUSTOM_READY");
 
-                    CLOG_INFO(Overlay, "CUSTOM_READY: Leader proposing block {} in view {}",
+                    CLOG_INFO(Overlay, "CUSTOM_READY: Leaderq proposing block {} in view {}",
                     hexAbbrev(newBlock), currentView);
 
                 }
@@ -3023,7 +3023,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         st.proposalSentForView = true;  // ✅ Set flag
 
                         CLOG_INFO(Overlay, "CUSTOM_COND_READY");
-                        CLOG_INFO(Overlay, "CUSTOM_CONDREADY: Leader proposing block {} in view {}",
+                        CLOG_INFO(Overlay, "CUSTOM_CONDREADY: Leaderr proposing block {} in view {}",
                         hexAbbrev(newBlock), currentView);
 
 
