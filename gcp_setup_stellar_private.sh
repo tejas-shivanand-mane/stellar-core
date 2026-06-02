@@ -1,11 +1,11 @@
 #!/bin/bash
 set -e
 
-STELLAR_CORE=/home/userX/stellar-core/src/stellar-core
-BASE_DIR=/home/userX/stellar-private
+STELLAR_CORE=/home/tejas/stellar-core/src/stellar-core
+BASE_DIR=/home/tejas/stellar-private
 
 # Read IPs into an array (defines the number of nodes)
-mapfile -t NODE_IPS < /home/userX/stellar-core/tsm_ips.txt
+mapfile -t NODE_IPS < /home/tejas/stellar-core/tsm_ips.txt
 
 # Get the total number of nodes from the IP list size
 NUM_NODES=${#NODE_IPS[@]}
