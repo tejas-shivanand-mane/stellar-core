@@ -2856,8 +2856,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     for (size_t i = 0; i < batch.transactions.size(); ++i)
                     {
                         const auto& txn = batch.transactions[i];
-                        CLOG_DEBUG(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
+                        CLOG_INFO(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
                                 i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
+                        break;
                     }
                     
                     CLOG_INFO(Overlay, "========================================");
@@ -3042,14 +3043,29 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     !st.proposalSentForView && mApp.getConfig().SEND_CUSTOM_MESSAGE)  // ← Added this check
                 {
                     auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
-                    Hash newBlock = makeBlock(maxBlock, txn_count++);
-                    
+                    Hash newBlock = makeBlock(maxBlock, txn_count);
+
+                    TransactionBatch batch;
+                    uint64_t currentTime = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    for (size_t i = 0; i < 100; ++i)
+                    {
+                        CustomTransaction txn;
+                        txn.txnId     = txn_count + i;
+                        txn.payload   = generateYCSBOp();
+                        txn.timestamp = currentTime;
+                        txn.sender    = "leader";
+                        batch.transactions.push_back(txn);
+                    }
+                    txn_count += 100;
+
                     auto msg = std::make_shared<StellarMessage>();
                     msg->type(CUSTOM_MESSAGE);
                     msg->customMessage().msgType   = CUSTOM_PROPOSE;
                     msg->customMessage().view      = currentView;
                     msg->customMessage().blockHash = newBlock;
-                    msg->customMessage().data      = std::to_string(txn_count);
+                    msg->customMessage().data      = batch.serialize();
+
 
                     broadcastMessage(msg);
                     
@@ -3093,14 +3109,32 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         !st.proposalSentForView)  // ← Added this check
                     {
                         auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
-                        Hash newBlock = makeBlock(maxBlock, txn_count++);
-                        
+                        Hash newBlock = makeBlock(maxBlock, txn_count);
+
+                        TransactionBatch batch;
+                        uint64_t currentTime = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        for (size_t i = 0; i < 100; ++i)
+                        {
+                            CustomTransaction txn;
+                            txn.txnId     = txn_count + i;
+                            txn.payload   = generateYCSBOp();
+                            txn.timestamp = currentTime;
+                            txn.sender    = "leader";
+                            batch.transactions.push_back(txn);
+                        }
+                        txn_count += 100;
+
                         auto msg = std::make_shared<StellarMessage>();
                         msg->type(CUSTOM_MESSAGE);
                         msg->customMessage().msgType   = CUSTOM_PROPOSE;
                         msg->customMessage().view      = currentView;
                         msg->customMessage().blockHash = newBlock;
-                        msg->customMessage().data      = std::to_string(txn_count);
+                        msg->customMessage().data      = batch.serialize();
+
+
+
+
                         broadcastMessage(msg);
                         
                         st.proposalSentForView = true;  // ✅ Set flag
