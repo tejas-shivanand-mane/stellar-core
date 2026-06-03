@@ -85,6 +85,62 @@ static uint64_t lastCollectSentView = UINT64_MAX;
 
 static bool force_collect = false;
 
+
+
+// ---- YCSB Zipfian generator (self-contained) ----
+static double zipfian_alpha = 0.99; // standard YCSB alpha
+static uint64_t zipfian_n = 1000000; // 1M key space
+
+static std::unordered_map<std::string, std::string> g_kvStore;
+
+
+static uint64_t zipfianNext() {
+    static double zeta2 = 0.0;
+    static double zetaN = 0.0;
+    static bool initialized = false;
+    if (!initialized) {
+        for (uint64_t i = 1; i <= zipfian_n; i++)
+            zetaN += 1.0 / pow(i, zipfian_alpha);
+        zeta2 = 1.0 + 1.0 / pow(2, zipfian_alpha);
+        initialized = true;
+    }
+    double u = (double)rand() / RAND_MAX;
+    double uz = u * zetaN;
+    if (uz < 1.0) return 1;
+    if (uz < 1.0 + pow(0.5, zipfian_alpha)) return 2;
+    return (uint64_t)(zipfian_n * pow(zeta2 / zetaN * u, 1.0 / (1.0 - zipfian_alpha)));
+}
+
+// ---- YCSB workload operation generator ----
+enum YCSBWorkload { WORKLOAD_A, WORKLOAD_B, WORKLOAD_F };
+static YCSBWorkload currentWorkload = WORKLOAD_A;
+
+static std::string generateYCSBOp() {
+    std::string key = "user" + std::to_string(zipfianNext());
+    double r = (double)rand() / RAND_MAX;
+    
+    switch (currentWorkload) {
+        case WORKLOAD_A: // 50% read, 50% update
+            return (r < 0.5) ? "READ " + key 
+                             : "UPDATE " + key + " val" + std::to_string(rand());
+        case WORKLOAD_B: // 95% read, 5% update
+            return (r < 0.95) ? "READ " + key 
+                              : "UPDATE " + key + " val" + std::to_string(rand());
+        case WORKLOAD_F: // 50% read, 50% RMW
+            return (r < 0.5) ? "READ " + key 
+                             : "RMW " + key + " val" + std::to_string(rand());
+    }
+    return "READ " + key;
+}
+
+
+
+
+
+
+
+
+
 struct CustomTransaction
 {
     uint64_t txnId;           // Unique transaction ID
@@ -1980,7 +2036,15 @@ OverlayManagerImpl::prop()
             {
                 CustomTransaction txn;
                 txn.txnId = txn_count + i;
-                txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
+
+                // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
+                txn.payload = generateYCSBOp();
+
+
+
+
+
+
                 txn.timestamp = currentTime;
                 txn.sender = shortID;
                 
@@ -2007,7 +2071,9 @@ OverlayManagerImpl::prop()
             
             // msg->customMessage().data      = std::to_string(txn_count);
             // msg->customMessage().data      = batch.serialize();
-            msg->customMessage().data      = "";
+            // msg->customMessage().data      = "";
+            msg->customMessage().data = batch.serialize();
+
 
             // msg->customMessage().data      = std::string(19000, 'X');
 
@@ -2757,11 +2823,28 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
                     // ✅ Deserialize and print all transactions in the batch
-                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
                     
                     CLOG_DEBUG(Overlay, "========================================");
                     // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
                     //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
+
+
+                    // ✅ Deserialize and apply YCSB operations to KV store
+                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                    for (auto const& txn : batch.transactions)
+                    {
+                        std::istringstream ss(txn.payload);
+                        std::string op, key, value;
+                        ss >> op >> key;
+                        if (op == "READ") {
+                            auto it = g_kvStore.find(key);
+                            (void)it;
+                        } else if (op == "UPDATE" || op == "RMW") {
+                            ss >> value;
+                            g_kvStore[key] = value;
+                        }
+                    }
+
                     CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
                             hexAbbrev(cm.blockHash), cm.view, 100);
 
