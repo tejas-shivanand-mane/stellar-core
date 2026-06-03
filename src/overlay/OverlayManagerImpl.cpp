@@ -830,7 +830,7 @@ static uint64_t currentView = 1;
 static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
-static int pbft_start = -1;
+static int pbft_start = 0;
 // static int forceCollectRound = 0;
 
 
