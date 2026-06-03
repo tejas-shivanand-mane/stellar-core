@@ -47,6 +47,9 @@ namespace {
     constexpr uint64_t MAX_VIEW_HISTORY = 1000;      // Views to keep in memory
 }
 
+
+static bool PBFT_MODE = false;
+
 size_t
 getRSS_MB()
 {
@@ -68,8 +71,8 @@ getRSS_MB()
 
 
 // ---- Forced COLLECT window control ----
-static std::chrono::steady_clock::time_point pbftStartTime;
-static bool pbftStartTimeSet = false;
+static std::chrono::steady_clock::time_point shabdizStartTime;
+static bool shabdizStartTimeSet = false;
 
 static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
@@ -886,12 +889,16 @@ static uint64_t currentView = 1;
 static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
-static int pbft_start = 0;
+static int shabdiz_start = 0;
 // static int forceCollectRound = 0;
 
 
 void cleanupOldTxnStates()
 {
+
+
+    if (PBFT_MODE) return;
+
     static const int MAX_HISTORY = MAX_VIEW_HISTORY;
 
     for (auto it = g_txn.begin(); it != g_txn.end(); )
@@ -1677,7 +1684,7 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-    if (pbft_start==0)
+    if (shabdiz_start==0)
     {
 
 
@@ -1691,12 +1698,12 @@ OverlayManagerImpl::tick()
 
         {
             prop();
-            pbft_start = 1;
+            shabdiz_start = 1;
 
-            pbftStartTime = std::chrono::steady_clock::now();
-            pbftStartTimeSet = true;
+            shabdizStartTime = std::chrono::steady_clock::now();
+            shabdizStartTimeSet = true;
 
-            CLOG_INFO(Overlay, "PBFT started — timer armed");
+            CLOG_INFO(Overlay, "Shabdiz started — timer armed");
 
 
 
@@ -1988,11 +1995,11 @@ OverlayManagerImpl::prop()
 
 
         // ---- Activate forced COLLECT window after 30s ----
-        if (pbftStartTimeSet && !collectWindowArmed)
+        if (shabdizStartTimeSet && !collectWindowArmed)
         {
             auto now = std::chrono::steady_clock::now();
             auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(now - pbftStartTime);
+                std::chrono::duration_cast<std::chrono::seconds>(now - shabdizStartTime);
 
             if (elapsed.count() >= FORCE_COLLECT_AFTER_SEC)
             {
@@ -2758,6 +2765,23 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.prepareVoters.insert(selfID); // self vote
                     st.commitVoters.insert(selfID);
                     sendCommit(cm.view, cm.blockHash, cm.data);
+
+                    // Line 32: both modes update <vp, bp>
+                    st.preparedView  = cm.view;
+                    st.preparedBlock = cm.blockHash;
+
+                    // Line 33: only Shabdiz prunes ps
+                    if (!PBFT_MODE) {
+                        for (auto it = g_ps.begin(); it != g_ps.end(); )
+                        {
+                            if (it->view != st.preparedView)
+                                it = g_ps.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
+
+
                 }
 
             }
@@ -2799,6 +2823,23 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.commitView = cm.view;
                     st.commitVoters.insert(selfID);
                     sendCommit(cm.view, cm.blockHash, cm.data); // amplify
+
+                    // Line 37: both modes update <vp, bp>
+                    st.preparedView  = cm.view;
+                    st.preparedBlock = cm.blockHash;
+
+                    // Line 38: only Shabdiz prunes ps
+                    if (!PBFT_MODE) {
+                        for (auto it = g_ps.begin(); it != g_ps.end(); )
+                        {
+                            if (it->view != st.preparedView)
+                                it = g_ps.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
+
+
                 }
                 if (st.commitVoters.size() >= 2*f + 1 && st.committedView < cm.view)
                 {
