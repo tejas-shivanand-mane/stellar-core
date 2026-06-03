@@ -2852,7 +2852,20 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     currentView = cm.view + 1;
                     
+                    // Line 42: both modes update <vp, bp> and <vc, bc>
+                    st.preparedView  = cm.view;
+                    st.preparedBlock = cm.blockHash;
 
+                    // Line 43: only Shabdiz prunes ps
+                    if (!PBFT_MODE) {
+                        for (auto it = g_ps.begin(); it != g_ps.end(); )
+                        {
+                            if (it->view != st.preparedView)
+                                it = g_ps.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
 
 
                     BlockKey nextKey{currentView, Hash()};
