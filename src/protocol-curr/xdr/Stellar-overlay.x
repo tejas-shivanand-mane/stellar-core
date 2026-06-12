@@ -64,7 +64,11 @@ enum CustomMessageType
     CUSTOM_SEND    = 4,
     CUSTOM_ECHO    = 5,
     CUSTOM_READY   = 6,
-    CUSTOM_CONDREADY = 7 
+    CUSTOM_CONDREADY = 7,
+    CUSTOM_ITHS_PROPOSE = 9,
+    CUSTOM_ITHS_ECHO = 10,
+    CUSTOM_ITHS_ACCEPT = 11,
+    CUSTOM_ITHS_LOCK = 12
 };
 
 struct CustomMessage

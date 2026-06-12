@@ -80,3 +80,8 @@ maintainer-clean-local:
 	cd $(srcdir) && rm -rf `sed -ne 's!^/!!p' .gitignore` *~ .gitignore~
 
 CLEANFILES = test-suite.log .gitignore~ *~
+
+
+shab_client:
+	$(CXX) -std=c++17 -O2 -pthread -o src/overlay/shab_client \
+		src/overlay/shab_client.cpp -lpthread

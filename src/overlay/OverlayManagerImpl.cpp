@@ -40,6 +40,12 @@
 #include <string>
 
 
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
+static std::atomic<bool> g_propPending{false};
+
 
 namespace {
 
@@ -49,6 +55,10 @@ namespace {
 
 
 static bool PBFT_MODE = false;
+static bool ITHS_MODE = false;
+
+static uint64_t g_ithsLockView  = 0;
+static Hash     g_ithsLockBlock = Hash();
 
 size_t
 getRSS_MB()
@@ -180,6 +190,26 @@ struct CustomTransaction
         return txn;
     }
 };
+
+
+
+
+
+static int                g_clientListenerFd = -1;
+static std::vector<int>   g_clientFds;
+static std::mutex         g_clientFdsMutex;
+
+static std::mutex         g_clientTxnMutex;
+static std::queue<std::pair<CustomTransaction, uint64_t>>
+                          g_clientTxnQueue; // {txn, batchId}
+
+static std::mutex         g_pendingAckMutex;
+static std::queue<std::pair<uint64_t, int>>
+                          g_pendingAcks; // {batchId, clientFd}
+
+static bool               g_clientListenerActive = false;
+
+
 
 struct TransactionBatch
 {
@@ -838,6 +868,15 @@ struct TxnState {
     uint64_t executedView = 0;
 
     bool proposalSentForView = false;
+
+    bool ithsEchoSent   = false;
+    bool ithsAcceptSent = false;
+
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsEchoVoters;
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsAcceptVoters;
+    bool ithsLockSent = false;
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsLockVoters;
+
 
 
     Hash preparedBlock;
@@ -1697,6 +1736,11 @@ OverlayManagerImpl::tick()
         if (authenticatedPeers == expectedPeers)
 
         {
+
+            if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+                startClientListener(12000);
+
+
             prop();
             shabdiz_start = 1;
 
@@ -1963,6 +2007,116 @@ OverlayManagerImpl::tick()
 }
 
 
+void
+OverlayManagerImpl::startClientListener(int port)
+{
+    g_clientListenerFd = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(g_clientListenerFd, SOL_SOCKET,
+               SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(port);
+
+    if (bind(g_clientListenerFd,
+             (sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        CLOG_ERROR(Overlay, "Client listener bind failed on port {}", port);
+        return;
+    }
+    listen(g_clientListenerFd, 10);
+    g_clientListenerActive = true;
+
+    CLOG_INFO(Overlay, "Client listener started on port {}", port);
+
+    std::thread([this, port]() {
+        while (true)
+        {
+            int clientFd = accept(g_clientListenerFd, nullptr, nullptr);
+            if (clientFd < 0) break;
+
+            CLOG_INFO(Overlay, "Client connected fd={}", clientFd);
+
+            {
+                std::lock_guard<std::mutex> lock(g_clientFdsMutex);
+                g_clientFds.push_back(clientFd);
+            }
+
+            // One thread per client connection
+            std::thread([this, clientFd]() {
+                while (true)
+                {
+                    // Read 4-byte length prefix
+                    uint32_t lenNet = 0;
+                    int n = recv(clientFd, &lenNet, 4, MSG_WAITALL);
+                    if (n <= 0) break;
+
+                    uint32_t len = ntohl(lenNet);
+                    if (len == 0 || len > 1024 * 1024) break;
+
+                    // Read data
+                    std::string data(len, '\0');
+                    n = recv(clientFd, &data[0], len, MSG_WAITALL);
+                    if (n <= 0) break;
+
+                    // Parse: batchId|txn1|txn2|...
+                    size_t sep = data.find('|');
+                    if (sep == std::string::npos) continue;
+
+                    uint64_t batchId = std::stoull(data.substr(0, sep));
+                    std::string txnData = data.substr(sep + 1);
+
+                    TransactionBatch batch =
+                        TransactionBatch::deserialize(txnData);
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_clientTxnMutex);
+                        for (auto const& txn : batch.transactions)
+                            g_clientTxnQueue.push({txn, batchId});
+                    }
+
+
+                    // Safely trigger prop() on main thread if not already scheduled
+                    bool expected = false;
+                    if (g_propPending.compare_exchange_strong(expected, true))
+                    {
+                        mApp.postOnMainThread([this]() {
+                            if (latestCommittedView == currentView - 1 &&
+                                !force_collect)
+                            {
+                                prop();
+                            }
+                            g_propPending.store(false);
+                        }, "client-triggered prop");
+                    }
+
+
+                    {
+                        std::lock_guard<std::mutex> lock(g_pendingAckMutex);
+                        g_pendingAcks.push({batchId, clientFd});
+                    }
+
+                    CLOG_DEBUG(Overlay,
+                        "Queued {} txns from client, batchId={}",
+                        batch.transactions.size(), batchId);
+                }
+
+                CLOG_INFO(Overlay, "Client disconnected fd={}", clientFd);
+                close(clientFd);
+
+                std::lock_guard<std::mutex> lock(g_clientFdsMutex);
+                g_clientFds.erase(
+                    std::remove(g_clientFds.begin(),
+                                g_clientFds.end(), clientFd),
+                    g_clientFds.end());
+            }).detach();
+        }
+    }).detach();
+}
+
+
 
 void
 OverlayManagerImpl::prop()
@@ -2031,7 +2185,15 @@ OverlayManagerImpl::prop()
 
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
 
-
+            if (g_clientListenerActive)
+            {
+                std::lock_guard<std::mutex> lock(g_clientTxnMutex);
+                if (g_clientTxnQueue.empty())
+                {
+                    CLOG_DEBUG(Overlay, "No client txns, waiting...");
+                    return; // listener will trigger prop() when txns arrive
+                }
+            }
 
 
             const size_t BATCH_SIZE = 100;
@@ -2039,30 +2201,46 @@ OverlayManagerImpl::prop()
             
             uint64_t currentTime = VirtualClock::to_time_t(mApp.getClock().system_now());
             
-            for (size_t i = 0; i < BATCH_SIZE; ++i)
-            {
-                CustomTransaction txn;
-                txn.txnId = txn_count + i;
+            // for (size_t i = 0; i < BATCH_SIZE; ++i)
+            // {
+            //     CustomTransaction txn;
+            //     txn.txnId = txn_count + i;
 
-                // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
-                txn.payload = generateYCSBOp();
-
-
-
-
-
-
-                txn.timestamp = currentTime;
-                txn.sender = shortID;
+            //     // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
+            //     txn.payload = generateYCSBOp();
+            //     txn.timestamp = currentTime;
+            //     txn.sender = shortID;
                 
-                batch.transactions.push_back(txn);
+            //     batch.transactions.push_back(txn);
+            // }
+
+            bool usingClientTxns = false;
+            {
+                std::lock_guard<std::mutex> lock(g_clientTxnMutex);
+                if (g_clientListenerActive && !g_clientTxnQueue.empty())
+                {
+                    size_t count = std::min((size_t)BATCH_SIZE,
+                                            g_clientTxnQueue.size());
+                    for (size_t i = 0; i < count; ++i)
+                    {
+                        batch.transactions.push_back(
+                            g_clientTxnQueue.front().first);
+                        g_clientTxnQueue.pop();
+                    }
+                    usingClientTxns = true;
+                }
             }
+
+            txn_count += batch.transactions.size();
+
+
+
 
             
             Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
             // txn_count++;
             
-            txn_count += BATCH_SIZE;
+            // txn_count += BATCH_SIZE;
 
 
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 3");
@@ -2071,7 +2249,9 @@ OverlayManagerImpl::prop()
             auto msg = std::make_shared<StellarMessage>();
             msg->type(CUSTOM_MESSAGE);
 
-            msg->customMessage().msgType   = CUSTOM_PROPOSE;
+            // msg->customMessage().msgType   = CUSTOM_PROPOSE;
+            msg->customMessage().msgType = ITHS_MODE ? CUSTOM_ITHS_PROPOSE : CUSTOM_PROPOSE;
+
             msg->customMessage().view      = currentView;
             msg->customMessage().blockHash = blockHash;
 
@@ -2100,46 +2280,69 @@ OverlayManagerImpl::prop()
             // =====================================================
             // Option B: LOCAL handling of CUSTOM_PROPOSE (no network)
             // =====================================================
+
+
+
             {
                 BlockKey key{currentView, blockHash};
                 auto& st = g_txn[key];
 
-                if (!st.preparedSent && latestCommittedView <= currentView - 1)
+
+                if (ITHS_MODE)
                 {
-                    CLOG_DEBUG(Overlay,
-                            "[SELF-LOCAL] PROPOSE block {} at view {}",
-                            hexAbbrev(blockHash), currentView);
-
-                    // Local prepared state
-                    st.preparedSent  = true;
-                    st.preparedView  = currentView;
-                    st.preparedBlock = blockHash;
-
-                    // Track prepared set
-                    g_ps.insert(key);
-
-                    // Self prepare vote ONLY (no network)
-                    st.prepareVoters.insert(selfID);
-
-                    auto const& cm = (*msg).customMessage();
-
-                    sendPrepare(cm.view, cm.blockHash, cm.data);
-
-                    // Activate deferred CONDREADY votes
-                    ViewBlockKey vb{st.preparedView, st.preparedBlock};
-                    if (st.pendingCondReady.count(vb))
+                    if (!st.ithsEchoSent && latestCommittedView <= currentView - 1)
                     {
-                        auto& voters = st.pendingCondReady[vb];
-                        st.readies[vb].insert(voters.begin(), voters.end());
-                        st.pendingCondReady.erase(vb);
-
-                        CLOG_DEBUG(Overlay,
-                                "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                                voters.size(),
-                                st.preparedView,
-                                hexAbbrev(st.preparedBlock));
+                        st.ithsEchoSent = true;
+                        st.ithsEchoVoters.insert(selfID);
+                        auto const& cm = (*msg).customMessage();
+                        sendITHSEcho(cm.view, cm.blockHash, cm.data);
+                        CLOG_DEBUG(Overlay, "[IT-HS SELF-LOCAL] Sent ECHO block {} view {}",
+                                hexAbbrev(blockHash), currentView);
                     }
                 }
+                else
+                {
+
+                    if (!st.preparedSent && latestCommittedView <= currentView - 1)
+                    {
+                        CLOG_DEBUG(Overlay,
+                                "[SELF-LOCAL] PROPOSE block {} at view {}",
+                                hexAbbrev(blockHash), currentView);
+
+                        // Local prepared state
+                        st.preparedSent  = true;
+                        st.preparedView  = currentView;
+                        st.preparedBlock = blockHash;
+
+                        // Track prepared set
+                        g_ps.insert(key);
+
+                        // Self prepare vote ONLY (no network)
+                        st.prepareVoters.insert(selfID);
+
+                        auto const& cm = (*msg).customMessage();
+
+                        sendPrepare(cm.view, cm.blockHash, cm.data);
+
+                        // Activate deferred CONDREADY votes
+                        ViewBlockKey vb{st.preparedView, st.preparedBlock};
+                        if (st.pendingCondReady.count(vb))
+                        {
+                            auto& voters = st.pendingCondReady[vb];
+                            st.readies[vb].insert(voters.begin(), voters.end());
+                            st.pendingCondReady.erase(vb);
+
+                            CLOG_DEBUG(Overlay,
+                                    "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
+                                    voters.size(),
+                                    st.preparedView,
+                                    hexAbbrev(st.preparedBlock));
+                        }
+                    }
+
+                }
+
+                
             }
 
 
@@ -2650,7 +2853,48 @@ OverlayManagerImpl::sendExecute(uint64_t view, Hash const& blockHash, std::strin
 }
 
 
+void
+OverlayManagerImpl::sendITHSEcho(uint64_t view, Hash const& blockHash,
+                                  std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    msg->customMessage().msgType   = CUSTOM_ITHS_ECHO;
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+    msg->customMessage().data      = data;
+    broadcastMessage(msg);
+    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ECHO block {} view {}",
+               hexAbbrev(blockHash), view);
+}
 
+void
+OverlayManagerImpl::sendITHSAccept(uint64_t view, Hash const& blockHash,
+                                    std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    msg->customMessage().msgType   = CUSTOM_ITHS_ACCEPT;
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+    msg->customMessage().data      = data;
+    broadcastMessage(msg);
+    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ACCEPT block {} view {}",
+               hexAbbrev(blockHash), view);
+}
+
+void
+OverlayManagerImpl::sendITHSLock(uint64_t view, Hash const& blockHash,
+                                  std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    msg->customMessage().msgType   = CUSTOM_ITHS_LOCK;
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+    msg->customMessage().data      = data;
+    broadcastMessage(msg);
+}
 
 
 void
@@ -2916,6 +3160,22 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                     
                     CLOG_INFO(Overlay, "========================================");
+
+
+                    if (g_clientListenerActive && 
+                        mApp.getConfig().SEND_CUSTOM_MESSAGE) // explicit leader check
+                    {
+                        std::lock_guard<std::mutex> lock(g_pendingAckMutex);
+                        if (!g_pendingAcks.empty())
+                        {
+                            auto [batchId, clientFd] = g_pendingAcks.front();
+                            g_pendingAcks.pop();
+                            uint64_t ackNet = htobe64(batchId);
+                            send(clientFd, &ackNet, 8, MSG_NOSIGNAL);
+                        }
+                    }
+
+
 
                     
                     cleanupOldTxnStates();
@@ -3209,6 +3469,118 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 }
             }
             break;
+
+        // ================================================================
+        case CUSTOM_ITHS_PROPOSE:
+            if (cm.view == currentView)
+            {
+                CLOG_INFO(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
+                        hexAbbrev(cm.blockHash), cm.view);
+
+                if (!st.ithsEchoSent && latestCommittedView <= cm.view - 1)
+                {
+                    st.ithsEchoSent = true;
+                    st.ithsEchoVoters.insert(selfID);
+                    sendITHSEcho(cm.view, cm.blockHash, cm.data);
+                }
+            }
+            break;
+
+        // ================================================================
+        case CUSTOM_ITHS_ECHO:
+            if (cm.view == currentView)
+            {
+                st.ithsEchoVoters.insert(sender);
+                CLOG_INFO(Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
+                        hexAbbrev(cm.blockHash), cm.view, st.ithsEchoVoters.size());
+
+                if (st.ithsEchoVoters.size() >= 2*f + 1 && !st.ithsAcceptSent)
+                {
+                    st.ithsAcceptSent = true;
+                    st.ithsAcceptVoters.insert(selfID);
+                    sendITHSAccept(cm.view, cm.blockHash, cm.data);
+                    CLOG_INFO(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
+                            hexAbbrev(cm.blockHash), cm.view);
+                }
+            }
+            break;
+
+        // ================================================================
+        case CUSTOM_ITHS_ACCEPT:
+            if (cm.view == currentView)
+            {
+                st.ithsAcceptVoters.insert(sender);
+                CLOG_INFO(Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
+                        hexAbbrev(cm.blockHash), cm.view, st.ithsAcceptVoters.size());
+
+                // f+1 → amplify (background protocol)
+                if (st.ithsAcceptVoters.size() >= f + 1 && !st.ithsAcceptSent)
+                {
+                    st.ithsAcceptSent = true;
+                    st.ithsAcceptVoters.insert(selfID);
+                    sendITHSAccept(cm.view, cm.blockHash, cm.data);
+                }
+
+                // n-f → set lock state + send LOCK
+                if (st.ithsAcceptVoters.size() >= 2*f + 1 && !st.ithsLockSent)
+                {
+                    // set lock = (v, b) per blog pseudocode
+                    g_ithsLockView  = cm.view;
+                    g_ithsLockBlock = cm.blockHash;
+
+                    st.ithsLockSent = true;
+                    st.ithsLockVoters.insert(selfID);
+                    sendITHSLock(cm.view, cm.blockHash, cm.data);
+                    CLOG_INFO(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
+                            cm.view, hexAbbrev(cm.blockHash));
+                }
+            }
+            break;
+
+        // ================================================================
+
+        case CUSTOM_ITHS_LOCK:
+            if (cm.view == currentView)
+            {
+                st.ithsLockVoters.insert(sender);
+                CLOG_INFO(Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
+                        hexAbbrev(cm.blockHash), cm.view, st.ithsLockVoters.size());
+
+                if (st.ithsLockVoters.size() >= 2*f + 1 && st.committedView < cm.view)
+                {
+                    st.committedView     = cm.view;
+                    st.committedBlock    = cm.blockHash;
+                    latestCommittedView  = cm.view;
+                    latestCommittedBlock = cm.blockHash;
+                    currentView          = cm.view + 1;
+
+                    BlockKey nextKey{currentView, Hash()};
+                    g_txn[nextKey].proposalSentForView = false;
+
+                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                    for (auto const& txn : batch.transactions)
+                    {
+                        std::istringstream ss(txn.payload);
+                        std::string op, key, value;
+                        ss >> op >> key;
+                        if (op == "READ") {
+                            auto it = g_kvStore.find(key);
+                            (void)it;
+                        } else if (op == "UPDATE" || op == "RMW") {
+                            ss >> value;
+                            g_kvStore[key] = value;
+                        }
+                    }
+
+                    CLOG_INFO(Overlay, "[IT-HS] Committed block {} view {} with 100 transactions",
+                            hexAbbrev(cm.blockHash), cm.view);
+
+                    cleanupOldTxnStates();
+                    prop();
+                }
+            }
+            break;
+        
     }
 }
 
