@@ -2122,331 +2122,281 @@ OverlayManagerImpl::startClientListener(int port)
 }
 
 
+static constexpr size_t CUSTOM_BATCH_SIZE = 100;
+
+static void
+updateForcedCollectState()
+{
+    if (shabdizStartTimeSet && !collectWindowArmed)
+    {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed =
+            std::chrono::duration_cast<std::chrono::seconds>(
+                now - shabdizStartTime);
+
+        if (elapsed.count() >= FORCE_COLLECT_AFTER_SEC)
+        {
+            collectWindowArmed  = true;
+            collectWindowActive = true;
+            collectAttempts     = 0;
+
+            CLOG_INFO(Overlay,
+                      "⏱️ Forcing COLLECT for next {} views starting at view {}",
+                      MAX_COLLECT_ATTEMPTS,
+                      collectWindowStartView);
+        }
+    }
+
+    if (collectWindowActive)
+    {
+        force_collect = true;
+    }
+}
+
+static TransactionBatch
+makeSyntheticYCSBBatch(Application& app,
+                       std::string const& senderShortID,
+                       uint64_t startTxnId,
+                       size_t batchSize)
+{
+    TransactionBatch batch;
+
+    uint64_t currentTime =
+        VirtualClock::to_time_t(app.getClock().system_now());
+
+    for (size_t i = 0; i < batchSize; ++i)
+    {
+        CustomTransaction txn;
+        txn.txnId = startTxnId + i;
+        txn.payload = generateYCSBOp();
+        txn.timestamp = currentTime;
+        txn.sender = senderShortID;
+
+        batch.transactions.push_back(txn);
+    }
+
+    return batch;
+}
+
+static std::shared_ptr<StellarMessage>
+makeProposalMessage(bool ithsMode,
+                    uint64_t view,
+                    Hash const& blockHash,
+                    uint64_t parentView,
+                    Hash const& parentBlock,
+                    std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+
+    msg->customMessage().msgType =
+        ithsMode ? CUSTOM_ITHS_PROPOSE : CUSTOM_PROPOSE;
+
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+
+    // Parent metadata for Shabdiz fast-path validation.
+    msg->customMessage().vp = parentView;
+    msg->customMessage().bp = parentBlock;
+
+    msg->customMessage().data = data;
+
+    return msg;
+}
+
 
 void
 OverlayManagerImpl::prop()
 {
-
-    // std::this_thread::sleep_for(std::chrono::milliseconds(100));
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-
     std::string shortID = KeyUtils::toShortString(selfID);
-    CLOG_DEBUG(Overlay, "shortID, txn_count: {}, {}", shortID, txn_count);
 
-
-    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-    {
-
-        CLOG_DEBUG(Overlay, "g_clientTxnQueue size: {}", g_clientTxnQueue.size());
-
-        CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE");
-
-        static auto lastSent = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-
-
-        lastSent = now;
-
-
-
-
-        CLOG_DEBUG(Overlay, "txn_count={}, latestCommittedView: {}, currentView: {}", txn_count, latestCommittedView, currentView);
-
-
-
-
-        // ---- Activate forced COLLECT window after 30s ----
-        if (shabdizStartTimeSet && !collectWindowArmed)
-        {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(now - shabdizStartTime);
-
-            if (elapsed.count() >= FORCE_COLLECT_AFTER_SEC)
-            {
-
-                collectWindowArmed  = true;
-                collectWindowActive = true;
-                collectAttempts     = 0;
-
-
-                CLOG_INFO(Overlay,
-                        "⏱️ Forcing COLLECT for next {} views starting at view {}",
-                        MAX_COLLECT_ATTEMPTS, collectWindowStartView);
-            }
-        }
-                
-
-        // // If window active, force COLLECT by desync
-        if (collectWindowActive)
-        {
-            // latestCommittedView = currentView - 2;
-            force_collect = true;
-
-        }
-
-
-
-        if (latestCommittedView == currentView - 1 && force_collect == false)
-        {
-
-            if (g_fastProposedViews.count(currentView))
-            {
-                CLOG_INFO(Overlay,
-                        "[FAST PROP SKIP] already proposed in view {}",
-                        currentView);
-                return;
-            }
-            g_fastProposedViews.insert(currentView);
-
-
-            CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
-
-            // if (g_clientListenerActive)
-            // {
-            //     std::lock_guard<std::mutex> lock(g_clientTxnMutex);
-            //     if (g_clientTxnQueue.empty())
-            //     {
-            //         CLOG_DEBUG(Overlay, "No client txns, waiting...");
-            //         return; // listener will trigger prop() when txns arrive
-            //     }
-            // }
-
-
-            const size_t BATCH_SIZE = 100;
-            TransactionBatch batch;
-            
-            uint64_t currentTime = VirtualClock::to_time_t(mApp.getClock().system_now());
-            
-            for (size_t i = 0; i < BATCH_SIZE; ++i)
-            {
-                CustomTransaction txn;
-                txn.txnId = txn_count + i;
-
-                // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
-                txn.payload = generateYCSBOp();
-                txn.timestamp = currentTime;
-                txn.sender = shortID;
-                
-                batch.transactions.push_back(txn);
-            }
-
-            // bool usingClientTxns = false;
-            // {
-            //     std::lock_guard<std::mutex> lock(g_clientTxnMutex);
-            //     if (g_clientListenerActive && !g_clientTxnQueue.empty())
-            //     {
-            //         size_t count = std::min((size_t)BATCH_SIZE,
-            //                                 g_clientTxnQueue.size());
-            //         for (size_t i = 0; i < count; ++i)
-            //         {
-            //             batch.transactions.push_back(
-            //                 g_clientTxnQueue.front().first);
-            //             g_clientTxnQueue.pop();
-            //         }
-            //         usingClientTxns = true;
-            //     }
-            // }
-
-            txn_count += batch.transactions.size();
-
-
-
-
-            
-            Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
-            // txn_count++;
-            
-            // txn_count += BATCH_SIZE;
-
-
-            CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 3");
-
-
-            auto msg = std::make_shared<StellarMessage>();
-            msg->type(CUSTOM_MESSAGE);
-
-            // msg->customMessage().msgType   = CUSTOM_PROPOSE;
-            msg->customMessage().msgType = ITHS_MODE ? CUSTOM_ITHS_PROPOSE : CUSTOM_PROPOSE;
-
-            msg->customMessage().view      = currentView;
-            msg->customMessage().blockHash = blockHash;
-
-
-            msg->customMessage().vp = latestCommittedView;
-            msg->customMessage().bp = latestCommittedBlock;
-
-            
-
-            msg->customMessage().data = batch.serialize();
-
-
-
-            CLOG_INFO(Overlay, "prop(): Leaderp proposing block {} in view {}",
-                    hexAbbrev(blockHash), currentView);
-
-
-
-
-
-
-            BlockKey key{currentView, blockHash};
-
-            CLOG_INFO(Overlay,
-                    "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={}",
-                    hexAbbrev(blockHash),
-                    currentView,
-                    msg->customMessage().vp,
-                    hexAbbrev(msg->customMessage().bp),
-                    latestCommittedView,
-                    hexAbbrev(latestCommittedBlock));
-
-
-            broadcastMessage(msg);
-
-            // =====================================================
-            // Option B: LOCAL handling of CUSTOM_PROPOSE (no network)
-            // =====================================================
-
-
-
-            {
-                BlockKey key{currentView, blockHash};
-                auto& st = g_txn[key];
-
-
-                if (ITHS_MODE)
-                {
-                    if (!st.ithsEchoSent && latestCommittedView <= currentView - 1)
-                    {
-                        st.ithsEchoSent = true;
-                        st.ithsEchoVoters.insert(selfID);
-                        auto const& cm = (*msg).customMessage();
-                        sendITHSEcho(cm.view, cm.blockHash, cm.data);
-                        CLOG_DEBUG(Overlay, "[IT-HS SELF-LOCAL] Sent ECHO block {} view {}",
-                                hexAbbrev(blockHash), currentView);
-                    }
-                }
-                else
-                {
-
-                    auto const& cm = (*msg).customMessage();
-
-                    bool selfExtendsCommitted =
-                        (latestCommittedView == currentView - 1) &&
-                        (cm.vp == latestCommittedView) &&
-                        (cm.bp == latestCommittedBlock);
-
-                    if (!st.preparedSent && selfExtendsCommitted)
-                    {
-                        CLOG_INFO(Overlay,
-                                "[SELF-LOCAL SEND PREPARE] block={} view={} parentView={} parentBlock={}",
-                                hexAbbrev(blockHash),
-                                currentView,
-                                cm.vp,
-                                hexAbbrev(cm.bp));
-
-                        st.preparedSent  = true;
-                        st.preparedView  = currentView;
-                        st.preparedBlock = blockHash;
-
-                        g_ps.insert(key);
-
-                        st.prepareVoters.insert(selfID);
-
-                        sendPrepare(cm.view, cm.blockHash, cm.data);
-
-                        ViewBlockKey vb{st.preparedView, st.preparedBlock};
-                        if (st.pendingCondReady.count(vb))
-                        {
-                            auto& voters = st.pendingCondReady[vb];
-                            st.readies[vb].insert(voters.begin(), voters.end());
-                            st.pendingCondReady.erase(vb);
-
-                            CLOG_DEBUG(Overlay,
-                                    "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                                    voters.size(),
-                                    st.preparedView,
-                                    hexAbbrev(st.preparedBlock));
-                        }
-                    }
-                    else
-                    {
-                        CLOG_INFO(Overlay,
-                                "[SELF-LOCAL NO PREPARE] block={} view={} preparedSent={} latestCommittedView={} expectedPrev={} parentView={} parentBlock={} localCommittedBlock={}",
-                                hexAbbrev(blockHash),
-                                currentView,
-                                st.preparedSent,
-                                latestCommittedView,
-                                currentView - 1,
-                                cm.vp,
-                                hexAbbrev(cm.bp),
-                                hexAbbrev(latestCommittedBlock));
-                    }
-
-                }
-
-                
-            }
-
-
-
-
-
-            
-
-
-        }
-
-        else
-        {
-            // ---- COLLECT (once per view) ----
-            // if (lastCollectSentView != currentView)
-            {
-                lastCollectSentView = currentView;
-
-
-                auto msg = std::make_shared<StellarMessage>();
-                msg->type(CUSTOM_MESSAGE);
-                msg->customMessage().msgType = CUSTOM_COLLECT;
-                msg->customMessage().view    = currentView;
-
-                CLOG_INFO(Overlay,
-                        "Leader initiating COLLECT for view {}",
-                        currentView);
-
-                broadcastMessage(msg);
-
-                //  Count ONLY real COLLECT sends
-                if (collectWindowActive)
-                {
-                    collectAttempts++;
-
-                    CLOG_DEBUG(Overlay,
-                            "Forced COLLECT attempt {}/{}",
-                            collectAttempts, MAX_COLLECT_ATTEMPTS);
-
-                    if (collectAttempts >= MAX_COLLECT_ATTEMPTS)
-                    {
-                        collectWindowActive = false;
-                        force_collect = false;
-
-                        CLOG_INFO(Overlay,
-                                "Forced COLLECT window ended after {} attempts",
-                                MAX_COLLECT_ATTEMPTS);
-                    }
-                }
-            }
-        }
-
-
-    }
-
-    else
+    CLOG_DEBUG(Overlay,
+               "prop(): self={}, txn_count={}, latestCommittedView={}, currentView={}, clientQueue={}",
+               shortID,
+               txn_count,
+               latestCommittedView,
+               currentView,
+               g_clientTxnQueue.size());
+
+    // Non-leader/custom-disabled nodes do not drive Shabdiz / IT-HS proposals.
+    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
     {
         txn_count++;
+        return;
     }
 
+    updateForcedCollectState();
+
+    bool canUseFastPath =
+        (latestCommittedView == currentView - 1) && !force_collect;
+
+    if (canUseFastPath)
+    {
+        // Avoid duplicate proposals for the same view.
+        if (g_fastProposedViews.count(currentView))
+        {
+            CLOG_INFO(Overlay,
+                      "[FAST PROP SKIP] already proposed in view {}",
+                      currentView);
+            return;
+        }
+        g_fastProposedViews.insert(currentView);
+
+        // For now, still use synthetic YCSB transactions.
+        // Later, this is the only place we need to swap in client queue logic.
+        TransactionBatch batch =
+            makeSyntheticYCSBBatch(mApp, shortID, txn_count, CUSTOM_BATCH_SIZE);
+
+        txn_count += batch.transactions.size();
+
+        Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
+        BlockKey key{currentView, blockHash};
+
+        auto msg = makeProposalMessage(
+            ITHS_MODE,
+            currentView,
+            blockHash,
+            latestCommittedView,
+            latestCommittedBlock,
+            batch.serialize());
+
+        CLOG_INFO(Overlay,
+                  "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={} txns={}",
+                  hexAbbrev(blockHash),
+                  currentView,
+                  msg->customMessage().vp,
+                  hexAbbrev(msg->customMessage().bp),
+                  latestCommittedView,
+                  hexAbbrev(latestCommittedBlock),
+                  batch.transactions.size());
+
+        broadcastMessage(msg);
+
+        // =====================================================
+        // Local leader handling: the leader also participates.
+        // =====================================================
+        auto& st = g_txn[key];
+        auto const& cm = msg->customMessage();
+
+        if (ITHS_MODE)
+        {
+            if (!st.ithsEchoSent && latestCommittedView <= currentView - 1)
+            {
+                st.ithsEchoSent = true;
+                st.ithsEchoVoters.insert(selfID);
+
+                sendITHSEcho(cm.view, cm.blockHash, cm.data);
+
+                CLOG_INFO(Overlay,
+                          "[IT-HS SELF-LOCAL SEND ECHO] block={} view={}",
+                          hexAbbrev(blockHash),
+                          currentView);
+            }
+            else
+            {
+                CLOG_INFO(Overlay,
+                          "[IT-HS SELF-LOCAL NO ECHO] block={} view={} ithsEchoSent={} latestCommittedView={}",
+                          hexAbbrev(blockHash),
+                          currentView,
+                          st.ithsEchoSent,
+                          latestCommittedView);
+            }
+        }
+        else
+        {
+            bool selfExtendsCommitted =
+                (latestCommittedView == currentView - 1) &&
+                (cm.vp == latestCommittedView) &&
+                (cm.bp == latestCommittedBlock);
+
+            if (!st.preparedSent && selfExtendsCommitted)
+            {
+                st.preparedSent  = true;
+                st.preparedView  = currentView;
+                st.preparedBlock = blockHash;
+
+                g_ps.insert(key);
+
+                st.prepareVoters.insert(selfID);
+
+                sendPrepare(cm.view, cm.blockHash, cm.data);
+
+                CLOG_INFO(Overlay,
+                          "[SELF-LOCAL SEND PREPARE] block={} view={} parentView={} parentBlock={} prepareVotes={}",
+                          hexAbbrev(blockHash),
+                          currentView,
+                          cm.vp,
+                          hexAbbrev(cm.bp),
+                          st.prepareVoters.size());
+
+                ViewBlockKey vb{st.preparedView, st.preparedBlock};
+                if (st.pendingCondReady.count(vb))
+                {
+                    auto& voters = st.pendingCondReady[vb];
+                    st.readies[vb].insert(voters.begin(), voters.end());
+                    st.pendingCondReady.erase(vb);
+
+                    CLOG_DEBUG(Overlay,
+                               "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
+                               voters.size(),
+                               st.preparedView,
+                               hexAbbrev(st.preparedBlock));
+                }
+            }
+            else
+            {
+                CLOG_INFO(Overlay,
+                          "[SELF-LOCAL NO PREPARE] block={} view={} preparedSent={} latestCommittedView={} expectedPrev={} parentView={} parentBlock={} localCommittedBlock={}",
+                          hexAbbrev(blockHash),
+                          currentView,
+                          st.preparedSent,
+                          latestCommittedView,
+                          currentView - 1,
+                          cm.vp,
+                          hexAbbrev(cm.bp),
+                          hexAbbrev(latestCommittedBlock));
+            }
+        }
+
+        return;
+    }
+
+    // =====================================================
+    // Slow path / forced COLLECT path
+    // =====================================================
+    lastCollectSentView = currentView;
+
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    msg->customMessage().msgType = CUSTOM_COLLECT;
+    msg->customMessage().view    = currentView;
+
+    CLOG_INFO(Overlay,
+              "Leader initiating COLLECT for view {}",
+              currentView);
+
+    broadcastMessage(msg);
+
+    if (collectWindowActive)
+    {
+        collectAttempts++;
+
+        CLOG_DEBUG(Overlay,
+                   "Forced COLLECT attempt {}/{}",
+                   collectAttempts,
+                   MAX_COLLECT_ATTEMPTS);
+
+        if (collectAttempts >= MAX_COLLECT_ATTEMPTS)
+        {
+            collectWindowActive = false;
+            force_collect = false;
+
+            CLOG_INFO(Overlay,
+                      "Forced COLLECT window ended after {} attempts",
+                      MAX_COLLECT_ATTEMPTS);
+        }
+    }
 }
 
 int
