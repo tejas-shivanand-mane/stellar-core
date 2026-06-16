@@ -1,0 +1,78 @@
+#pragma once
+
+#include <cmath>
+#include <cstdlib>
+#include <string>
+#include <unordered_map>
+
+enum YCSBWorkload
+{
+    WORKLOAD_A,
+    WORKLOAD_B,
+    WORKLOAD_F
+};
+
+static double zipfian_alpha = 0.99;
+static uint64_t zipfian_n = 1000000;
+
+static YCSBWorkload currentWorkload = WORKLOAD_A;
+
+static uint64_t
+zipfianNext()
+{
+    static double zeta2 = 0.0;
+    static double zetaN = 0.0;
+    static bool initialized = false;
+
+    if (!initialized)
+    {
+        for (uint64_t i = 1; i <= zipfian_n; i++)
+        {
+            zetaN += 1.0 / std::pow(i, zipfian_alpha);
+        }
+
+        zeta2 = 1.0 + 1.0 / std::pow(2, zipfian_alpha);
+        initialized = true;
+    }
+
+    double u = static_cast<double>(std::rand()) / RAND_MAX;
+    double uz = u * zetaN;
+
+    if (uz < 1.0)
+    {
+        return 1;
+    }
+
+    if (uz < 1.0 + std::pow(0.5, zipfian_alpha))
+    {
+        return 2;
+    }
+
+    return static_cast<uint64_t>(
+        zipfian_n *
+        std::pow(zeta2 / zetaN * u, 1.0 / (1.0 - zipfian_alpha)));
+}
+
+static std::string
+generateYCSBOp()
+{
+    std::string key = "user" + std::to_string(zipfianNext());
+    double r = static_cast<double>(std::rand()) / RAND_MAX;
+
+    switch (currentWorkload)
+    {
+    case WORKLOAD_A:
+        return (r < 0.5) ? "READ " + key
+                         : "UPDATE " + key + " val" + std::to_string(std::rand());
+
+    case WORKLOAD_B:
+        return (r < 0.95) ? "READ " + key
+                          : "UPDATE " + key + " val" + std::to_string(std::rand());
+
+    case WORKLOAD_F:
+        return (r < 0.5) ? "READ " + key
+                         : "RMW " + key + " val" + std::to_string(std::rand());
+    }
+
+    return "READ " + key;
+}

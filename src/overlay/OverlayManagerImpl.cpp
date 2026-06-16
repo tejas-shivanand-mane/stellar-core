@@ -43,6 +43,12 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include "overlay/CustomProtocolTypes.h"
+#include "overlay/CustomYCSBWorkload.h"
+
+
+static constexpr size_t BLOCK_TXN_COUNT = 1;
+
 
 static std::atomic<bool> g_propPending{false};
 std::map<uint64_t, std::vector<std::pair<StellarMessage, Peer::pointer>>> g_futureFastMsgs;
@@ -55,7 +61,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = true;
+static bool ITHS_MODE = false;
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
@@ -100,96 +106,8 @@ static bool force_collect = false;
 
 
 
-// ---- YCSB Zipfian generator (self-contained) ----
-static double zipfian_alpha = 0.99; // standard YCSB alpha
-static uint64_t zipfian_n = 1000000; // 1M key space
 
 static std::unordered_map<std::string, std::string> g_kvStore;
-
-
-static uint64_t zipfianNext() {
-    static double zeta2 = 0.0;
-    static double zetaN = 0.0;
-    static bool initialized = false;
-    if (!initialized) {
-        for (uint64_t i = 1; i <= zipfian_n; i++)
-            zetaN += 1.0 / pow(i, zipfian_alpha);
-        zeta2 = 1.0 + 1.0 / pow(2, zipfian_alpha);
-        initialized = true;
-    }
-    double u = (double)rand() / RAND_MAX;
-    double uz = u * zetaN;
-    if (uz < 1.0) return 1;
-    if (uz < 1.0 + pow(0.5, zipfian_alpha)) return 2;
-    return (uint64_t)(zipfian_n * pow(zeta2 / zetaN * u, 1.0 / (1.0 - zipfian_alpha)));
-}
-
-// ---- YCSB workload operation generator ----
-enum YCSBWorkload { WORKLOAD_A, WORKLOAD_B, WORKLOAD_F };
-static YCSBWorkload currentWorkload = WORKLOAD_A;
-
-static std::string generateYCSBOp() {
-    std::string key = "user" + std::to_string(zipfianNext());
-    double r = (double)rand() / RAND_MAX;
-    
-    switch (currentWorkload) {
-        case WORKLOAD_A: // 50% read, 50% update
-            return (r < 0.5) ? "READ " + key 
-                             : "UPDATE " + key + " val" + std::to_string(rand());
-        case WORKLOAD_B: // 95% read, 5% update
-            return (r < 0.95) ? "READ " + key 
-                              : "UPDATE " + key + " val" + std::to_string(rand());
-        case WORKLOAD_F: // 50% read, 50% RMW
-            return (r < 0.5) ? "READ " + key 
-                             : "RMW " + key + " val" + std::to_string(rand());
-    }
-    return "READ " + key;
-}
-
-
-
-
-
-
-
-
-
-struct CustomTransaction
-{
-    uint64_t txnId;           // Unique transaction ID
-    std::string payload;      // Transaction data/payload
-    uint64_t timestamp;       // When transaction was created
-    std::string sender;       // Who created it (could be node ID)
-    
-    // Serialize for transmission
-    std::string serialize() const
-    {
-        return std::to_string(txnId) + ":" + 
-               payload + ":" + 
-               std::to_string(timestamp) + ":" + 
-               sender;
-    }
-    
-    // Deserialize from string
-    static CustomTransaction deserialize(const std::string& data)
-    {
-        CustomTransaction txn;
-        std::istringstream ss(data);
-        std::string token;
-        
-        std::getline(ss, token, ':');
-        txn.txnId = std::stoull(token);
-        
-        std::getline(ss, txn.payload, ':');
-        
-        std::getline(ss, token, ':');
-        txn.timestamp = std::stoull(token);
-        
-        std::getline(ss, txn.sender, ':');
-        
-        return txn;
-    }
-};
 
 
 
@@ -199,51 +117,15 @@ static int                g_clientListenerFd = -1;
 static std::vector<int>   g_clientFds;
 static std::mutex         g_clientFdsMutex;
 
-static std::mutex         g_clientTxnMutex;
-static std::queue<std::pair<CustomTransaction, uint64_t>>
-                          g_clientTxnQueue; // {txn, batchId}
 
-static std::mutex         g_pendingAckMutex;
-static std::queue<std::pair<uint64_t, int>>
-                          g_pendingAcks; // {batchId, clientFd}
+
 
 static bool               g_clientListenerActive = false;
 
 
 
-struct TransactionBatch
-{
-    std::vector<CustomTransaction> transactions;
-    
-    // Serialize all transactions
-    std::string serialize() const
-    {
-        std::string result;
-        for (size_t i = 0; i < transactions.size(); ++i)
-        {
-            result += transactions[i].serialize();
-            if (i < transactions.size() - 1)
-                result += "|";  // Separator between transactions
-        }
-        return result;
-    }
-    
-    // Deserialize batch
-    static TransactionBatch deserialize(const std::string& data)
-    {
-        TransactionBatch batch;
-        std::istringstream ss(data);
-        std::string txnData;
-        
-        while (std::getline(ss, txnData, '|'))
-        {
-            batch.transactions.push_back(CustomTransaction::deserialize(txnData));
-        }
-        
-        return batch;
-    }
-};
-
+static std::mutex g_clientBatchMutex;
+static std::queue<PendingClientBatch> g_clientBatchQueue;
 
 
 struct SCPTxnStats {
@@ -821,6 +703,16 @@ struct BlockKeyHash {
     }
 };
 
+struct ClientAck
+{
+    uint64_t batchId;
+    int clientFd;
+};
+
+static std::unordered_map<BlockKey,
+                          std::vector<ClientAck>,
+                          BlockKeyHash> g_blockClientAcks;
+
 // NodeID hashing helpers
 struct NodeIDHash {
     size_t operator()(NodeID const& n) const noexcept {
@@ -922,6 +814,42 @@ struct TxnState {
 
 static std::unordered_map<BlockKey, TxnState, BlockKeyHash> g_txn;
 static std::unordered_set<BlockKey, BlockKeyHash> g_ps;
+
+
+
+static void
+ackClientBatchesForBlock(uint64_t view, Hash const& blockHash)
+{
+    BlockKey key{view, blockHash};
+
+    auto it = g_blockClientAcks.find(key);
+    if (it == g_blockClientAcks.end())
+    {
+        return;
+    }
+
+    for (auto const& ack : it->second)
+    {
+        uint64_t ackNet = htobe64(ack.batchId);
+        send(ack.clientFd, &ackNet, 8, MSG_NOSIGNAL);
+
+        CLOG_DEBUG(Overlay,
+                   "[CLIENT ACK] batchId={} fd={} block={} view={}",
+                   ack.batchId,
+                   ack.clientFd,
+                   hexAbbrev(blockHash),
+                   view);
+    }
+
+    g_blockClientAcks.erase(it);
+}
+
+
+
+
+
+
+
 
 // Global tracking
 static uint64_t currentView = 1;         
@@ -1742,8 +1670,12 @@ OverlayManagerImpl::tick()
 
         {
 
-            // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-            //     startClientListener(12000);
+            if (mApp.getConfig().SEND_CUSTOM_MESSAGE &&
+                !ENABLE_SCP_TRACKING &&
+                !g_clientListenerActive)
+            {
+                startClientListener(12000);
+            }
 
 
             prop();
@@ -2076,10 +2008,14 @@ OverlayManagerImpl::startClientListener(int port)
                     TransactionBatch batch =
                         TransactionBatch::deserialize(txnData);
 
+                    if (batch.transactions.size() != BLOCK_TXN_COUNT)
                     {
-                        std::lock_guard<std::mutex> lock(g_clientTxnMutex);
-                        for (auto const& txn : batch.transactions)
-                            g_clientTxnQueue.push({txn, batchId});
+                        CLOG_ERROR(Overlay,
+                                "[CLIENT REJECT] batchId={} has {} txns, expected BLOCK_TXN_COUNT={}",
+                                batchId,
+                                batch.transactions.size(),
+                                BLOCK_TXN_COUNT);
+                        continue;
                     }
 
 
@@ -2099,8 +2035,21 @@ OverlayManagerImpl::startClientListener(int port)
 
 
                     {
-                        std::lock_guard<std::mutex> lock(g_pendingAckMutex);
-                        g_pendingAcks.push({batchId, clientFd});
+                        size_t txnCount = batch.transactions.size();
+
+                        PendingClientBatch pending;
+                        pending.batchId = batchId;
+                        pending.clientFd = clientFd;
+                        pending.batch = std::move(batch);
+
+                        std::lock_guard<std::mutex> lock(g_clientBatchMutex);
+                        g_clientBatchQueue.push(std::move(pending));
+
+                        CLOG_INFO(Overlay,
+                                "[CLIENT QUEUE] queued batchId={} txns={} queueSize={}",
+                                batchId,
+                                txnCount,
+                                g_clientBatchQueue.size());
                     }
 
                     CLOG_DEBUG(Overlay,
@@ -2122,7 +2071,6 @@ OverlayManagerImpl::startClientListener(int port)
 }
 
 
-static constexpr size_t CUSTOM_BATCH_SIZE = 1;
 
 static void
 updateForcedCollectState()
@@ -2205,19 +2153,46 @@ makeProposalMessage(bool ithsMode,
 }
 
 
+static bool
+tryPopClientBatch(TransactionBatch& batch, uint64_t& batchId, int& clientFd)
+{
+    std::lock_guard<std::mutex> lock(g_clientBatchMutex);
+
+    if (g_clientBatchQueue.empty())
+    {
+        return false;
+    }
+
+    auto pending = std::move(g_clientBatchQueue.front());
+    g_clientBatchQueue.pop();
+
+    batch = std::move(pending.batch);
+    batchId = pending.batchId;
+    clientFd = pending.clientFd;
+
+    return true;
+}
+
+
 void
 OverlayManagerImpl::prop()
 {
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
     std::string shortID = KeyUtils::toShortString(selfID);
 
+    size_t clientQueueSize = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_clientBatchMutex);
+        clientQueueSize = g_clientBatchQueue.size();
+    }
+
     CLOG_DEBUG(Overlay,
-               "prop(): self={}, txn_count={}, latestCommittedView={}, currentView={}, clientQueue={}",
-               shortID,
-               txn_count,
-               latestCommittedView,
-               currentView,
-               g_clientTxnQueue.size());
+            "prop(): self={}, txn_count={}, latestCommittedView={}, currentView={}, clientBatchQueue={}",
+            shortID,
+            txn_count,
+            latestCommittedView,
+            currentView,
+            clientQueueSize);
 
     // Non-leader/custom-disabled nodes do not drive Shabdiz / IT-HS proposals.
     if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
@@ -2237,21 +2212,76 @@ OverlayManagerImpl::prop()
         if (g_fastProposedViews.count(currentView))
         {
             CLOG_INFO(Overlay,
-                      "[FAST PROP SKIP] already proposed in view {}",
-                      currentView);
+                    "[FAST PROP SKIP] already proposed in view {}",
+                    currentView);
             return;
         }
-        g_fastProposedViews.insert(currentView);
 
-        // For now, still use synthetic YCSB transactions.
-        // Later, this is the only place we need to swap in client queue logic.
-        TransactionBatch batch =
-            makeSyntheticYCSBBatch(mApp, shortID, txn_count, CUSTOM_BATCH_SIZE);
+        TransactionBatch batch;
+        bool fromExternalClient = false;
+        uint64_t clientBatchId = 0;
+        int clientFd = -1;
+
+        // If the custom client listener is active, use external client batches.
+        // Do not fall back to synthetic batches in this mode, otherwise your benchmark
+        // mixes internal and external workloads.
+        if (g_clientListenerActive)
+        {
+            if (!tryPopClientBatch(batch, clientBatchId, clientFd))
+            {
+                CLOG_DEBUG(Overlay,
+                        "[CLIENT] No queued block-sized batch; not proposing view {} yet",
+                        currentView);
+                return;
+            }
+
+            fromExternalClient = true;
+
+            // In external-client mode:
+            // one client batch = one block = BLOCK_TXN_COUNT transactions.
+            releaseAssert(batch.transactions.size() == BLOCK_TXN_COUNT);
+
+            CLOG_INFO(Overlay,
+                    "[CLIENT] Using batchId={} as one block, txns={}, view={}",
+                    clientBatchId,
+                    batch.transactions.size(),
+                    currentView);
+        }
+        else
+        {
+            batch = makeSyntheticYCSBBatch(
+                mApp,
+                shortID,
+                txn_count,
+                BLOCK_TXN_COUNT);
+
+            CLOG_INFO(Overlay,
+                    "[INTERNAL] Using synthetic block batch, txns={}, view={}",
+                    batch.transactions.size(),
+                    currentView);
+        }
+
+        if (batch.transactions.empty())
+        {
+            CLOG_WARNING(Overlay,
+                        "[PROP SKIP] empty batch for view {}",
+                        currentView);
+            return;
+        }
+
+        // Only mark the view as proposed after we actually have a non-empty batch.
+        g_fastProposedViews.insert(currentView);
 
         txn_count += batch.transactions.size();
 
         Hash blockHash = makeBlock(latestCommittedBlock, txn_count);
         BlockKey key{currentView, blockHash};
+
+        // Remember which client batch should be ACKed when this exact block commits.
+        if (fromExternalClient)
+        {
+            g_blockClientAcks[key].push_back(ClientAck{clientBatchId, clientFd});
+        }
 
         auto msg = makeProposalMessage(
             ITHS_MODE,
@@ -2262,14 +2292,15 @@ OverlayManagerImpl::prop()
             batch.serialize());
 
         CLOG_INFO(Overlay,
-                  "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={} txns={}",
-                  hexAbbrev(blockHash),
-                  currentView,
-                  msg->customMessage().vp,
-                  hexAbbrev(msg->customMessage().bp),
-                  latestCommittedView,
-                  hexAbbrev(latestCommittedBlock),
-                  batch.transactions.size());
+                "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={} txns={} source={}",
+                hexAbbrev(blockHash),
+                currentView,
+                msg->customMessage().vp,
+                hexAbbrev(msg->customMessage().bp),
+                latestCommittedView,
+                hexAbbrev(latestCommittedBlock),
+                batch.transactions.size(),
+                fromExternalClient ? "external-client" : "synthetic");
 
         broadcastMessage(msg);
 
@@ -3195,17 +3226,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         batch.transactions.size(),
                         cm.view + 1);
 
-                if (g_clientListenerActive && mApp.getConfig().SEND_CUSTOM_MESSAGE)
-                {
-                    std::lock_guard<std::mutex> lock(g_pendingAckMutex);
-                    if (!g_pendingAcks.empty())
-                    {
-                        auto [batchId, clientFd] = g_pendingAcks.front();
-                        g_pendingAcks.pop();
-                        uint64_t ackNet = htobe64(batchId);
-                        send(clientFd, &ackNet, 8, MSG_NOSIGNAL);
-                    }
-                }
+                ackClientBatchesForBlock(cm.view, cm.blockHash);
 
                 currentView = cm.view + 1;
 
@@ -3602,10 +3623,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
 
                     CLOG_INFO(Overlay,
-                        "[IT-HS] Committed block {} view {} with {} transactions",
-                        hexAbbrev(cm.blockHash),
-                        cm.view,
-                        batch.transactions.size());
+                            "[IT-HS] Committed block {} view {} with {} transactions",
+                            hexAbbrev(cm.blockHash),
+                            cm.view,
+                            batch.transactions.size());
+
+                    ackClientBatchesForBlock(cm.view, cm.blockHash);
 
                     cleanupOldTxnStates();
                     deliverBufferedForCurrentView();

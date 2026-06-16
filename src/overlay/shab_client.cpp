@@ -9,11 +9,13 @@
 #include <algorithm>
 #include <numeric>
 #include <cstring>
-#include <cmath>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <endian.h>
 #include <unistd.h>
+
+#include "overlay/CustomYCSBWorkload.h"
+#include "overlay/CustomProtocolTypes.h"
 
 // ---- Config ----
 static int    MAX_IN_FLIGHT = 10;
@@ -24,82 +26,119 @@ static int    TOTAL_BATCHES = 10000;
 static int DURATION_SEC = 60; // 0 = use total_batches, >0 = run for N seconds
 
 
-// ---- YCSB ----
-static double ZIPFIAN_ALPHA = 0.99;
-static int    ZIPFIAN_N     = 1000000;
-
-static uint64_t zipfianNext()
-{
-    static double zetaN = 0, zeta2 = 0;
-    static bool init = false;
-    if (!init) {
-        for (int i = 1; i <= ZIPFIAN_N; i++)
-            zetaN += 1.0 / pow(i, ZIPFIAN_ALPHA);
-        zeta2 = 1.0 + 1.0 / pow(2, ZIPFIAN_ALPHA);
-        init = true;
-    }
-    double u  = (double)rand() / RAND_MAX;
-    double uz = u * zetaN;
-    if (uz < 1.0) return 1;
-    if (uz < 1.0 + pow(0.5, ZIPFIAN_ALPHA)) return 2;
-    return (uint64_t)(ZIPFIAN_N * pow(zeta2 / zetaN * u,
-                                      1.0 / (1.0 - ZIPFIAN_ALPHA)));
-}
-
-static std::string generateOp()
-{
-    std::string key = "user" + std::to_string(zipfianNext());
-    double r = (double)rand() / RAND_MAX;
-    return r < 0.5 ? "READ " + key
-                   : "UPDATE " + key + " val" + std::to_string(rand());
-}
-
 // ---- Serialization ----
 // Format: batchId|id:payload:ts:sender|id:payload:ts:sender|...
-static std::string serializeBatch(uint64_t batchId,
-                                   uint64_t startTxnId)
+static std::string
+serializeBatch(uint64_t batchId, uint64_t startTxnId)
 {
-    std::string result = std::to_string(batchId);
+    TransactionBatch batch;
+
     uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     for (int i = 0; i < BATCH_SIZE; ++i)
     {
-        result += "|";
-        result += std::to_string(startTxnId + i) + ":"
-               + generateOp() + ":"
-               + std::to_string(ts) + ":client";
+        CustomTransaction txn;
+        txn.txnId = startTxnId + i;
+        txn.payload = generateYCSBOp();
+        txn.timestamp = ts;
+        txn.sender = "client";
+
+        batch.transactions.push_back(std::move(txn));
     }
-    return result;
+
+    return std::to_string(batchId) + "|" + batch.serialize();
 }
 
 // ---- Stats ----
 struct Stats {
-    std::vector<int64_t> latUs;
+    struct Sample {
+        std::chrono::steady_clock::time_point ackTime;
+        int64_t latUs;
+    };
 
-    void record(int64_t l) { latUs.push_back(l); }
+    std::vector<Sample> samples;
+
+    void record(int64_t l) {
+        samples.push_back({std::chrono::steady_clock::now(), l});
+    }
 
     void report(double elapsed)
     {
-        if (latUs.empty()) return;
+        if (samples.empty()) return;
+
+        std::vector<int64_t> latUs;
+        latUs.reserve(samples.size());
+
+        for (auto const& s : samples)
+            latUs.push_back(s.latUs);
+
         std::sort(latUs.begin(), latUs.end());
         int n = latUs.size();
 
-        double mean = std::accumulate(latUs.begin(),
-            latUs.end(), 0LL) / (double)n / 1000.0;
+        double mean = std::accumulate(latUs.begin(), latUs.end(), 0LL) / (double)n / 1000.0;
         double p50  = latUs[n * 0.50] / 1000.0;
         double p99  = latUs[n * 0.99] / 1000.0;
-        double p999 = latUs[(int)(n * 0.999)] / 1000.0;
+        double p999 = latUs[std::min((int)(n * 0.999), n - 1)] / 1000.0;
         double tput = (double)n * BATCH_SIZE / elapsed;
 
-        printf("=== Results ===\n");
-        printf("Elapsed:        %.2f s\n",   elapsed);
+        printf("=== Overall Results ===\n");
+        printf("Elapsed:        %.2f s\n", elapsed);
         printf("Throughput:     %.0f ops/s\n", tput);
-        printf("Latency mean:   %.2f ms\n",  mean);
-        printf("Latency p50:    %.2f ms\n",  p50);
-        printf("Latency p99:    %.2f ms\n",  p99);
-        printf("Latency p99.9:  %.2f ms\n",  p999);
-        printf("Batches:        %d\n",        n);
+        printf("Latency mean:   %.2f ms\n", mean);
+        printf("Latency p50:    %.2f ms\n", p50);
+        printf("Latency p99:    %.2f ms\n", p99);
+        printf("Latency p99.9:  %.2f ms\n", p999);
+        printf("Batches:        %d\n", n);
+    }
+
+    void reportLastWindow(double windowSec = 60.0)
+    {
+        if (samples.empty()) return;
+
+        auto endTime = samples.back().ackTime;
+        auto startTime = endTime - std::chrono::milliseconds((int)(windowSec * 1000));
+
+        std::vector<int64_t> windowLatUs;
+        for (auto const& s : samples)
+        {
+            if (s.ackTime >= startTime)
+                windowLatUs.push_back(s.latUs);
+        }
+
+        if (windowLatUs.empty())
+        {
+            printf("=== Last %.0f Seconds Results ===\n", windowSec);
+            printf("No committed batches in this window.\n");
+            return;
+        }
+
+        std::sort(windowLatUs.begin(), windowLatUs.end());
+        int n = windowLatUs.size();
+
+        double mean = std::accumulate(windowLatUs.begin(), windowLatUs.end(), 0LL) / (double)n / 1000.0;
+        double p50  = windowLatUs[n * 0.50] / 1000.0;
+        double p99  = windowLatUs[std::min((int)(n * 0.99), n - 1)] / 1000.0;
+        double p999 = windowLatUs[std::min((int)(n * 0.999), n - 1)] / 1000.0;
+
+        double actualWindowSec = windowSec;
+        if (samples.size() > 1)
+        {
+            auto first = samples.front().ackTime;
+            double totalObservedSec =
+                std::chrono::duration_cast<std::chrono::milliseconds>(endTime - first).count() / 1000.0;
+            actualWindowSec = std::min(windowSec, std::max(0.001, totalObservedSec));
+        }
+
+        double tput = (double)n * BATCH_SIZE / actualWindowSec;
+
+        printf("=== Last %.0f Seconds Results ===\n", actualWindowSec);
+        printf("Throughput:     %.0f ops/s\n", tput);
+        printf("Latency mean:   %.2f ms\n", mean);
+        printf("Latency p50:    %.2f ms\n", p50);
+        printf("Latency p99:    %.2f ms\n", p99);
+        printf("Latency p99.9:  %.2f ms\n", p999);
+        printf("Batches:        %d\n", n);
     }
 };
 
@@ -214,12 +253,18 @@ struct Client {
         }
 
         done = true;
-        ackThread.join();
+
+        // Wake the ACK receiver if it is blocked in recv(..., MSG_WAITALL).
+        shutdown(fd, SHUT_RDWR);
+
+        if (ackThread.joinable())
+            ackThread.join();
 
         double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - startTime).count() / 1000.0;
 
         stats.report(elapsed);
+        stats.reportLastWindow(60.0);
     }
 };
 
