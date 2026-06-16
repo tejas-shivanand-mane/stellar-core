@@ -1,0 +1,3 @@
+g++ -O2 -std=c++17 -pthread -Isrc src/overlay/shab_client.cpp -o shab_client
+find . -type f -name "stellar-core.log" -delete
+/home/tejas/stellar-core/src/stellar-core run --conf node1/stellar-core.cfg
