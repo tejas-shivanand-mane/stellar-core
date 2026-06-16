@@ -55,7 +55,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = false;
+static bool ITHS_MODE = true;
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
@@ -2122,7 +2122,7 @@ OverlayManagerImpl::startClientListener(int port)
 }
 
 
-static constexpr size_t CUSTOM_BATCH_SIZE = 100;
+static constexpr size_t CUSTOM_BATCH_SIZE = 1;
 
 static void
 updateForcedCollectState()
@@ -3601,10 +3601,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         }
                     }
 
-                    CLOG_INFO(Overlay, "[IT-HS] Committed block {} view {} with 100 transactions",
-                            hexAbbrev(cm.blockHash), cm.view);
+                    CLOG_INFO(Overlay,
+                        "[IT-HS] Committed block {} view {} with {} transactions",
+                        hexAbbrev(cm.blockHash),
+                        cm.view,
+                        batch.transactions.size());
 
                     cleanupOldTxnStates();
+                    deliverBufferedForCurrentView();
                     prop();
                 }
             }
