@@ -45,7 +45,7 @@
 #include <netinet/in.h>
 
 static std::atomic<bool> g_propPending{false};
-
+std::map<uint64_t, std::vector<std::pair<StellarMessage, Peer::pointer>>> g_futureFastMsgs;
 
 namespace {
 
@@ -929,6 +929,11 @@ static uint64_t latestCommittedView = 0;
 static Hash latestCommittedBlock = Hash();
 static int txn_count = 0;
 static int shabdiz_start = 0;
+
+
+
+static uint64_t g_csentView = 0; // algorithm variable csent: last view where COMMIT was sent
+static std::unordered_set<uint64_t> g_fastProposedViews;
 // static int forceCollectRound = 0;
 
 
@@ -1737,8 +1742,8 @@ OverlayManagerImpl::tick()
 
         {
 
-            if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-                startClientListener(12000);
+            // if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+            //     startClientListener(12000);
 
 
             prop();
@@ -2132,6 +2137,8 @@ OverlayManagerImpl::prop()
     if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
     {
 
+        CLOG_DEBUG(Overlay, "g_clientTxnQueue size: {}", g_clientTxnQueue.size());
+
         CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE");
 
         static auto lastSent = std::chrono::steady_clock::now();
@@ -2143,7 +2150,7 @@ OverlayManagerImpl::prop()
 
 
 
-        CLOG_INFO(Overlay, "txn_count={}, latestCommittedView: {}, currentView: {}", txn_count, latestCommittedView, currentView);
+        CLOG_DEBUG(Overlay, "txn_count={}, latestCommittedView: {}, currentView: {}", txn_count, latestCommittedView, currentView);
 
 
 
@@ -2183,17 +2190,27 @@ OverlayManagerImpl::prop()
         if (latestCommittedView == currentView - 1 && force_collect == false)
         {
 
+            if (g_fastProposedViews.count(currentView))
+            {
+                CLOG_INFO(Overlay,
+                        "[FAST PROP SKIP] already proposed in view {}",
+                        currentView);
+                return;
+            }
+            g_fastProposedViews.insert(currentView);
+
+
             CLOG_DEBUG(Overlay, "SEND_CUSTOM_MESSAGE 2");
 
-            if (g_clientListenerActive)
-            {
-                std::lock_guard<std::mutex> lock(g_clientTxnMutex);
-                if (g_clientTxnQueue.empty())
-                {
-                    CLOG_DEBUG(Overlay, "No client txns, waiting...");
-                    return; // listener will trigger prop() when txns arrive
-                }
-            }
+            // if (g_clientListenerActive)
+            // {
+            //     std::lock_guard<std::mutex> lock(g_clientTxnMutex);
+            //     if (g_clientTxnQueue.empty())
+            //     {
+            //         CLOG_DEBUG(Overlay, "No client txns, waiting...");
+            //         return; // listener will trigger prop() when txns arrive
+            //     }
+            // }
 
 
             const size_t BATCH_SIZE = 100;
@@ -2201,35 +2218,35 @@ OverlayManagerImpl::prop()
             
             uint64_t currentTime = VirtualClock::to_time_t(mApp.getClock().system_now());
             
-            // for (size_t i = 0; i < BATCH_SIZE; ++i)
-            // {
-            //     CustomTransaction txn;
-            //     txn.txnId = txn_count + i;
-
-            //     // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
-            //     txn.payload = generateYCSBOp();
-            //     txn.timestamp = currentTime;
-            //     txn.sender = shortID;
-                
-            //     batch.transactions.push_back(txn);
-            // }
-
-            bool usingClientTxns = false;
+            for (size_t i = 0; i < BATCH_SIZE; ++i)
             {
-                std::lock_guard<std::mutex> lock(g_clientTxnMutex);
-                if (g_clientListenerActive && !g_clientTxnQueue.empty())
-                {
-                    size_t count = std::min((size_t)BATCH_SIZE,
-                                            g_clientTxnQueue.size());
-                    for (size_t i = 0; i < count; ++i)
-                    {
-                        batch.transactions.push_back(
-                            g_clientTxnQueue.front().first);
-                        g_clientTxnQueue.pop();
-                    }
-                    usingClientTxns = true;
-                }
+                CustomTransaction txn;
+                txn.txnId = txn_count + i;
+
+                // txn.payload = "data_" + std::to_string(txn_count + i);  // Example payload
+                txn.payload = generateYCSBOp();
+                txn.timestamp = currentTime;
+                txn.sender = shortID;
+                
+                batch.transactions.push_back(txn);
             }
+
+            // bool usingClientTxns = false;
+            // {
+            //     std::lock_guard<std::mutex> lock(g_clientTxnMutex);
+            //     if (g_clientListenerActive && !g_clientTxnQueue.empty())
+            //     {
+            //         size_t count = std::min((size_t)BATCH_SIZE,
+            //                                 g_clientTxnQueue.size());
+            //         for (size_t i = 0; i < count; ++i)
+            //         {
+            //             batch.transactions.push_back(
+            //                 g_clientTxnQueue.front().first);
+            //             g_clientTxnQueue.pop();
+            //         }
+            //         usingClientTxns = true;
+            //     }
+            // }
 
             txn_count += batch.transactions.size();
 
@@ -2255,14 +2272,15 @@ OverlayManagerImpl::prop()
             msg->customMessage().view      = currentView;
             msg->customMessage().blockHash = blockHash;
 
+
+            msg->customMessage().vp = latestCommittedView;
+            msg->customMessage().bp = latestCommittedBlock;
+
             
-            // msg->customMessage().data      = std::to_string(txn_count);
-            // msg->customMessage().data      = batch.serialize();
-            // msg->customMessage().data      = "";
+
             msg->customMessage().data = batch.serialize();
 
 
-            // msg->customMessage().data      = std::string(19000, 'X');
 
             CLOG_INFO(Overlay, "prop(): Leaderp proposing block {} in view {}",
                     hexAbbrev(blockHash), currentView);
@@ -2273,6 +2291,15 @@ OverlayManagerImpl::prop()
 
 
             BlockKey key{currentView, blockHash};
+
+            CLOG_INFO(Overlay,
+                    "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={}",
+                    hexAbbrev(blockHash),
+                    currentView,
+                    msg->customMessage().vp,
+                    hexAbbrev(msg->customMessage().bp),
+                    latestCommittedView,
+                    hexAbbrev(latestCommittedBlock));
 
 
             broadcastMessage(msg);
@@ -2303,28 +2330,32 @@ OverlayManagerImpl::prop()
                 else
                 {
 
-                    if (!st.preparedSent && latestCommittedView <= currentView - 1)
-                    {
-                        CLOG_DEBUG(Overlay,
-                                "[SELF-LOCAL] PROPOSE block {} at view {}",
-                                hexAbbrev(blockHash), currentView);
+                    auto const& cm = (*msg).customMessage();
 
-                        // Local prepared state
+                    bool selfExtendsCommitted =
+                        (latestCommittedView == currentView - 1) &&
+                        (cm.vp == latestCommittedView) &&
+                        (cm.bp == latestCommittedBlock);
+
+                    if (!st.preparedSent && selfExtendsCommitted)
+                    {
+                        CLOG_INFO(Overlay,
+                                "[SELF-LOCAL SEND PREPARE] block={} view={} parentView={} parentBlock={}",
+                                hexAbbrev(blockHash),
+                                currentView,
+                                cm.vp,
+                                hexAbbrev(cm.bp));
+
                         st.preparedSent  = true;
                         st.preparedView  = currentView;
                         st.preparedBlock = blockHash;
 
-                        // Track prepared set
                         g_ps.insert(key);
 
-                        // Self prepare vote ONLY (no network)
                         st.prepareVoters.insert(selfID);
-
-                        auto const& cm = (*msg).customMessage();
 
                         sendPrepare(cm.view, cm.blockHash, cm.data);
 
-                        // Activate deferred CONDREADY votes
                         ViewBlockKey vb{st.preparedView, st.preparedBlock};
                         if (st.pendingCondReady.count(vb))
                         {
@@ -2338,6 +2369,19 @@ OverlayManagerImpl::prop()
                                     st.preparedView,
                                     hexAbbrev(st.preparedBlock));
                         }
+                    }
+                    else
+                    {
+                        CLOG_INFO(Overlay,
+                                "[SELF-LOCAL NO PREPARE] block={} view={} preparedSent={} latestCommittedView={} expectedPrev={} parentView={} parentBlock={} localCommittedBlock={}",
+                                hexAbbrev(blockHash),
+                                currentView,
+                                st.preparedSent,
+                                latestCommittedView,
+                                currentView - 1,
+                                cm.vp,
+                                hexAbbrev(cm.bp),
+                                hexAbbrev(latestCommittedBlock));
                     }
 
                 }
@@ -2934,6 +2978,57 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     NodeID sender = peer->getPeerID();
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
 
+
+    auto deliverBufferedForCurrentView = [this]() {
+        while (true)
+        {
+            auto it = g_futureFastMsgs.find(currentView);
+            if (it == g_futureFastMsgs.end())
+            {
+                return;
+            }
+
+            auto buffered = std::move(it->second);
+            g_futureFastMsgs.erase(it);
+
+            CLOG_INFO(Overlay,
+                    "[FAST DELIVER BUFFERED] view={} count={}",
+                    currentView,
+                    buffered.size());
+
+            for (auto& [msg, p] : buffered)
+            {
+                this->recvCustomMessage(msg, p);
+            }
+        }
+    };
+
+
+    if (cm.view < currentView)
+    {
+        CLOG_INFO(Overlay,
+                "[FAST DROP OLD] type={} view={} currentView={} block={}",
+                static_cast<int>(cm.msgType),
+                cm.view,
+                currentView,
+                hexAbbrev(cm.blockHash));
+        return;
+    }
+
+    if (cm.view > currentView)
+    {
+        CLOG_INFO(Overlay,
+                "[FAST BUFFER FUTURE] type={} view={} currentView={} block={}",
+                static_cast<int>(cm.msgType),
+                cm.view,
+                currentView,
+                hexAbbrev(cm.blockHash));
+
+        g_futureFastMsgs[cm.view].push_back({stellarMsg, peer});
+        return;
+    }
+
+
     BlockKey key{cm.view, cm.blockHash};
     auto& st = g_txn[key];
 
@@ -2944,15 +3039,22 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     {
         // ================================================================
         case CUSTOM_PROPOSE:
-        if (cm.view == currentView)
         {
-            CLOG_INFO(Overlay, "Received PROPOSE block {} at view {}",
-                      hexAbbrev(cm.blockHash), cm.view);
+            CLOG_INFO(Overlay,
+                    "[FAST RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={}",
+                    KeyUtils::toShortString(selfID),
+                    KeyUtils::toShortString(sender),
+                    cm.view,
+                    hexAbbrev(cm.blockHash),
+                    currentView,
+                    latestCommittedView);
 
-            CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
-            
+            bool extendsCommitted =
+                (latestCommittedView == cm.view - 1) &&
+                (cm.vp == latestCommittedView) &&
+                (cm.bp == latestCommittedBlock);
 
-            if (!st.preparedSent && latestCommittedView <= cm.view - 1)
+            if (!st.preparedSent && extendsCommitted)
             {
                 st.preparedSent = true;
                 st.preparedView = cm.view;
@@ -2960,11 +3062,15 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 g_ps.insert(BlockKey{cm.view, cm.blockHash});
 
-                // Self counts as prepare voter
                 st.prepareVoters.insert(selfID);
                 sendPrepare(cm.view, cm.blockHash, cm.data);
 
-                // 🔹 Activate deferred CondReady votes for this (vp,bp)
+                CLOG_INFO(Overlay,
+                        "[FAST SEND PREPARE] view={} block={} prepareVotes={}",
+                        cm.view,
+                        hexAbbrev(cm.blockHash),
+                        st.prepareVoters.size());
+
                 ViewBlockKey vb{st.preparedView, st.preparedBlock};
                 if (st.pendingCondReady.count(vb))
                 {
@@ -2973,230 +3079,203 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.pendingCondReady.erase(vb);
 
                     CLOG_INFO(Overlay,
-                              "Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                              voters.size(),
-                              st.preparedView, hexAbbrev(st.preparedBlock));
+                            "Activated {} deferred CONDREADY votes for (vp={}, bp={})",
+                            voters.size(),
+                            st.preparedView,
+                            hexAbbrev(st.preparedBlock));
                 }
             }
-        }
-        else
-        {
-            CLOG_INFO(Overlay, "Ignoring PROPOSE at view {} (current={})",
-                      cm.view, currentView); // 🔹 ignore old/future proposals
+            else
+            {
+                CLOG_INFO(Overlay,
+                        "[FAST NO PREPARE] view={} block={} preparedSent={} latestCommittedView={} expectedPrev={} proposedParentView={} proposedParentBlock={} localCommittedBlock={}",
+                        cm.view,
+                        hexAbbrev(cm.blockHash),
+                        st.preparedSent,
+                        latestCommittedView,
+                        cm.view - 1,
+                        cm.vp,
+                        hexAbbrev(cm.bp),
+                        hexAbbrev(latestCommittedBlock));
+            }
 
-                    //   while((cm.view != currentView))
-                    //   {
-
-                    //   }
+            break;
         }
-        break;
 
 
         // ================================================================
         case CUSTOM_PREPARE:
+        {
+            bool inserted = st.prepareVoters.insert(sender).second;
 
+            CLOG_INFO(Overlay,
+                    "[FAST RECV PREPARE] self={} sender={} inserted={} view={} block={} prepareVotes={} threshold={}",
+                    KeyUtils::toShortString(selfID),
+                    KeyUtils::toShortString(sender),
+                    inserted,
+                    cm.view,
+                    hexAbbrev(cm.blockHash),
+                    st.prepareVoters.size(),
+                    2 * f + 1);
 
-            if (cm.view == currentView)
+            if (st.prepareVoters.size() >= 2 * f + 1 && g_csentView < currentView)
             {
+                g_csentView = currentView;
 
-                st.prepareVoters.insert(sender);
+                st.commitVoters.insert(selfID);
+                sendCommit(cm.view, cm.blockHash, cm.data);
 
-                CLOG_INFO(Overlay, "Received PREPARE block {} at view {} with st.prepareVoters: {} ",
-                        hexAbbrev(cm.blockHash), cm.view, st.prepareVoters.size());
-                if (st.prepareVoters.size() >= 2*f + 1 && st.commitView < cm.view)
+                st.preparedView  = cm.view;
+                st.preparedBlock = cm.blockHash;
+
+                if (!PBFT_MODE)
                 {
-                    st.commitView = cm.view;
-                    st.prepareVoters.insert(selfID); // self vote
-                    st.commitVoters.insert(selfID);
-                    sendCommit(cm.view, cm.blockHash, cm.data);
-
-                    // Line 32: both modes update <vp, bp>
-                    st.preparedView  = cm.view;
-                    st.preparedBlock = cm.blockHash;
-
-                    // Line 33: only Shabdiz prunes ps
-                    if (!PBFT_MODE) {
-                        for (auto it = g_ps.begin(); it != g_ps.end(); )
-                        {
-                            if (it->view != st.preparedView)
-                                it = g_ps.erase(it);
-                            else
-                                ++it;
-                        }
+                    for (auto it = g_ps.begin(); it != g_ps.end(); )
+                    {
+                        if (it->view != st.preparedView)
+                            it = g_ps.erase(it);
+                        else
+                            ++it;
                     }
-
-
                 }
 
+                CLOG_INFO(Overlay,
+                        "[FAST SEND COMMIT] view={} block={} prepareVotes={} commitVotes={}",
+                        cm.view,
+                        hexAbbrev(cm.blockHash),
+                        st.prepareVoters.size(),
+                        st.commitVoters.size());
             }
-            else if (cm.view < currentView)
-            {
-                CLOG_INFO(Overlay, "Ignoring old PREPARE from view {} (current={})",
-                        cm.view, currentView);
-            }
-            else
-            {
-                CLOG_INFO(Overlay, "Received PREPARE from future view {} (current={})",
-                            cm.view, currentView);
-            }
+
             break;
+        }
 
 
 
         // ================================================================
         case CUSTOM_COMMIT:
+        {
+            bool inserted = st.commitVoters.insert(sender).second;
 
-            CLOG_DEBUG(Overlay, "Received COMMIT block {} at view {}, with my node index: {}",
-                      hexAbbrev(cm.blockHash), cm.view, computeNodeIndex());
+            CLOG_INFO(Overlay,
+                    "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
+                    KeyUtils::toShortString(selfID),
+                    KeyUtils::toShortString(sender),
+                    inserted,
+                    cm.view,
+                    hexAbbrev(cm.blockHash),
+                    st.commitVoters.size(),
+                    f + 1,
+                    2 * f + 1);
 
-
-            // if (mApp.getConfig().MEMORY_PROF && cm.view > 30000 && cm.view %10000 < 3000)
-            // {
-            //     return;
-            // }
-            
-
-            if (cm.view == currentView)
-
+            // Amplification: f+1 COMMITs and I have not sent COMMIT in this view.
+            if (st.commitVoters.size() >= f + 1 && g_csentView < currentView)
             {
+                g_csentView = currentView;
 
-                st.commitVoters.insert(sender);
+                st.commitVoters.insert(selfID);
+                sendCommit(cm.view, cm.blockHash, cm.data);
 
-                if (st.commitVoters.size() >= f + 1 && st.commitView < cm.view)
+                st.preparedView  = cm.view;
+                st.preparedBlock = cm.blockHash;
+
+                if (!PBFT_MODE)
                 {
-                    st.commitView = cm.view;
-                    st.commitVoters.insert(selfID);
-                    sendCommit(cm.view, cm.blockHash, cm.data); // amplify
-
-                    // Line 37: both modes update <vp, bp>
-                    st.preparedView  = cm.view;
-                    st.preparedBlock = cm.blockHash;
-
-                    // Line 38: only Shabdiz prunes ps
-                    if (!PBFT_MODE) {
-                        for (auto it = g_ps.begin(); it != g_ps.end(); )
-                        {
-                            if (it->view != st.preparedView)
-                                it = g_ps.erase(it);
-                            else
-                                ++it;
-                        }
+                    for (auto it = g_ps.begin(); it != g_ps.end(); )
+                    {
+                        if (it->view != st.preparedView)
+                            it = g_ps.erase(it);
+                        else
+                            ++it;
                     }
-
-
                 }
-                if (st.commitVoters.size() >= 2*f + 1 && st.committedView < cm.view)
+
+                CLOG_INFO(Overlay,
+                        "[FAST AMPLIFY COMMIT] view={} block={} commitVotes={}",
+                        cm.view,
+                        hexAbbrev(cm.blockHash),
+                        st.commitVoters.size());
+            }
+
+            // Final commit: 2f+1 COMMITs and not already committed this view.
+            if (st.commitVoters.size() >= 2 * f + 1 && latestCommittedView < currentView)
+            {
+                st.committedView = cm.view;
+                st.committedBlock = cm.blockHash;
+
+                latestCommittedView = cm.view;
+                latestCommittedBlock = cm.blockHash;
+
+                st.preparedView  = cm.view;
+                st.preparedBlock = cm.blockHash;
+
+                if (!PBFT_MODE)
                 {
-                    st.committedView = cm.view;
-                    st.committedBlock = cm.blockHash;
-
-                    latestCommittedView = cm.view;
-                    latestCommittedBlock = cm.blockHash;
-                    
-
-                    currentView = cm.view + 1;
-                    
-                    // Line 42: both modes update <vp, bp> and <vc, bc>
-                    st.preparedView  = cm.view;
-                    st.preparedBlock = cm.blockHash;
-
-                    // Line 43: only Shabdiz prunes ps
-                    if (!PBFT_MODE) {
-                        for (auto it = g_ps.begin(); it != g_ps.end(); )
-                        {
-                            if (it->view != st.preparedView)
-                                it = g_ps.erase(it);
-                            else
-                                ++it;
-                        }
-                    }
-
-
-                    BlockKey nextKey{currentView, Hash()};
-                    g_txn[nextKey].proposalSentForView = false;
-
-                    // CLOG_INFO(Overlay, "Committed block {} at view {}",
-                    //           hexAbbrev(cm.blockHash), cm.view);
-
-
-
-                    // ✅ Deserialize and print all transactions in the batch
-                    
-                    CLOG_DEBUG(Overlay, "========================================");
-                    // CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
-                    //         hexAbbrev(cm.blockHash), cm.view, batch.transactions.size());
-
-
-                    // ✅ Deserialize and apply YCSB operations to KV store
-                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
-                    for (auto const& txn : batch.transactions)
+                    for (auto it = g_ps.begin(); it != g_ps.end(); )
                     {
-                        std::istringstream ss(txn.payload);
-                        std::string op, key, value;
-                        ss >> op >> key;
-                        if (op == "READ") {
-                            auto it = g_kvStore.find(key);
-                            (void)it;
-                        } else if (op == "UPDATE" || op == "RMW") {
-                            ss >> value;
-                            g_kvStore[key] = value;
-                        }
+                        if (it->view != st.preparedView)
+                            it = g_ps.erase(it);
+                        else
+                            ++it;
                     }
+                }
 
-                    CLOG_INFO(Overlay, "Committed block {} at view {} with {} transactions",
-                            hexAbbrev(cm.blockHash), cm.view, 100);
-
-                    CLOG_DEBUG(Overlay, "========================================");
-
-
-                    
-                    // ✅ Print each transaction's details
-                    for (size_t i = 0; i < batch.transactions.size(); ++i)
+                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                for (auto const& txn : batch.transactions)
+                {
+                    std::istringstream ss(txn.payload);
+                    std::string op, key, value;
+                    ss >> op >> key;
+                    if (op == "READ")
                     {
-                        const auto& txn = batch.transactions[i];
-                        CLOG_INFO(Overlay, "  Txn[{}]: ID={}, Payload={}, Timestamp={}, Sender={}",
-                                i, txn.txnId, txn.payload, txn.timestamp, txn.sender);
-                        break;
+                        auto it = g_kvStore.find(key);
+                        (void)it;
                     }
-                    
-                    CLOG_INFO(Overlay, "========================================");
-
-
-                    if (g_clientListenerActive && 
-                        mApp.getConfig().SEND_CUSTOM_MESSAGE) // explicit leader check
+                    else if (op == "UPDATE" || op == "RMW")
                     {
-                        std::lock_guard<std::mutex> lock(g_pendingAckMutex);
-                        if (!g_pendingAcks.empty())
-                        {
-                            auto [batchId, clientFd] = g_pendingAcks.front();
-                            g_pendingAcks.pop();
-                            uint64_t ackNet = htobe64(batchId);
-                            send(clientFd, &ackNet, 8, MSG_NOSIGNAL);
-                        }
+                        ss >> value;
+                        g_kvStore[key] = value;
                     }
+                }
 
+                CLOG_INFO(Overlay,
+                        "[FAST COMMITTED] block={} view={} txns={} nextView={}",
+                        hexAbbrev(cm.blockHash),
+                        cm.view,
+                        batch.transactions.size(),
+                        cm.view + 1);
 
+                if (g_clientListenerActive && mApp.getConfig().SEND_CUSTOM_MESSAGE)
+                {
+                    std::lock_guard<std::mutex> lock(g_pendingAckMutex);
+                    if (!g_pendingAcks.empty())
+                    {
+                        auto [batchId, clientFd] = g_pendingAcks.front();
+                        g_pendingAcks.pop();
+                        uint64_t ackNet = htobe64(batchId);
+                        send(clientFd, &ackNet, 8, MSG_NOSIGNAL);
+                    }
+                }
 
-                    
-                    cleanupOldTxnStates();
+                currentView = cm.view + 1;
 
+                BlockKey nextKey{currentView, Hash()};
+                g_txn[nextKey].proposalSentForView = false;
+
+                cleanupOldTxnStates();
+
+                // Critical: deliver buffered messages for the new view before proposing again.
+                deliverBufferedForCurrentView();
+
+                // Only the leader node actually proposes because prop() checks SEND_CUSTOM_MESSAGE.
+                if (latestCommittedView == currentView - 1)
+                {
                     prop();
-
                 }
+            }
 
-            }
-            else if (cm.view < currentView)
-            {
-                CLOG_INFO(Overlay, "Ignoring old COMMIT from view {} (current={})",
-                        cm.view, currentView);
-            }
-            else
-            {
-                CLOG_INFO(Overlay, "Received COMMIT from future view {} (current={})",
-                            cm.view, currentView);
-            }
-            
             break;
+        }
 
 
         // ================================================================

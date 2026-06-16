@@ -20,6 +20,10 @@ static int    MAX_IN_FLIGHT = 10;
 static int    BATCH_SIZE    = 100;
 static int    TOTAL_BATCHES = 10000;
 
+
+static int DURATION_SEC = 60; // 0 = use total_batches, >0 = run for N seconds
+
+
 // ---- YCSB ----
 static double ZIPFIAN_ALPHA = 0.99;
 static int    ZIPFIAN_N     = 1000000;
@@ -144,9 +148,8 @@ struct Client {
             auto it = inFlight.find(batchId);
             if (it != inFlight.end())
             {
-                int64_t latUs = std::chrono::duration_cast
-                    std::chrono::microseconds>(
-                    now - it->second).count();
+                int64_t latUs = std::chrono::duration_cast<std::chrono::microseconds>(now - it->second).count();
+
                 stats.record(latUs);
                 inFlight.erase(it);
                 committed++;
@@ -170,8 +173,18 @@ struct Client {
             }
         });
 
-        // Send loop
-        while (sent < TOTAL_BATCHES)
+        // Send loop — either total_batches or duration based
+        auto shouldKeepSending = [&]() {
+            if (DURATION_SEC > 0)
+            {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - startTime).count();
+                return elapsed < DURATION_SEC;
+            }
+            return sent < TOTAL_BATCHES;
+        };
+
+        while (shouldKeepSending())
         {
             std::unique_lock<std::mutex> lock(mu);
             cv.wait(lock, [this]() {
@@ -182,8 +195,14 @@ struct Client {
             sendBatch();
 
             if (sent % 200 == 0)
-                printf("sent=%d committed=%d in_flight=%zu\n",
-                       sent, committed, inFlight.size());
+            {
+                auto now = std::chrono::steady_clock::now();
+                static auto last = startTime;
+                double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() / 1000.0;
+                printf("sent=%d committed=%d in_flight=%zu  (last 200 batches took %.2fs)\n",
+                    sent, committed, inFlight.size(), dt);
+                last = now;
+            }
         }
 
         // Wait for all ACKs
@@ -197,10 +216,8 @@ struct Client {
         done = true;
         ackThread.join();
 
-        double elapsed = std::chrono::duration_cast
-            std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - startTime)
-            .count() / 1000.0;
+        double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime).count() / 1000.0;
 
         stats.report(elapsed);
     }
@@ -216,11 +233,19 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+
+
     std::string leaderIp = argv[1];
     int port             = std::stoi(argv[2]);
     MAX_IN_FLIGHT        = std::stoi(argv[3]);
     TOTAL_BATCHES        = std::stoi(argv[4]);
     BATCH_SIZE           = std::stoi(argv[5]);
+
+    if (argc >= 7)
+    {
+        DURATION_SEC = std::stoi(argv[6]);
+
+    }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
@@ -246,3 +271,27 @@ int main(int argc, char* argv[])
     close(fd);
     return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
