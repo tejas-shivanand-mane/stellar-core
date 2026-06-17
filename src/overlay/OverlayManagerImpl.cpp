@@ -1963,7 +1963,7 @@ OverlayManagerImpl::startClientListener(int port)
         CLOG_ERROR(Overlay, "Client listener bind failed on port {}", port);
         return;
     }
-    listen(g_clientListenerFd, 10);
+    listen(g_clientListenerFd, 128);
     g_clientListenerActive = true;
 
     CLOG_INFO(Overlay, "Client listener started on port {}", port);
@@ -2019,24 +2019,9 @@ OverlayManagerImpl::startClientListener(int port)
                     }
 
 
-                    // Safely trigger prop() on main thread if not already scheduled
-                    bool expected = false;
-                    if (g_propPending.compare_exchange_strong(expected, true))
-                    {
-                        mApp.postOnMainThread([this]() {
-                            if (latestCommittedView == currentView - 1 &&
-                                !force_collect)
-                            {
-                                prop();
-                            }
-                            g_propPending.store(false);
-                        }, "client-triggered prop");
-                    }
-
+                    size_t txnCount = batch.transactions.size();
 
                     {
-                        size_t txnCount = batch.transactions.size();
-
                         PendingClientBatch pending;
                         pending.batchId = batchId;
                         pending.clientFd = clientFd;
@@ -2053,8 +2038,25 @@ OverlayManagerImpl::startClientListener(int port)
                     }
 
                     CLOG_DEBUG(Overlay,
-                        "Queued {} txns from client, batchId={}",
-                        batch.transactions.size(), batchId);
+                            "Queued {} txns from client, batchId={}",
+                            txnCount,
+                            batchId);
+
+                    // Safely trigger prop() on main thread if not already scheduled.
+                    // Do this AFTER queueing the batch.
+                    bool expected = false;
+                    if (g_propPending.compare_exchange_strong(expected, true))
+                    {
+                        mApp.postOnMainThread([this]() {
+                            if (latestCommittedView == currentView - 1 &&
+                                !force_collect)
+                            {
+                                prop();
+                            }
+                            g_propPending.store(false);
+                        }, "client-triggered prop");
+                    }
+
                 }
 
                 CLOG_INFO(Overlay, "Client disconnected fd={}", clientFd);
