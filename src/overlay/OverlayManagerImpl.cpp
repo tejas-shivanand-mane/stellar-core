@@ -94,10 +94,10 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 10;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 100;
 
 
-constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
+constexpr int FORCE_COLLECT_AFTER_SEC = 30;
 
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
@@ -650,6 +650,21 @@ struct ViewBlockKey {
     }
 };
 
+
+struct OriginViewBlockKey
+{
+    NodeID origin;
+    uint64_t view;
+    Hash block;
+
+    bool operator==(OriginViewBlockKey const& other) const noexcept
+    {
+        return origin == other.origin &&
+               view == other.view &&
+               block == other.block;
+    }
+};
+
 struct ViewBlockKeyHash {
     size_t operator()(ViewBlockKey const& k) const noexcept {
         size_t h1 = std::hash<uint64_t>()(k.view);
@@ -664,8 +679,11 @@ struct ViewBlockKeyHash {
     }
 };
 
-
-
+struct PendingCondReadyVote
+{
+    NodeID sender;
+    OriginViewBlockKey target;
+};
 
 
 namespace stellar
@@ -726,6 +744,25 @@ struct NodeIDEq {
 };
 
 
+struct OriginViewBlockKeyHash
+{
+    size_t operator()(OriginViewBlockKey const& k) const noexcept
+    {
+        size_t h0 = NodeIDHash{}(k.origin);
+        size_t h1 = std::hash<uint64_t>()(k.view);
+
+        size_t h2 = 0;
+        for (auto b : k.block)
+        {
+            h2 = (h2 * 131) ^ b;
+        }
+
+        return h0 ^ (h1 << 1) ^ (h2 << 2);
+    }
+};
+
+
+
 static std::pair<uint64_t, Hash>
 maxPreparedFromCollection(
     std::unordered_map<NodeID,
@@ -781,21 +818,24 @@ struct TxnState {
 
     // ====== For collection / Bracha-like broadcast ======
 
-    // Which (vp,bp) I already echoed
-    std::unordered_set<ViewBlockKey, ViewBlockKeyHash> eSent;
+    // Which origin/value I already echoed.
+    std::unordered_set<OriginViewBlockKey, OriginViewBlockKeyHash> eSent;
 
-    // Which (vp,bp) I already readied
-    std::unordered_set<ViewBlockKey, ViewBlockKeyHash> rSent;
+    // Which origin/value I already readied or cond-readied.
+    std::unordered_set<OriginViewBlockKey, OriginViewBlockKeyHash> rSent;
 
-    // Echoes received: (vp,bp) -> set of nodes who echoed
-    std::unordered_map<ViewBlockKey,
-                       std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
-                       ViewBlockKeyHash> echoes;
+    // Echoes received for one origin's reported prepared value.
+    std::unordered_map<OriginViewBlockKey,
+                    std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
+                    OriginViewBlockKeyHash> echoes;
 
-    // Readies received: (vp,bp) -> set of nodes who readied
-    std::unordered_map<ViewBlockKey,
-                       std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
-                       ViewBlockKeyHash> readies;
+    // Ready votes received for one origin's reported prepared value.
+    std::unordered_map<OriginViewBlockKey,
+                    std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
+                    OriginViewBlockKeyHash> readies;
+
+    // Delivered origin/value pairs, to avoid recording collection repeatedly.
+    std::unordered_set<OriginViewBlockKey, OriginViewBlockKeyHash> delivered;
 
     // Collection: origin process p′ -> (vp,bp) it reported
     std::unordered_map<NodeID,
@@ -805,10 +845,11 @@ struct TxnState {
 
     // ====== NEW for conditional ready ======
 
-    // Deferred CondReady votes: (vp,bp) -> set of nodes
+    // Deferred CondReady votes:
+    // dependency (vp,bp) -> list of CONDREADY votes waiting for that dependency.
     std::unordered_map<ViewBlockKey,
-                       std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
-                       ViewBlockKeyHash> pendingCondReady;
+                    std::vector<PendingCondReadyVote>,
+                    ViewBlockKeyHash> pendingCondReady;
 };
 
 
@@ -863,6 +904,20 @@ static int shabdiz_start = 0;
 static uint64_t g_csentView = 0; // algorithm variable csent: last view where COMMIT was sent
 static std::unordered_set<uint64_t> g_fastProposedViews;
 // static int forceCollectRound = 0;
+
+
+static uint64_t g_localPreparedView = 0;
+static Hash g_localPreparedBlock = Hash();
+
+static void
+rememberLocalPrepared(uint64_t view, Hash const& block)
+{
+    if (view >= g_localPreparedView)
+    {
+        g_localPreparedView = view;
+        g_localPreparedBlock = block;
+    }
+}
 
 
 void cleanupOldTxnStates()
@@ -2363,19 +2418,7 @@ OverlayManagerImpl::prop()
                           hexAbbrev(cm.bp),
                           st.prepareVoters.size());
 
-                ViewBlockKey vb{st.preparedView, st.preparedBlock};
-                if (st.pendingCondReady.count(vb))
-                {
-                    auto& voters = st.pendingCondReady[vb];
-                    st.readies[vb].insert(voters.begin(), voters.end());
-                    st.pendingCondReady.erase(vb);
 
-                    CLOG_DEBUG(Overlay,
-                               "[SELF-LOCAL] Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                               voters.size(),
-                               st.preparedView,
-                               hexAbbrev(st.preparedBlock));
-                }
             }
             else
             {
@@ -2398,6 +2441,14 @@ OverlayManagerImpl::prop()
     // =====================================================
     // Slow path / forced COLLECT path
     // =====================================================
+    if (lastCollectSentView == currentView)
+    {
+        CLOG_INFO(Overlay,
+                "[SLOW COLLECT SKIP] already sent COLLECT for view {}",
+                currentView);
+        return;
+    }
+
     lastCollectSentView = currentView;
 
     auto msg = std::make_shared<StellarMessage>();
@@ -2410,6 +2461,44 @@ OverlayManagerImpl::prop()
               currentView);
 
     broadcastMessage(msg);
+
+    uint64_t vp = 0;
+    Hash bp = Hash();
+
+    if (g_localPreparedView > 0)
+    {
+        vp = g_localPreparedView;
+        bp = g_localPreparedBlock;
+    }
+    else if (latestCommittedView > 0)
+    {
+        vp = latestCommittedView;
+        bp = latestCommittedBlock;
+    }
+    else
+    {
+        vp = 0;
+        bp = Hash();
+    }
+
+    auto sendMsg = std::make_shared<StellarMessage>();
+    sendMsg->type(CUSTOM_MESSAGE);
+    sendMsg->customMessage().msgType = CUSTOM_SEND;
+    sendMsg->customMessage().view    = currentView;
+    sendMsg->customMessage().vp      = vp;
+    sendMsg->customMessage().bp      = bp;
+    sendMsg->customMessage().origin  = selfID;
+
+    broadcastMessage(sendMsg);
+
+    CLOG_INFO(Overlay,
+            "[SLOW SELF SEND] origin={} view={} vp={} bp={}",
+            shortID,
+            currentView,
+            vp,
+            hexAbbrev(bp));
+
+
 
     if (collectWindowActive)
     {
@@ -3018,26 +3107,211 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     size_t N = getAuthenticatedPeersCount() + 1;
     size_t f = (N - 1) / 3;
 
+
+
+    auto tryLeaderSendSlowProposal = [&](decltype(st)& state) {
+        if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
+        {
+            return;
+        }
+
+        if (state.proposalSentForView)
+        {
+            return;
+        }
+
+        if (state.collection.size() < 2 * f + 1)
+        {
+            return;
+        }
+
+        auto [maxView, maxBlock] = maxPreparedFromCollection(state.collection);
+
+        TransactionBatch batch;
+        bool fromExternalClient = false;
+        uint64_t clientBatchId = 0;
+        int clientFd = -1;
+
+        if (g_clientListenerActive)
+        {
+            if (!tryPopClientBatch(batch, clientBatchId, clientFd))
+            {
+                CLOG_DEBUG(Overlay,
+                        "[SLOW CLIENT] No queued client batch; not proposing slow-path view {} yet",
+                        currentView);
+                return;
+            }
+
+            fromExternalClient = true;
+            releaseAssert(batch.transactions.size() == BLOCK_TXN_COUNT);
+        }
+        else
+        {
+            batch = makeSyntheticYCSBBatch(
+                mApp,
+                KeyUtils::toShortString(selfID),
+                txn_count,
+                BLOCK_TXN_COUNT);
+        }
+
+        if (batch.transactions.empty())
+        {
+            CLOG_WARNING(Overlay,
+                        "[SLOW PROP SKIP] empty batch for view {}",
+                        currentView);
+            return;
+        }
+
+        txn_count += batch.transactions.size();
+
+        Hash newBlock = makeBlock(maxBlock, txn_count);
+        BlockKey newKey{currentView, newBlock};
+
+        if (fromExternalClient)
+        {
+            g_blockClientAcks[newKey].push_back(ClientAck{clientBatchId, clientFd});
+        }
+
+        auto msg = std::make_shared<StellarMessage>();
+        msg->type(CUSTOM_MESSAGE);
+        msg->customMessage().msgType   = CUSTOM_PROPOSE;
+        msg->customMessage().view      = currentView;
+        msg->customMessage().blockHash = newBlock;
+
+        // Important: slow-path proposal extends the highest prepared block
+        // selected from the collection.
+        msg->customMessage().vp = maxView;
+        msg->customMessage().bp = maxBlock;
+
+        msg->customMessage().data = batch.serialize();
+
+        broadcastMessage(msg);
+
+        state.proposalSentForView = true;
+
+        CLOG_INFO(Overlay,
+                "[SLOW SEND PROPOSE] block={} view={} parentView={} parentBlock={} txns={} source={}",
+                hexAbbrev(newBlock),
+                currentView,
+                maxView,
+                hexAbbrev(maxBlock),
+                batch.transactions.size(),
+                fromExternalClient ? "external-client" : "synthetic");
+    };
+
+
+    auto deliverSlowValue =
+    [&](decltype(st)& state, OriginViewBlockKey const& target)
+    {
+        if (!state.delivered.insert(target).second)
+        {
+            return;
+        }
+
+        state.collection[target.origin] = {target.view, target.block};
+
+        CLOG_INFO(Overlay,
+                "[SLOW DELIVER] origin={} target=(vp={}, bp={}) collectionSize={}",
+                KeyUtils::toShortString(target.origin),
+                target.view,
+                hexAbbrev(target.block),
+                state.collection.size());
+
+        tryLeaderSendSlowProposal(state);
+    };
+
+    auto activatePendingCondReadyForDependency =
+    [&](decltype(st)& state, ViewBlockKey const& dependency)
+    {
+        auto it = state.pendingCondReady.find(dependency);
+        if (it == state.pendingCondReady.end())
+        {
+            return;
+        }
+
+        auto pendingVotes = std::move(it->second);
+        state.pendingCondReady.erase(it);
+
+        CLOG_INFO(Overlay,
+                "[CONDREADY ACTIVATE] dependency=(vp={}, bp={}) pendingVotes={}",
+                dependency.view,
+                hexAbbrev(dependency.block),
+                pendingVotes.size());
+
+        for (auto const& vote : pendingVotes)
+        {
+            state.readies[vote.target].insert(vote.sender);
+
+            CLOG_INFO(Overlay,
+                    "[CONDREADY COUNTED] sender={} origin={} target=(vp={}, bp={}) readies={}",
+                    KeyUtils::toShortString(vote.sender),
+                    KeyUtils::toShortString(vote.target.origin),
+                    vote.target.view,
+                    hexAbbrev(vote.target.block),
+                    state.readies[vote.target].size());
+
+            if (state.readies[vote.target].size() >= 2 * f + 1)
+            {
+                deliverSlowValue(state, vote.target);
+            }
+        }
+    };
+
+
     switch (cm.msgType)
     {
         // ================================================================
         case CUSTOM_PROPOSE:
         {
             CLOG_INFO(Overlay,
-                    "[FAST RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={}",
+                    "[RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={} parentView={} parentBlock={}",
                     KeyUtils::toShortString(selfID),
                     KeyUtils::toShortString(sender),
                     cm.view,
                     hexAbbrev(cm.blockHash),
                     currentView,
-                    latestCommittedView);
+                    latestCommittedView,
+                    cm.vp,
+                    hexAbbrev(cm.bp));
 
-            bool extendsCommitted =
+            bool fastExtendsCommitted =
                 (latestCommittedView == cm.view - 1) &&
                 (cm.vp == latestCommittedView) &&
                 (cm.bp == latestCommittedBlock);
 
-            if (!st.preparedSent && extendsCommitted)
+            auto& collectSt = g_txn[BlockKey{cm.view, Hash()}];
+
+            bool slowProposalOk = false;
+            if (collectSt.collection.size() >= 2 * f + 1)
+            {
+                auto [maxView, maxBlock] =
+                    maxPreparedFromCollection(collectSt.collection);
+
+                slowProposalOk =
+                    (cm.vp == maxView) &&
+                    (cm.bp == maxBlock);
+
+                CLOG_INFO(Overlay,
+                        "[SLOW PROPOSE CHECK] collectionSize={} selectedParentView={} selectedParentBlock={} proposedParentView={} proposedParentBlock={} ok={}",
+                        collectSt.collection.size(),
+                        maxView,
+                        hexAbbrev(maxBlock),
+                        cm.vp,
+                        hexAbbrev(cm.bp),
+                        slowProposalOk);
+            }
+            else
+            {
+                CLOG_INFO(Overlay,
+                        "[SLOW PROPOSE CHECK] insufficient collection size={} threshold={}",
+                        collectSt.collection.size(),
+                        2 * f + 1);
+            }
+
+            bool extendsValidParent =
+                fastExtendsCommitted || slowProposalOk;
+
+            if (!st.preparedSent && extendsValidParent)
             {
                 st.preparedSent = true;
                 st.preparedView = cm.view;
@@ -3049,34 +3323,23 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 sendPrepare(cm.view, cm.blockHash, cm.data);
 
                 CLOG_INFO(Overlay,
-                        "[FAST SEND PREPARE] view={} block={} prepareVotes={}",
+                        "[SEND PREPARE] view={} block={} prepareVotes={} reason={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
-                        st.prepareVoters.size());
-
-                ViewBlockKey vb{st.preparedView, st.preparedBlock};
-                if (st.pendingCondReady.count(vb))
-                {
-                    auto& voters = st.pendingCondReady[vb];
-                    st.readies[vb].insert(voters.begin(), voters.end());
-                    st.pendingCondReady.erase(vb);
-
-                    CLOG_INFO(Overlay,
-                            "Activated {} deferred CONDREADY votes for (vp={}, bp={})",
-                            voters.size(),
-                            st.preparedView,
-                            hexAbbrev(st.preparedBlock));
-                }
+                        st.prepareVoters.size(),
+                        fastExtendsCommitted ? "fast-parent" : "slow-collection");
             }
             else
             {
                 CLOG_INFO(Overlay,
-                        "[FAST NO PREPARE] view={} block={} preparedSent={} latestCommittedView={} expectedPrev={} proposedParentView={} proposedParentBlock={} localCommittedBlock={}",
+                        "[NO PREPARE] view={} block={} preparedSent={} fastExtendsCommitted={} slowProposalOk={} collectionSize={} latestCommittedView={} proposedParentView={} proposedParentBlock={} localCommittedBlock={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
                         st.preparedSent,
+                        fastExtendsCommitted,
+                        slowProposalOk,
+                        collectSt.collection.size(),
                         latestCommittedView,
-                        cm.view - 1,
                         cm.vp,
                         hexAbbrev(cm.bp),
                         hexAbbrev(latestCommittedBlock));
@@ -3110,6 +3373,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
+
+                rememberLocalPrepared(cm.view, cm.blockHash);
+
+                ViewBlockKey dependency{cm.view, cm.blockHash};
+                activatePendingCondReadyForDependency(st, dependency);
 
                 if (!PBFT_MODE)
                 {
@@ -3161,6 +3429,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
+                rememberLocalPrepared(cm.view, cm.blockHash);
+
+                ViewBlockKey dependency{cm.view, cm.blockHash};
+                activatePendingCondReadyForDependency(st, dependency);
 
                 if (!PBFT_MODE)
                 {
@@ -3191,6 +3463,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
+                rememberLocalPrepared(cm.view, cm.blockHash);
+
+                ViewBlockKey dependency{cm.view, cm.blockHash};
+                activatePendingCondReadyForDependency(st, dependency);
 
                 if (!PBFT_MODE)
                 {
@@ -3231,6 +3507,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 ackClientBatchesForBlock(cm.view, cm.blockHash);
 
                 currentView = cm.view + 1;
+                lastCollectSentView = UINT64_MAX;
 
                 BlockKey nextKey{currentView, Hash()};
                 g_txn[nextKey].proposalSentForView = false;
@@ -3257,22 +3534,37 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     cm.view, KeyUtils::toShortString(sender));
 
             {
-                uint64_t vp = st.preparedView;
-                Hash bp = st.preparedBlock;
+                uint64_t vp = 0;
+                Hash bp = Hash();
 
+                if (g_localPreparedView > 0)
+                {
+                    vp = g_localPreparedView;
+                    bp = g_localPreparedBlock;
 
-                if (st.preparedView > 0) {
-                    // Best: reply with prepared info
-                    vp = st.preparedView;
-                    bp = st.preparedBlock;
-                } else if (latestCommittedView > 0) {
-                    // Fallback: reply with last committed
+                    CLOG_INFO(Overlay,
+                            "[COLLECT REPLY] using local prepared vp={} bp={}",
+                            vp,
+                            hexAbbrev(bp));
+                }
+                else if (latestCommittedView > 0)
+                {
                     vp = latestCommittedView;
                     bp = latestCommittedBlock;
-                } else {
-                    // Nothing yet, fallback to genesis
+
+                    CLOG_INFO(Overlay,
+                            "[COLLECT REPLY] using latest committed vp={} bp={}",
+                            vp,
+                            hexAbbrev(bp));
+                }
+                else
+                {
                     vp = 0;
-                    bp = Hash();  // all zeros
+                    bp = Hash();
+
+                    CLOG_INFO(Overlay,
+                            "[COLLECT REPLY] using genesis vp=0 bp={}",
+                            hexAbbrev(bp));
                 }
 
 
@@ -3292,235 +3584,233 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_SEND:
-            CLOG_INFO(Overlay, "Received SEND (vp={}, bp={}) for view {} from {} (origin={})",
-                      cm.vp, hexAbbrev(cm.bp), cm.view,
-                      KeyUtils::toShortString(sender),
-                      KeyUtils::toShortString(cm.origin));
-
-            {
-                ViewBlockKey vb{cm.vp, cm.bp};
-                if (!st.eSent.count(vb))
-                {
-                    st.eSent.insert(vb);
-
-
-
-                    auto msg = std::make_shared<StellarMessage>();
-                    msg->type(CUSTOM_MESSAGE);
-                    msg->customMessage().msgType    = CUSTOM_ECHO;
-                    msg->customMessage().view       = cm.view;
-                    msg->customMessage().vp         = cm.vp;
-                    msg->customMessage().bp         = cm.bp;
-                    msg->customMessage().origin     = cm.origin;
-                    broadcastMessage(msg);
-                    st.echoes[vb].insert(selfID);
-
-                    CLOG_INFO(Overlay, "Sending ECHO (vp={}, bp={}) for view {} from {} (origin={})",
-                    cm.vp, hexAbbrev(cm.bp), cm.view,
+        {
+            CLOG_INFO(Overlay,
+                    "Received SEND target=(vp={}, bp={}) view={} from={} origin={}",
+                    cm.vp,
+                    hexAbbrev(cm.bp),
+                    cm.view,
                     KeyUtils::toShortString(sender),
                     KeyUtils::toShortString(cm.origin));
 
-                }
+            OriginViewBlockKey ovb{cm.origin, cm.vp, cm.bp};
+
+            if (!st.eSent.count(ovb))
+            {
+                st.eSent.insert(ovb);
+
+                auto msg = std::make_shared<StellarMessage>();
+                msg->type(CUSTOM_MESSAGE);
+                msg->customMessage().msgType = CUSTOM_ECHO;
+                msg->customMessage().view    = cm.view;
+                msg->customMessage().vp      = cm.vp;
+                msg->customMessage().bp      = cm.bp;
+                msg->customMessage().origin  = cm.origin;
+
+                broadcastMessage(msg);
+
+                st.echoes[ovb].insert(selfID);
+
+                CLOG_INFO(Overlay,
+                        "Sending ECHO origin={} target=(vp={}, bp={})",
+                        KeyUtils::toShortString(cm.origin),
+                        cm.vp,
+                        hexAbbrev(cm.bp));
             }
+
             break;
+        }
 
         // ================================================================
         case CUSTOM_ECHO:
-            CLOG_INFO(Overlay, "Received ECHO (vp={}, bp={}) for view {} from {} (origin={})",
-                      cm.vp, hexAbbrev(cm.bp), cm.view,
-                      KeyUtils::toShortString(sender),
-                      KeyUtils::toShortString(cm.origin));
-
-            {
-                ViewBlockKey vb{cm.vp, cm.bp};
-                st.echoes[vb].insert(sender);
-
-                CLOG_INFO(Overlay, "st.echoes[vb].size():  {} (origin={})",
-                st.echoes[vb].size(),
-                KeyUtils::toShortString(cm.origin));
-
-
-
-                if (st.echoes[vb].size() >= 2*f+1 && !st.rSent.count(vb))
-                {
-
-                    CLOG_INFO(Overlay, "want to send READY MSG");
-
-                    if (g_ps.count(BlockKey{cm.vp, cm.bp}))
-                    {
-                        st.rSent.insert(vb);
-
-                        CLOG_INFO(Overlay, "Sending READY MSG");
-                        // I prepared it → send READY
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType    = CUSTOM_READY;
-                        msg->customMessage().view       = cm.view;
-                        msg->customMessage().vp         = cm.vp;
-                        msg->customMessage().bp         = cm.bp;
-                        msg->customMessage().origin     = cm.origin;
-                        broadcastMessage(msg);
-                        st.readies[vb].insert(selfID);
-
-
-                    }
-                    else if (cm.vp < st.preparedView)
-                    {
-                        st.rSent.insert(vb);
-
-                        CLOG_INFO(Overlay, "Sending CONDREADY MSG");
-                        // I have higher prepared → send CONDREADY
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType    = CUSTOM_CONDREADY;
-                        msg->customMessage().view       = cm.view;
-                        msg->customMessage().vp         = st.preparedView;
-                        msg->customMessage().bp         = st.preparedBlock;
-                        msg->customMessage().origin     = cm.origin;
-                        broadcastMessage(msg);
-
-                        st.readies[vb].insert(selfID);
-                    }
-                }
-            }
-            break;
-
-        // ================================================================
-        case CUSTOM_READY:
-            CLOG_INFO(Overlay, "Received READY (vp={}, bp={}) for view {} from {}",
-                    cm.vp, hexAbbrev(cm.bp), cm.view,
+        {
+            CLOG_INFO(Overlay,
+                    "Received ECHO origin={} target=(vp={}, bp={}) view={} from={}",
+                    KeyUtils::toShortString(cm.origin),
+                    cm.vp,
+                    hexAbbrev(cm.bp),
+                    cm.view,
                     KeyUtils::toShortString(sender));
-            {
-                ViewBlockKey vb{cm.vp, cm.bp};
-                st.readies[vb].insert(sender);
-                
-                // ✅ Record ONCE - use sender, not origin
-                st.collection[sender] = {cm.vp, cm.bp};
-                
-                CLOG_INFO(Overlay, "Added sender={} with (vp={}, bp={}) to collection (size={}, readies={})",
-                        KeyUtils::toShortString(sender),
-                        cm.vp, hexAbbrev(cm.bp), 
-                        st.collection.size(),
-                        st.readies[vb].size());
-                
-                //  Check if threshold reached AND we haven't proposed yet
-                if (st.readies[vb].size() == 2*f+1 &&  // ← Changed >= to ==
-                    selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                    !st.proposalSentForView && mApp.getConfig().SEND_CUSTOM_MESSAGE)  // ← Added this check
-                {
-                    auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
-                    Hash newBlock = makeBlock(maxBlock, txn_count);
 
-                    TransactionBatch batch;
-                    uint64_t currentTime = std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
-                    for (size_t i = 0; i < 100; ++i)
-                    {
-                        CustomTransaction txn;
-                        txn.txnId     = txn_count + i;
-                        txn.payload   = generateYCSBOp();
-                        txn.timestamp = currentTime;
-                        txn.sender    = "leader";
-                        batch.transactions.push_back(txn);
-                    }
-                    txn_count += 100;
+            OriginViewBlockKey ovb{cm.origin, cm.vp, cm.bp};
+            st.echoes[ovb].insert(sender);
+
+            if (st.echoes[ovb].size() >= 2 * f + 1 &&
+                !st.rSent.count(ovb))
+            {
+                if (g_ps.count(BlockKey{cm.vp, cm.bp}))
+                {
+                    st.rSent.insert(ovb);
 
                     auto msg = std::make_shared<StellarMessage>();
                     msg->type(CUSTOM_MESSAGE);
-                    msg->customMessage().msgType   = CUSTOM_PROPOSE;
-                    msg->customMessage().view      = currentView;
-                    msg->customMessage().blockHash = newBlock;
-                    msg->customMessage().data      = batch.serialize();
-
+                    msg->customMessage().msgType = CUSTOM_READY;
+                    msg->customMessage().view    = cm.view;
+                    msg->customMessage().vp      = cm.vp;
+                    msg->customMessage().bp      = cm.bp;
+                    msg->customMessage().origin  = cm.origin;
 
                     broadcastMessage(msg);
-                    
-                    st.proposalSentForView = true;  // Set flag
-                    
-                    // CLOG_INFO(Overlay, "Leader proposing new block {} in view {} (extending vp={})",
-                    //         hexAbbrev(newBlock), currentView, maxView);
 
-                    CLOG_INFO(Overlay, "CUSTOM_READY");
+                    st.readies[ovb].insert(selfID);
 
-                    CLOG_INFO(Overlay, "CUSTOM_READY: Leaderq proposing block {} in view {}",
-                    hexAbbrev(newBlock), currentView);
+                    CLOG_INFO(Overlay,
+                            "Sending READY origin={} target=(vp={}, bp={})",
+                            KeyUtils::toShortString(cm.origin),
+                            cm.vp,
+                            hexAbbrev(cm.bp));
 
+
+                    if (st.readies[ovb].size() >= 2 * f + 1)
+                    {
+                        deliverSlowValue(st, ovb);
+                    }
+                }
+                else if (cm.vp < g_localPreparedView)
+                {
+                    st.rSent.insert(ovb);
+
+                    auto msg = std::make_shared<StellarMessage>();
+                    msg->type(CUSTOM_MESSAGE);
+                    msg->customMessage().msgType = CUSTOM_CONDREADY;
+                    msg->customMessage().view    = cm.view;
+
+                    // Target.
+                    msg->customMessage().vp = cm.vp;
+                    msg->customMessage().bp = cm.bp;
+
+                    // Original SEND origin.
+                    msg->customMessage().origin = cm.origin;
+
+                    // Higher prepared dependency.
+                    msg->customMessage().dependencyVp = g_localPreparedView;
+                    msg->customMessage().dependencyBp = g_localPreparedBlock;
+
+                    broadcastMessage(msg);
+
+                    CLOG_INFO(Overlay,
+                            "Sending CONDREADY origin={} target=(vp={}, bp={}) dependency=(vp={}, bp={})",
+                            KeyUtils::toShortString(cm.origin),
+                            cm.vp,
+                            hexAbbrev(cm.bp),
+                            g_localPreparedView,
+                            hexAbbrev(g_localPreparedBlock));
                 }
             }
+
             break;
+        }
+
+        // ================================================================
+        case CUSTOM_READY:
+        {
+            CLOG_INFO(Overlay,
+                    "Received READY origin={} target=(vp={}, bp={}) view={} from={}",
+                    KeyUtils::toShortString(cm.origin),
+                    cm.vp,
+                    hexAbbrev(cm.bp),
+                    cm.view,
+                    KeyUtils::toShortString(sender));
+
+            OriginViewBlockKey ovb{cm.origin, cm.vp, cm.bp};
+
+            st.readies[ovb].insert(sender);
+
+            // READY amplification: f+1 READYs imply send READY if not already sent.
+            if (st.readies[ovb].size() >= f + 1 &&
+                !st.rSent.count(ovb))
+            {
+                st.rSent.insert(ovb);
+
+                auto msg = std::make_shared<StellarMessage>();
+                msg->type(CUSTOM_MESSAGE);
+                msg->customMessage().msgType = CUSTOM_READY;
+                msg->customMessage().view    = cm.view;
+                msg->customMessage().vp      = cm.vp;
+                msg->customMessage().bp      = cm.bp;
+                msg->customMessage().origin  = cm.origin;
+
+                broadcastMessage(msg);
+
+                st.readies[ovb].insert(selfID);
+
+                CLOG_INFO(Overlay,
+                        "[READY AMPLIFY] origin={} target=(vp={}, bp={}) readies={}",
+                        KeyUtils::toShortString(cm.origin),
+                        cm.vp,
+                        hexAbbrev(cm.bp),
+                        st.readies[ovb].size());
+            }
+
+            // Delivery: 2f+1 READYs deliver this origin's reported prepared value.
+            if (st.readies[ovb].size() >= 2 * f + 1)
+            {
+                deliverSlowValue(st, ovb);
+            }
+
+            break;
+        }
 
         // ================================================================
         case CUSTOM_CONDREADY:
-            CLOG_INFO(Overlay, "Received CONDREADY (vp={}, bp={}) for view {} from {}",
-                    cm.vp, hexAbbrev(cm.bp), cm.view,
+        {
+            CLOG_INFO(Overlay,
+                    "Received CONDREADY origin={} target=(vp={}, bp={}) dependency=(vp={}, bp={}) view={} from={}",
+                    KeyUtils::toShortString(cm.origin),
+                    cm.vp,
+                    hexAbbrev(cm.bp),
+                    cm.dependencyVp,
+                    hexAbbrev(cm.dependencyBp),
+                    cm.view,
                     KeyUtils::toShortString(sender));
+
+            OriginViewBlockKey target{cm.origin, cm.vp, cm.bp};
+            ViewBlockKey dependency{cm.dependencyVp, cm.dependencyBp};
+
+            bool dependencyKnown =
+                g_ps.count(BlockKey{cm.dependencyVp, cm.dependencyBp}) ||
+                (g_localPreparedView >= cm.dependencyVp &&
+                g_localPreparedBlock == cm.dependencyBp) ||
+                (latestCommittedView >= cm.dependencyVp &&
+                latestCommittedBlock == cm.dependencyBp);
+
+            if (dependencyKnown)
             {
-                ViewBlockKey vb{cm.vp, cm.bp};
-                
-                // Record vote
-                st.collection[sender] = {cm.vp, cm.bp};
-                CLOG_INFO(Overlay, "Added CONDREADY sender={} (vp={}, bp={}) to collection (size={})",
-                        KeyUtils::toShortString(sender),
-                        cm.vp, hexAbbrev(cm.bp), st.collection.size());
-                
-                if (g_ps.count(BlockKey{cm.vp, cm.bp}))
+                st.readies[target].insert(sender);
+
+                CLOG_INFO(Overlay,
+                        "CONDREADY counted origin={} target=(vp={}, bp={}) dependency=(vp={}, bp={}) readies={}",
+                        KeyUtils::toShortString(cm.origin),
+                        cm.vp,
+                        hexAbbrev(cm.bp),
+                        cm.dependencyVp,
+                        hexAbbrev(cm.dependencyBp),
+                        st.readies[target].size());
+
+                if (st.readies[target].size() >= 2 * f + 1)
                 {
-                    st.readies[vb].insert(sender);
-                    CLOG_INFO(Overlay, "CONDREADY immediately counted for (vp={}, bp={}), readies={}",
-                            cm.vp, hexAbbrev(cm.bp), st.readies[vb].size());
-                    
-                    // ✅ Check threshold with flag
-                    if (st.readies[vb].size() == 2*f+1 &&  // ← Changed >= to ==
-                        selfID == mApp.getConfig().NODE_SEED.getPublicKey() &&
-                        !st.proposalSentForView)  // ← Added this check
-                    {
-                        auto [maxView, maxBlock] = maxPreparedFromCollection(st.collection);
-                        Hash newBlock = makeBlock(maxBlock, txn_count);
-
-                        TransactionBatch batch;
-                        uint64_t currentTime = std::chrono::duration_cast<std::chrono::seconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                        for (size_t i = 0; i < 100; ++i)
-                        {
-                            CustomTransaction txn;
-                            txn.txnId     = txn_count + i;
-                            txn.payload   = generateYCSBOp();
-                            txn.timestamp = currentTime;
-                            txn.sender    = "leader";
-                            batch.transactions.push_back(txn);
-                        }
-                        txn_count += 100;
-
-                        auto msg = std::make_shared<StellarMessage>();
-                        msg->type(CUSTOM_MESSAGE);
-                        msg->customMessage().msgType   = CUSTOM_PROPOSE;
-                        msg->customMessage().view      = currentView;
-                        msg->customMessage().blockHash = newBlock;
-                        msg->customMessage().data      = batch.serialize();
-
-
-
-
-                        broadcastMessage(msg);
-                        
-                        st.proposalSentForView = true;  // ✅ Set flag
-
-                        CLOG_INFO(Overlay, "CUSTOM_COND_READY");
-                        CLOG_INFO(Overlay, "CUSTOM_CONDREADY: Leaderr proposing block {} in view {}",
-                        hexAbbrev(newBlock), currentView);
-
-
-
-                    }
-                }
-                else
-                {
-                    st.pendingCondReady[vb].insert(sender);
-                    CLOG_INFO(Overlay, "CONDREADY deferred for (vp={}, bp={})",
-                            cm.vp, hexAbbrev(cm.bp));
+                    deliverSlowValue(st, target);
                 }
             }
+            else
+            {
+                PendingCondReadyVote pending;
+                pending.sender = sender;
+                pending.target = target;
+
+                st.pendingCondReady[dependency].push_back(std::move(pending));
+
+                CLOG_INFO(Overlay,
+                        "CONDREADY deferred origin={} target=(vp={}, bp={}) waiting for dependency=(vp={}, bp={})",
+                        KeyUtils::toShortString(cm.origin),
+                        cm.vp,
+                        hexAbbrev(cm.bp),
+                        cm.dependencyVp,
+                        hexAbbrev(cm.dependencyBp));
+            }
+
             break;
+        }
 
         // ================================================================
         case CUSTOM_ITHS_PROPOSE:

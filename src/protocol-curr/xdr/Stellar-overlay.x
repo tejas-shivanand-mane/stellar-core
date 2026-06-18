@@ -80,7 +80,11 @@ struct CustomMessage
     uint64 vp;    // used in SEND/ECHO/READY for vp
     Hash bp; // used in SEND/ECHO/READY for bp
     NodeID origin;     // process p′ that originally sent SEND
-
+    
+    // Only meaningful for CONDREADY.
+    // This is the higher prepared value that justifies the conditional READY.
+    uint64 dependencyVp;
+    Hash dependencyBp;
 };
 
 
