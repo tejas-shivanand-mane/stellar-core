@@ -61,7 +61,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = false;
+static bool ITHS_MODE = true;
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
