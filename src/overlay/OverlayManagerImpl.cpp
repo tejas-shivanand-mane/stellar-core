@@ -2283,7 +2283,7 @@ OverlayManagerImpl::prop()
         // Avoid duplicate proposals for the same view.
         if (g_fastProposedViews.count(currentView))
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[FAST PROP SKIP] already proposed in view {}",
                     currentView);
             return;
@@ -2310,7 +2310,7 @@ std::vector<ClientAck> clientAcks;
             releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
             releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[CLIENT SERVER-BATCH] built block txns={} requests={} view={}",
                     batch.transactions.size(),
                     clientAcks.size(),
@@ -2324,7 +2324,7 @@ std::vector<ClientAck> clientAcks;
                 txn_count,
                 SERVER_BATCH_SIZE);
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[INTERNAL] Using synthetic block batch, txns={}, view={}",
                     batch.transactions.size(),
                     currentView);
@@ -3076,7 +3076,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             auto buffered = std::move(it->second);
             g_futureFastMsgs.erase(it);
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[FAST DELIVER BUFFERED] view={} count={}",
                     currentView,
                     buffered.size());
@@ -3091,7 +3091,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
     if (cm.view < currentView)
     {
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
                 "[FAST DROP OLD] type={} view={} currentView={} block={}",
                 static_cast<int>(cm.msgType),
                 cm.view,
@@ -3102,7 +3102,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
     if (cm.view > currentView)
     {
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
                 "[FAST BUFFER FUTURE] type={} view={} currentView={} block={}",
                 static_cast<int>(cm.msgType),
                 cm.view,
@@ -3280,7 +3280,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_PROPOSE:
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={} parentView={} parentBlock={}",
                     KeyUtils::toShortString(selfID),
                     KeyUtils::toShortString(sender),
