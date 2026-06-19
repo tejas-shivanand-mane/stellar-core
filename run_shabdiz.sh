@@ -20,9 +20,6 @@ NUM_SERVERS=${NUM_SERVERS:-4}
 
 echo "=== Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
-rm -rf /rhome/tmane002/work/shabdiz-logs
-mkdir -p /rhome/tmane002/work/shabdiz-logs
-
 
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
 
