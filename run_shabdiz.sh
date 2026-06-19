@@ -10,7 +10,11 @@
 
 module load slurm/24.11.1
 module load gcc/12.2.0
-source activate /rhome/tmane002/stellar
+
+# --- Activate conda properly in batch jobs ---
+source /etc/profile.d/conda.sh 2>/dev/null || source $HOME/.bashrc
+conda activate /rhome/tmane002/stellar
+
 export RUSTUP_HOME=$HOME/local/rustup
 export CARGO_HOME=$HOME/local/cargo
 source $HOME/local/cargo/env
@@ -29,14 +33,24 @@ TOTAL_NODES=$(( NUM_SERVERS + 1 ))  # +1 for dedicated client node
 if [ "${PHASE}" != "run" ]; then
     echo "=== PHASE 1: Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
 
-    # Ensure logs directory exists
     mkdir -p /rhome/tmane002/work/shabdiz-logs
 
     cd $STELLAR_DIR
-    make -j32 CC=gcc CXX=g++ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
+
+    # --- Remove only the stale object file causing linker error ---
+
+    make -j16
+    if [ $? -ne 0 ]; then
+        echo "ERROR: stellar-core compile failed, aborting."
+        exit 1
+    fi
     echo "stellar-core compile done."
 
     g++ -O2 -std=c++17 -pthread -Isrc src/overlay/shab_client.cpp -o shab_client
+    if [ $? -ne 0 ]; then
+        echo "ERROR: shab_client compile failed, aborting."
+        exit 1
+    fi
     echo "shab_client compile done."
 
     echo "=== Submitting experiment phase with $TOTAL_NODES nodes ($NUM_SERVERS servers + 1 client) ==="
@@ -51,9 +65,6 @@ fi
 # ---------------------------------------------------------------
 echo "=== PHASE 2: Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
-# --- Wipe and recreate stellar-private for a clean run ---
-rm -rf $BASE_DIR && mkdir -p $BASE_DIR
-
 # --- Get all allocated hostnames ---
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
 
@@ -64,10 +75,20 @@ CLIENT_HOST="${HOSTNAMES[$NUM_SERVERS]}"
 echo "Server nodes: ${SERVER_HOSTS[@]}"
 echo "Client node:  $CLIENT_HOST"
 
-# --- Generate tsm_ips.txt from server nodes only (IPv4 only) ---
+# --- Generate tsm_ips.txt from server nodes only (IPv4 only, with fallback) ---
+> $STELLAR_DIR/tsm_ips.txt
 for h in "${SERVER_HOSTS[@]}"; do
-    getent hosts $h | awk '{print $1}' | grep -v '^fe80'
-done > $STELLAR_DIR/tsm_ips.txt
+    # Try getent first, then nslookup as fallback
+    IP=$(getent hosts $h | awk '{print $1}' | grep -v '^fe80' | head -1)
+    if [ -z "$IP" ]; then
+        IP=$(nslookup $h 2>/dev/null | awk '/^Address:/ && !/:#/ {print $2}' | grep -v '^fe80' | head -1)
+    fi
+    if [ -z "$IP" ]; then
+        echo "ERROR: Could not resolve IP for host $h"
+        exit 1
+    fi
+    echo "$IP" >> $STELLAR_DIR/tsm_ips.txt
+done
 
 echo "Server IPs:"
 cat $STELLAR_DIR/tsm_ips.txt
@@ -78,6 +99,9 @@ if [ "$ACTUAL" -ne "$NUM_SERVERS" ]; then
     echo "ERROR: Expected $NUM_SERVERS IPs but got $ACTUAL. Check getent output."
     exit 1
 fi
+
+# --- Wipe and recreate stellar-private for a clean run ---
+rm -rf $BASE_DIR && mkdir -p $BASE_DIR
 
 # --- Setup configs and init DBs ---
 cp $STELLAR_DIR/gcp_setup_stellar_private.sh $BASE_DIR/
