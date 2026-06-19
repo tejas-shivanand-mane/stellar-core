@@ -7,11 +7,11 @@
 #SBATCH --constraint=milan
 #SBATCH --output=/rhome/tmane002/work/shabdiz-logs/shabdiz-%j.log
 
-# --- Initialize module system and load required modules ---
 source /etc/profile.d/modules.sh 2>/dev/null || source /usr/share/Modules/init/bash 2>/dev/null
 module load slurm/24.11.1
 module load gcc/12.2.0
 
+SRUN=/opt/linux/rocky/8.x/x86_64/pkgs/slurm/24.11.1/bin/srun
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
 STELLAR_DIR=/rhome/tmane002/work/stellar-core
 BASE_DIR=/rhome/tmane002/work/stellar-private
@@ -19,6 +19,10 @@ BASE_DIR=/rhome/tmane002/work/stellar-private
 NUM_SERVERS=${NUM_SERVERS:-4}
 
 echo "=== Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
+
+rm -rf /rhome/tmane002/work/shabdiz-logs
+mkdir -p /rhome/tmane002/work/shabdiz-logs
+
 
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
 
@@ -71,7 +75,7 @@ for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
     HOST="${SERVER_HOSTS[$i]}"
     CFG="$BASE_DIR/$NODE/stellar-core.cfg"
     echo "Starting $NODE on $HOST..."
-    srun --nodes=1 --ntasks=1 --nodelist=$HOST \
+    $SRUN --nodes=1 --ntasks=1 --nodelist=$HOST \
         $STELLAR_CORE run --conf $CFG &
 done
 
@@ -81,7 +85,7 @@ sleep 15
 # --- Run shab_client on dedicated client node targeting node1 ---
 NODE1_IP=$(sed -n '1p' $STELLAR_DIR/tsm_ips.txt)
 echo "Running shab_client on $CLIENT_HOST targeting node1 at $NODE1_IP..."
-srun --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
+$SRUN --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
     $STELLAR_DIR/shab_client $NODE1_IP 12000 400 4800000 100 0
 
 # --- Cleanup ---
