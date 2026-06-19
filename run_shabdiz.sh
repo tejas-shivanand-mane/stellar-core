@@ -39,7 +39,8 @@ if [ "${PHASE}" != "run" ]; then
 
     cd $STELLAR_DIR
 
-    make -j32
+    make -j32 CC=/usr/bin/gcc CXX=/usr/bin/g++
+
     if [ $? -ne 0 ]; then
         echo "ERROR: stellar-core compile failed, aborting."
         exit 1
