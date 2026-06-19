@@ -5,7 +5,7 @@ set -e
 # BASE_DIR=/home/tejas/stellar-private
 
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
-BASE_DIR=/rhome/tmane002/stellar-private
+BASE_DIR=/rhome/tmane002/work/stellar-private
 
 
 # Read IPs into an array (defines the number of nodes)

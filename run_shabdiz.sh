@@ -6,11 +6,11 @@
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --partition=short
-#SBATCH --output=shabdiz-%j.log
+#SBATCH --output=/rhome/tmane002/work/shabdiz-logs/shabdiz-%j.log
 
 module load slurm/24.11.1
 module load gcc/12.2.0
-conda activate /rhome/tmane002/stellar
+source activate /rhome/tmane002/stellar
 export RUSTUP_HOME=$HOME/local/rustup
 export CARGO_HOME=$HOME/local/cargo
 source $HOME/local/cargo/env
@@ -28,6 +28,10 @@ TOTAL_NODES=$(( NUM_SERVERS + 1 ))  # +1 for dedicated client node
 # ---------------------------------------------------------------
 if [ "${PHASE}" != "run" ]; then
     echo "=== PHASE 1: Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
+
+    # Ensure logs directory exists
+    mkdir -p /rhome/tmane002/work/shabdiz-logs
+
     cd $STELLAR_DIR
     make -j32 CC=gcc CXX=g++ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
     echo "stellar-core compile done."
@@ -35,7 +39,6 @@ if [ "${PHASE}" != "run" ]; then
     g++ -O2 -std=c++17 -pthread -Isrc src/overlay/shab_client.cpp -o shab_client
     echo "shab_client compile done."
 
-    # Resubmit self with NUM_SERVERS+1 nodes for the experiment phase
     echo "=== Submitting experiment phase with $TOTAL_NODES nodes ($NUM_SERVERS servers + 1 client) ==="
     sbatch --nodes=$TOTAL_NODES --ntasks=$TOTAL_NODES --cpus-per-task=8 --mem=16G \
            --export=PHASE=run,NUM_SERVERS=$NUM_SERVERS \
@@ -48,6 +51,9 @@ fi
 # ---------------------------------------------------------------
 echo "=== PHASE 2: Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
+# --- Wipe and recreate stellar-private for a clean run ---
+rm -rf $BASE_DIR && mkdir -p $BASE_DIR
+
 # --- Get all allocated hostnames ---
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
 
@@ -58,16 +64,22 @@ CLIENT_HOST="${HOSTNAMES[$NUM_SERVERS]}"
 echo "Server nodes: ${SERVER_HOSTS[@]}"
 echo "Client node:  $CLIENT_HOST"
 
-# --- Generate tsm_ips.txt from server nodes only ---
+# --- Generate tsm_ips.txt from server nodes only (IPv4 only) ---
 for h in "${SERVER_HOSTS[@]}"; do
-    getent hosts $h | awk '{print $1}'
+    getent hosts $h | awk '{print $1}' | grep -v '^fe80'
 done > $STELLAR_DIR/tsm_ips.txt
 
 echo "Server IPs:"
 cat $STELLAR_DIR/tsm_ips.txt
 
+# --- Verify we got exactly NUM_SERVERS IPs ---
+ACTUAL=$(wc -l < $STELLAR_DIR/tsm_ips.txt)
+if [ "$ACTUAL" -ne "$NUM_SERVERS" ]; then
+    echo "ERROR: Expected $NUM_SERVERS IPs but got $ACTUAL. Check getent output."
+    exit 1
+fi
+
 # --- Setup configs and init DBs ---
-rm -rf $BASE_DIR && mkdir -p $BASE_DIR
 cp $STELLAR_DIR/gcp_setup_stellar_private.sh $BASE_DIR/
 cd $BASE_DIR
 chmod +x gcp_setup_stellar_private.sh
@@ -99,5 +111,5 @@ srun --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
 
 # --- Cleanup ---
 echo "Experiment done, shutting down stellar-core nodes..."
-kill $(jobs -p)
+kill $(jobs -p) 2>/dev/null
 wait
