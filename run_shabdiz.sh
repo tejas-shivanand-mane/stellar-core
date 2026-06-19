@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=shabdiz
 #SBATCH --cpus-per-task=2
-#SBATCH --mem=8G
+#SBATCH --mem-per-cpu=4G
 #SBATCH --time=02:00:00
 #SBATCH --partition=short
 #SBATCH --constraint=milan
@@ -25,15 +25,18 @@ find /rhome/tmane002/work/shabdiz-logs -name "shabdiz-*.log" ! -name "shabdiz-${
 
 echo "=== Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
+# --- Get all allocated hostnames ---
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
+echo "Allocated nodes: ${HOSTNAMES[@]}"
 
+# --- Last node is client, rest are servers ---
 SERVER_HOSTS=("${HOSTNAMES[@]:0:$NUM_SERVERS}")
 CLIENT_HOST="${HOSTNAMES[$NUM_SERVERS]}"
 
 echo "Server nodes: ${SERVER_HOSTS[@]}"
 echo "Client node:  $CLIENT_HOST"
 
-# --- Generate tsm_ips.txt from server nodes only (IPv4 only) ---
+# --- Generate tsm_ips.txt (one IP per server, duplicates OK) ---
 > $STELLAR_DIR/tsm_ips.txt
 for h in "${SERVER_HOSTS[@]}"; do
     IP=$(getent ahosts $h 2>/dev/null | awk '/STREAM/ {print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
@@ -70,24 +73,27 @@ chmod +x gcp_setup_stellar_private.sh
 sed -i '1s/^/SEND_CUSTOM_MESSAGE=true\n/' $BASE_DIR/node1/stellar-core.cfg
 sed -i '1s/^/MEMORY_PROF=true\n/' $BASE_DIR/node2/stellar-core.cfg
 
-# --- Launch stellar-core on each server node via srun ---
+# --- Launch stellar-core instances ---
+# Each srun picks up the next available task slot on allocated nodes
 for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
     NODE="node$(( i + 1 ))"
-    HOST="${SERVER_HOSTS[$i]}"
     CFG="$BASE_DIR/$NODE/stellar-core.cfg"
-    echo "Starting $NODE on $HOST..."
-    $SRUN --nodes=1 --ntasks=1 --nodelist=$HOST \
+    echo "Starting $NODE..."
+    $SRUN --nodes=1 --ntasks=1 --cpus-per-task=2 \
         --export=ALL,LD_LIBRARY_PATH=$GCC_LIBS \
         $STELLAR_CORE run --conf $CFG &
 done
 
-# --- Wait for nodes to initialize ---
-sleep 60
+# --- Dynamic wait based on number of servers ---
+WAIT_TIME=$(( 15 + NUM_SERVERS * 2 ))
+echo "Waiting ${WAIT_TIME}s for nodes to initialize..."
+sleep $WAIT_TIME
 
-# --- Run shab_client on dedicated client node targeting node1 ---
+# --- Run shab_client on dedicated client node ---
 NODE1_IP=$(sed -n '1p' $STELLAR_DIR/tsm_ips.txt)
 echo "Running shab_client on $CLIENT_HOST targeting node1 at $NODE1_IP..."
-$SRUN --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
+$SRUN --nodes=1 --ntasks=1 --cpus-per-task=2 \
+    --nodelist=$CLIENT_HOST \
     --export=ALL,LD_LIBRARY_PATH=$GCC_LIBS \
     $STELLAR_DIR/shab_client $NODE1_IP 12000 400 4800000 100 0
 
