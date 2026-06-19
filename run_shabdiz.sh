@@ -7,7 +7,10 @@
 #SBATCH --constraint=milan
 #SBATCH --output=/rhome/tmane002/work/shabdiz-logs/shabdiz-%j.log
 
+# --- Initialize module system and load required modules ---
+source /etc/profile.d/modules.sh 2>/dev/null || source /usr/share/Modules/init/bash 2>/dev/null
 module load slurm/24.11.1
+module load gcc/12.2.0
 
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
 STELLAR_DIR=/rhome/tmane002/work/stellar-core
@@ -25,6 +28,7 @@ CLIENT_HOST="${HOSTNAMES[$NUM_SERVERS]}"
 echo "Server nodes: ${SERVER_HOSTS[@]}"
 echo "Client node:  $CLIENT_HOST"
 
+# --- Generate tsm_ips.txt from server nodes only (IPv4 only) ---
 > $STELLAR_DIR/tsm_ips.txt
 for h in "${SERVER_HOSTS[@]}"; do
     IP=$(getent ahosts $h 2>/dev/null | awk '/STREAM/ {print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
@@ -47,17 +51,21 @@ if [ "$ACTUAL" -ne "$NUM_SERVERS" ]; then
     exit 1
 fi
 
+# --- Wipe and recreate stellar-private for a clean run ---
 rm -rf $BASE_DIR && mkdir -p $BASE_DIR
 
+# --- Setup configs and init DBs ---
 cp $STELLAR_DIR/gcp_setup_stellar_private.sh $BASE_DIR/
 cd $BASE_DIR
 chmod +x gcp_setup_stellar_private.sh
 ./gcp_setup_stellar_private.sh start
 ./gcp_setup_stellar_private.sh
 
+# --- Patch node1 and node2 configs ---
 sed -i '1s/^/SEND_CUSTOM_MESSAGE=true\n/' $BASE_DIR/node1/stellar-core.cfg
 sed -i '1s/^/MEMORY_PROF=true\n/' $BASE_DIR/node2/stellar-core.cfg
 
+# --- Launch stellar-core on each server node via srun ---
 for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
     NODE="node$(( i + 1 ))"
     HOST="${SERVER_HOSTS[$i]}"
@@ -67,13 +75,16 @@ for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
         $STELLAR_CORE run --conf $CFG &
 done
 
+# --- Wait for nodes to initialize ---
 sleep 15
 
+# --- Run shab_client on dedicated client node targeting node1 ---
 NODE1_IP=$(sed -n '1p' $STELLAR_DIR/tsm_ips.txt)
 echo "Running shab_client on $CLIENT_HOST targeting node1 at $NODE1_IP..."
 srun --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
     $STELLAR_DIR/shab_client $NODE1_IP 12000 400 4800000 100 0
 
+# --- Cleanup ---
 echo "Experiment done, shutting down stellar-core nodes..."
 kill $(jobs -p) 2>/dev/null
 wait
