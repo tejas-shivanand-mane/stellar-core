@@ -6,19 +6,20 @@
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --partition=short
+#SBATCH --constraint=milan
 #SBATCH --output=/rhome/tmane002/work/shabdiz-logs/shabdiz-%j.log
 
 module load slurm/24.11.1
 module load gcc/12.2.0
 module load cmake/3.31.2
 
-# --- Activate conda properly in batch jobs ---
-source /etc/profile.d/conda.sh 2>/dev/null || source $HOME/.bashrc
-conda activate /rhome/tmane002/stellar
-
 export RUSTUP_HOME=$HOME/local/rustup
 export CARGO_HOME=$HOME/local/cargo
 source $HOME/local/cargo/env
+
+# --- Activate conda AFTER module loads to avoid gcc conflict ---
+source /etc/profile.d/conda.sh 2>/dev/null || source $HOME/.bashrc
+conda activate /rhome/tmane002/stellar
 
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
 STELLAR_DIR=/rhome/tmane002/work/stellar-core
@@ -38,7 +39,6 @@ if [ "${PHASE}" != "run" ]; then
 
     cd $STELLAR_DIR
 
-
     make -j32
     if [ $? -ne 0 ]; then
         echo "ERROR: stellar-core compile failed, aborting."
@@ -57,7 +57,8 @@ if [ "${PHASE}" != "run" ]; then
     echo "shab_client compile done."
 
     echo "=== Submitting experiment phase with $TOTAL_NODES nodes ($NUM_SERVERS servers + 1 client) ==="
-    sbatch --nodes=$TOTAL_NODES --ntasks=$TOTAL_NODES --cpus-per-task=8 --mem=16G \
+    sbatch --nodes=$TOTAL_NODES --ntasks=$TOTAL_NODES --cpus-per-task=2 --mem=8G \
+           --constraint=milan \
            --export=PHASE=run,NUM_SERVERS=$NUM_SERVERS \
            $STELLAR_DIR/run_shabdiz.sh
     exit 0
@@ -81,7 +82,6 @@ echo "Client node:  $CLIENT_HOST"
 # --- Generate tsm_ips.txt from server nodes only (IPv4 only, with fallback) ---
 > $STELLAR_DIR/tsm_ips.txt
 for h in "${SERVER_HOSTS[@]}"; do
-    # Try getent first, then nslookup as fallback
     IP=$(getent hosts $h | awk '{print $1}' | grep -v '^fe80' | head -1)
     if [ -z "$IP" ]; then
         IP=$(nslookup $h 2>/dev/null | awk '/^Address:/ && !/:#/ {print $2}' | grep -v '^fe80' | head -1)
