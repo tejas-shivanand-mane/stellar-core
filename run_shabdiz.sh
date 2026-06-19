@@ -10,6 +10,7 @@
 
 module load slurm/24.11.1
 module load gcc/12.2.0
+module load cmake/3.31.2
 
 # --- Activate conda properly in batch jobs ---
 source /etc/profile.d/conda.sh 2>/dev/null || source $HOME/.bashrc
@@ -37,16 +38,18 @@ if [ "${PHASE}" != "run" ]; then
 
     cd $STELLAR_DIR
 
-    # --- Remove only the stale object file causing linker error ---
 
-    make -j16
+    make -j32
     if [ $? -ne 0 ]; then
         echo "ERROR: stellar-core compile failed, aborting."
         exit 1
     fi
     echo "stellar-core compile done."
 
-    g++ -O2 -std=c++17 -pthread -Isrc src/overlay/shab_client.cpp -o shab_client
+    g++ -O2 -std=c++17 -pthread \
+        -I$STELLAR_DIR/src \
+        $STELLAR_DIR/shab_client.cpp \
+        -o $STELLAR_DIR/shab_client
     if [ $? -ne 0 ]; then
         echo "ERROR: shab_client compile failed, aborting."
         exit 1
