@@ -82,7 +82,7 @@ for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
 done
 
 # --- Wait for nodes to initialize ---
-sleep 15
+sleep 60
 
 # --- Run shab_client on dedicated client node targeting node1 ---
 NODE1_IP=$(sed -n '1p' $STELLAR_DIR/tsm_ips.txt)
