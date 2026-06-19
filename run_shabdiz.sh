@@ -31,12 +31,11 @@ TOTAL_NODES=$(( NUM_SERVERS + 1 ))  # +1 for dedicated client node
 # PHASE 1: Compile (single node, runs first)
 # ---------------------------------------------------------------
 if [ "${PHASE}" != "run" ]; then
-    echo "=== PHASE 1: Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
+    echo "=== PHASE 1: Checking/Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
 
     mkdir -p /rhome/tmane002/work/shabdiz-logs
 
     cd $STELLAR_DIR
-
 
     make -j32 CC=/usr/bin/gcc CXX=/usr/bin/g++
     if [ $? -ne 0 ]; then
@@ -66,6 +65,11 @@ fi
 # ---------------------------------------------------------------
 # PHASE 2: Experiment (NUM_SERVERS+1 nodes, runs after compile)
 # ---------------------------------------------------------------
+
+# --- Reload modules in Phase 2 job ---
+module load slurm/24.11.1
+module load gcc/12.2.0
+
 echo "=== PHASE 2: Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
 # --- Get all allocated hostnames ---
@@ -78,15 +82,16 @@ CLIENT_HOST="${HOSTNAMES[$NUM_SERVERS]}"
 echo "Server nodes: ${SERVER_HOSTS[@]}"
 echo "Client node:  $CLIENT_HOST"
 
-# --- Generate tsm_ips.txt from server nodes only (IPv4 only, with fallback) ---
+# --- Generate tsm_ips.txt from server nodes only (IPv4 only) ---
+# Use only getent and strictly filter to dotted IPv4 addresses
 > $STELLAR_DIR/tsm_ips.txt
 for h in "${SERVER_HOSTS[@]}"; do
-    IP=$(getent hosts $h | awk '{print $1}' | grep -v '^fe80' | head -1)
+    IP=$(getent ahosts $h 2>/dev/null | awk '/STREAM/ {print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
     if [ -z "$IP" ]; then
-        IP=$(nslookup $h 2>/dev/null | awk '/^Address:/ && !/:#/ {print $2}' | grep -v '^fe80' | head -1)
+        IP=$(getent hosts $h 2>/dev/null | awk '{print $1}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
     fi
     if [ -z "$IP" ]; then
-        echo "ERROR: Could not resolve IP for host $h"
+        echo "ERROR: Could not resolve IPv4 for host $h"
         exit 1
     fi
     echo "$IP" >> $STELLAR_DIR/tsm_ips.txt
