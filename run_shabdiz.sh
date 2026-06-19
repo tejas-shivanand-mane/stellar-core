@@ -12,14 +12,18 @@ module load slurm/24.11.1
 module load gcc/12.2.0
 
 SRUN=/opt/linux/rocky/8.x/x86_64/pkgs/slurm/24.11.1/bin/srun
+GCC_LIBS=/opt/linux/rocky/8.x/x86_64/pkgs/gcc/12.2.0/lib/gcc/x86_64-pc-linux-gnu/12.2.0:/opt/linux/rocky/8.x/x86_64/pkgs/slurm/24.11.1/lib:/opt/linux/rocky/8.x/x86_64/pkgs/gcc/12.2.0/lib64
+
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
 STELLAR_DIR=/rhome/tmane002/work/stellar-core
 BASE_DIR=/rhome/tmane002/work/stellar-private
 
 NUM_SERVERS=${NUM_SERVERS:-4}
 
-echo "=== Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
+# --- Wipe old logs, keep current job's log ---
+find /rhome/tmane002/work/shabdiz-logs -name "shabdiz-*.log" ! -name "shabdiz-${SLURM_JOB_ID}.log" -delete
 
+echo "=== Running experiment (NUM_SERVERS=$NUM_SERVERS) ==="
 
 HOSTNAMES=($(scontrol show hostnames $SLURM_NODELIST))
 
@@ -73,6 +77,7 @@ for i in $(seq 0 $(( NUM_SERVERS - 1 ))); do
     CFG="$BASE_DIR/$NODE/stellar-core.cfg"
     echo "Starting $NODE on $HOST..."
     $SRUN --nodes=1 --ntasks=1 --nodelist=$HOST \
+        --export=ALL,LD_LIBRARY_PATH=$GCC_LIBS \
         $STELLAR_CORE run --conf $CFG &
 done
 
@@ -83,6 +88,7 @@ sleep 15
 NODE1_IP=$(sed -n '1p' $STELLAR_DIR/tsm_ips.txt)
 echo "Running shab_client on $CLIENT_HOST targeting node1 at $NODE1_IP..."
 $SRUN --nodes=1 --ntasks=1 --nodelist=$CLIENT_HOST \
+    --export=ALL,LD_LIBRARY_PATH=$GCC_LIBS \
     $STELLAR_DIR/shab_client $NODE1_IP 12000 400 4800000 100 0
 
 # --- Cleanup ---
