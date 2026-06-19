@@ -31,11 +31,12 @@ TOTAL_NODES=$(( NUM_SERVERS + 1 ))  # +1 for dedicated client node
 # PHASE 1: Compile (single node, runs first)
 # ---------------------------------------------------------------
 if [ "${PHASE}" != "run" ]; then
-    echo "=== PHASE 1: Checking/Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
+    echo "=== PHASE 1: Compiling (NUM_SERVERS=$NUM_SERVERS) ==="
 
     mkdir -p /rhome/tmane002/work/shabdiz-logs
 
     cd $STELLAR_DIR
+
 
     make -j32 CC=/usr/bin/gcc CXX=/usr/bin/g++
     if [ $? -ne 0 ]; then
@@ -61,10 +62,6 @@ if [ "${PHASE}" != "run" ]; then
            $STELLAR_DIR/run_shabdiz.sh
     exit 0
 fi
-
-# ---------------------------------------------------------------
-# PHASE 2: Experiment (NUM_SERVERS+1 nodes, runs after compile)
-# ---------------------------------------------------------------
 
 # --- Reload modules in Phase 2 job ---
 module load slurm/24.11.1
