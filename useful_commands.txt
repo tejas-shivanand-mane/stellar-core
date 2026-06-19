@@ -2,8 +2,8 @@ g++ -O2 -std=c++17 -pthread -Isrc src/overlay/shab_client.cpp -o shab_client
 find . -type f -name "stellar-core.log" -delete
 /home/tejas/stellar-core/src/stellar-core run --conf node1/stellar-core.cfg
 
-
 module load slurm/24.11.1
+hash -r
 module load gcc/12.2.0
 module load cmake/3.31.2
 conda activate /rhome/tmane002/stellar
