@@ -18,36 +18,29 @@
 #include "overlay/CustomProtocolTypes.h"
 
 // ---- Config ----
-static int    MAX_IN_FLIGHT = 10;
-static int    BATCH_SIZE    = 100;
-static int    TOTAL_BATCHES = 10000;
+static int MAX_IN_FLIGHT = 400;
+static int SERVER_BATCH_SIZE_HINT = 100;
+static int TOTAL_REQUESTS = 10000;
 
 
 static int DURATION_SEC = 60; // 0 = use total_batches, >0 = run for N seconds
 
 
 // ---- Serialization ----
-// Format: batchId|id:payload:ts:sender|id:payload:ts:sender|...
 static std::string
-serializeBatch(uint64_t batchId, uint64_t startTxnId)
+serializeRequest(uint64_t requestId, uint64_t txnId)
 {
-    TransactionBatch batch;
+    uint64_t ts =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
 
-    uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    CustomTransaction txn;
+    txn.txnId = txnId;
+    txn.payload = generateYCSBOp();
+    txn.timestamp = ts;
+    txn.sender = "client";
 
-    for (int i = 0; i < BATCH_SIZE; ++i)
-    {
-        CustomTransaction txn;
-        txn.txnId = startTxnId + i;
-        txn.payload = generateYCSBOp();
-        txn.timestamp = ts;
-        txn.sender = "client";
-
-        batch.transactions.push_back(std::move(txn));
-    }
-
-    return std::to_string(batchId) + "|" + batch.serialize();
+    return std::to_string(requestId) + "|" + txn.serialize();
 }
 
 // ---- Stats ----
@@ -80,16 +73,16 @@ struct Stats {
         double p50  = latUs[n * 0.50] / 1000.0;
         double p99  = latUs[n * 0.99] / 1000.0;
         double p999 = latUs[std::min((int)(n * 0.999), n - 1)] / 1000.0;
-        double tput = (double)n * BATCH_SIZE / elapsed;
+        double tput = (double)n / elapsed;
 
         printf("=== Overall Results ===\n");
         printf("Elapsed:        %.2f s\n", elapsed);
         printf("Throughput:     %.0f ops/s\n", tput);
+        printf("Requests:       %d\n", n);
         printf("Latency mean:   %.2f ms\n", mean);
         printf("Latency p50:    %.2f ms\n", p50);
         printf("Latency p99:    %.2f ms\n", p99);
         printf("Latency p99.9:  %.2f ms\n", p999);
-        printf("Batches:        %d\n", n);
     }
 
     void reportLastWindow(double windowSec = 60.0)
@@ -109,7 +102,7 @@ struct Stats {
         if (windowLatUs.empty())
         {
             printf("=== Last %.0f Seconds Results ===\n", windowSec);
-            printf("No committed batches in this window.\n");
+            printf("No committed requests in this window.\n");
             return;
         }
 
@@ -130,7 +123,7 @@ struct Stats {
             actualWindowSec = std::min(windowSec, std::max(0.001, totalObservedSec));
         }
 
-        double tput = (double)n * BATCH_SIZE / actualWindowSec;
+        double tput = (double)n / actualWindowSec;
 
         printf("=== Last %.0f Seconds Results ===\n", actualWindowSec);
         printf("Throughput:     %.0f ops/s\n", tput);
@@ -138,7 +131,7 @@ struct Stats {
         printf("Latency p50:    %.2f ms\n", p50);
         printf("Latency p99:    %.2f ms\n", p99);
         printf("Latency p99.9:  %.2f ms\n", p999);
-        printf("Batches:        %d\n", n);
+        printf("Requests:       %d\n", n);
     }
 };
 
@@ -152,17 +145,17 @@ struct Client {
         std::chrono::steady_clock::time_point> inFlight;
 
     Stats    stats;
-    uint64_t nextBatchId = 0;
+    uint64_t nextRequestId = 0;
     uint64_t nextTxnId   = 0;
     int      sent        = 0;
     int      committed   = 0;
     bool     done        = false;
 
-    void sendBatch()
+    void sendRequest()
     {
-        uint64_t batchId = nextBatchId++;
-        std::string data = serializeBatch(batchId, nextTxnId);
-        nextTxnId += BATCH_SIZE;
+        uint64_t requestId = nextRequestId++;
+        std::string data = serializeRequest(requestId, nextTxnId);
+        nextTxnId += 1;
 
         uint32_t lenNet = htonl((uint32_t)data.size());
         if (send(fd, &lenNet, 4, MSG_NOSIGNAL) < 0 ||
@@ -174,17 +167,18 @@ struct Client {
 
         {
             std::lock_guard<std::mutex> lock(mu);
-            inFlight[batchId] = std::chrono::steady_clock::now();
+            inFlight[requestId] = std::chrono::steady_clock::now();
         }
+
         sent++;
     }
 
-    void onAck(uint64_t batchId)
+    void onAck(uint64_t requestId)
     {
         auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mu);
-            auto it = inFlight.find(batchId);
+            auto it = inFlight.find(requestId);
             if (it != inFlight.end())
             {
                 int64_t latUs = std::chrono::duration_cast<std::chrono::microseconds>(now - it->second).count();
@@ -220,7 +214,7 @@ struct Client {
                     std::chrono::steady_clock::now() - startTime).count();
                 return elapsed < DURATION_SEC;
             }
-            return sent < TOTAL_BATCHES;
+            return sent < TOTAL_REQUESTS;
         };
 
         while (shouldKeepSending())
@@ -231,15 +225,22 @@ struct Client {
             });
             lock.unlock();
 
-            sendBatch();
+            sendRequest();
 
-            if (sent % 200 == 0)
+            if (sent % 10000 == 0)
             {
                 auto now = std::chrono::steady_clock::now();
                 static auto last = startTime;
-                double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() / 1000.0;
-                printf("sent=%d committed=%d in_flight=%zu  (last 200 batches took %.2fs)\n",
-                    sent, committed, inFlight.size(), dt);
+
+                double dt = std::chrono::duration_cast<std::chrono::microseconds>(
+                                now - last).count() / 1'000'000.0;
+
+                double sendRate = 10000.0 / std::max(dt, 1e-9);
+
+                printf("sent=%d committed=%d in_flight=%zu  "
+                    "(last 10000 requests took %.4fs, send_rate=%.0f req/s)\n",
+                    sent, committed, inFlight.size(), dt, sendRate);
+
                 last = now;
             }
         }
@@ -271,11 +272,11 @@ struct Client {
 int main(int argc, char* argv[])
 {
     if (argc < 6) {
-        fprintf(stderr,
-            "Usage: client <leader_ip> <port> "
-            "<max_in_flight> <total_batches> <batch_size>\n"
-            "Example: ./client 10.128.0.5 12000 10 5000 100\n");
-        return 1;
+    fprintf(stderr,
+        "Usage: client <leader_ip> <port> "
+        "<max_in_flight> <total_requests> <server_batch_size_hint> [duration_sec]\n"
+        "Example: ./client 10.128.0.5 12000 500 10000 100 60\n");
+    return 1;
     }
 
 
@@ -283,13 +284,23 @@ int main(int argc, char* argv[])
     std::string leaderIp = argv[1];
     int port             = std::stoi(argv[2]);
     MAX_IN_FLIGHT        = std::stoi(argv[3]);
-    TOTAL_BATCHES        = std::stoi(argv[4]);
-    BATCH_SIZE           = std::stoi(argv[5]);
+    TOTAL_REQUESTS           = std::stoi(argv[4]);
+    SERVER_BATCH_SIZE_HINT   = std::stoi(argv[5]);
 
     if (argc >= 7)
     {
         DURATION_SEC = std::stoi(argv[6]);
 
+    }
+
+    if (MAX_IN_FLIGHT < SERVER_BATCH_SIZE_HINT)
+    {
+        fprintf(stderr,
+                "WARNING: max_in_flight=%d is smaller than server_batch_size_hint=%d.\n"
+                "This can deadlock because the server may wait for a full batch before ACKing.\n"
+                "Use max_in_flight >= server_batch_size_hint.\n",
+                MAX_IN_FLIGHT,
+                SERVER_BATCH_SIZE_HINT);
     }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -305,9 +316,9 @@ int main(int argc, char* argv[])
     }
 
     printf("Connected to %s:%d | max_in_flight=%d "
-           "total_batches=%d batch_size=%d\n",
-           leaderIp.c_str(), port, MAX_IN_FLIGHT,
-           TOTAL_BATCHES, BATCH_SIZE);
+       "total_requests=%d server_batch_size_hint=%d duration_sec=%d\n",
+       leaderIp.c_str(), port, MAX_IN_FLIGHT,
+       TOTAL_REQUESTS, SERVER_BATCH_SIZE_HINT, DURATION_SEC);
 
     Client client;
     client.fd = fd;

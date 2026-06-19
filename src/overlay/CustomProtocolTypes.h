@@ -83,3 +83,10 @@ struct PendingClientBatch
     int clientFd;
     TransactionBatch batch;
 };
+
+struct PendingClientRequest
+{
+    uint64_t requestId;
+    int clientFd;
+    CustomTransaction txn;
+};

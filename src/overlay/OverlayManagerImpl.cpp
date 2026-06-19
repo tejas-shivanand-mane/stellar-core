@@ -47,7 +47,7 @@
 #include "overlay/CustomYCSBWorkload.h"
 
 
-static constexpr size_t BLOCK_TXN_COUNT = 1;
+static constexpr size_t SERVER_BATCH_SIZE = 100;
 
 
 static std::atomic<bool> g_propPending{false};
@@ -61,7 +61,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = true;
+static bool ITHS_MODE = false;
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
@@ -124,9 +124,8 @@ static bool               g_clientListenerActive = false;
 
 
 
-static std::mutex g_clientBatchMutex;
-static std::queue<PendingClientBatch> g_clientBatchQueue;
-
+static std::mutex g_clientRequestMutex;
+static std::queue<PendingClientRequest> g_clientRequestQueue;
 
 struct SCPTxnStats {
     int totalSubmitted = 0;
@@ -2053,63 +2052,70 @@ OverlayManagerImpl::startClientListener(int port)
                     n = recv(clientFd, &data[0], len, MSG_WAITALL);
                     if (n <= 0) break;
 
-                    // Parse: batchId|txn1|txn2|...
+                    // Parse: requestId|singleTxn
                     size_t sep = data.find('|');
-                    if (sep == std::string::npos) continue;
-
-                    uint64_t batchId = std::stoull(data.substr(0, sep));
-                    std::string txnData = data.substr(sep + 1);
-
-                    TransactionBatch batch =
-                        TransactionBatch::deserialize(txnData);
-
-                    if (batch.transactions.size() != BLOCK_TXN_COUNT)
+                    if (sep == std::string::npos)
                     {
-                        CLOG_ERROR(Overlay,
-                                "[CLIENT REJECT] batchId={} has {} txns, expected BLOCK_TXN_COUNT={}",
-                                batchId,
-                                batch.transactions.size(),
-                                BLOCK_TXN_COUNT);
+                        CLOG_WARNING(Overlay, "[CLIENT REJECT] missing request separator");
                         continue;
                     }
 
-
-                    size_t txnCount = batch.transactions.size();
-
+                    uint64_t requestId = 0;
+                    try
                     {
-                        PendingClientBatch pending;
-                        pending.batchId = batchId;
-                        pending.clientFd = clientFd;
-                        pending.batch = std::move(batch);
-
-                        std::lock_guard<std::mutex> lock(g_clientBatchMutex);
-                        g_clientBatchQueue.push(std::move(pending));
-
-                        CLOG_INFO(Overlay,
-                                "[CLIENT QUEUE] queued batchId={} txns={} queueSize={}",
-                                batchId,
-                                txnCount,
-                                g_clientBatchQueue.size());
+                        requestId = std::stoull(data.substr(0, sep));
+                    }
+                    catch (...)
+                    {
+                        CLOG_WARNING(Overlay, "[CLIENT REJECT] malformed requestId");
+                        continue;
                     }
 
-                    CLOG_DEBUG(Overlay,
-                            "Queued {} txns from client, batchId={}",
-                            txnCount,
-                            batchId);
+                    std::string txnData = data.substr(sep + 1);
 
-                    // Safely trigger prop() on main thread if not already scheduled.
-                    // Do this AFTER queueing the batch.
-                    bool expected = false;
-                    if (g_propPending.compare_exchange_strong(expected, true))
+                    CustomTransaction txn;
+                    try
                     {
-                        mApp.postOnMainThread([this]() {
-                            if (latestCommittedView == currentView - 1 &&
-                                !force_collect)
-                            {
+                        txn = CustomTransaction::deserialize(txnData);
+                    }
+                    catch (...)
+                    {
+                        CLOG_WARNING(Overlay,
+                                    "[CLIENT REJECT] malformed transaction for requestId={}",
+                                    requestId);
+                        continue;
+                    }
+
+                    size_t queueSize = 0;
+                    {
+                        PendingClientRequest pending;
+                        pending.requestId = requestId;
+                        pending.clientFd = clientFd;
+                        pending.txn = std::move(txn);
+
+                        std::lock_guard<std::mutex> lock(g_clientRequestMutex);
+                        g_clientRequestQueue.push(std::move(pending));
+                        queueSize = g_clientRequestQueue.size();
+                    }
+
+                    CLOG_INFO(Overlay,
+                            "[CLIENT REQUEST QUEUE] queued requestId={} queueSize={} serverBatchSize={}",
+                            requestId,
+                            queueSize,
+                            SERVER_BATCH_SIZE);
+
+                    // Trigger prop() only when enough individual requests have accumulated
+                    // to form one server-side block.
+                    if (queueSize >= SERVER_BATCH_SIZE)
+                    {
+                        bool expected = false;
+                        if (g_propPending.compare_exchange_strong(expected, true))
+                        {
+                            mApp.postOnMainThread([this]() {
                                 prop();
-                            }
-                            g_propPending.store(false);
-                        }, "client-triggered prop");
+                                g_propPending.store(false);
+                            }, "client-triggered server-batch prop");
+                        }
                     }
 
                 }
@@ -2210,22 +2216,35 @@ makeProposalMessage(bool ithsMode,
 }
 
 
-static bool
-tryPopClientBatch(TransactionBatch& batch, uint64_t& batchId, int& clientFd)
+static size_t
+getClientRequestQueueSize()
 {
-    std::lock_guard<std::mutex> lock(g_clientBatchMutex);
+    std::lock_guard<std::mutex> lock(g_clientRequestMutex);
+    return g_clientRequestQueue.size();
+}
 
-    if (g_clientBatchQueue.empty())
+static bool
+tryBuildServerBatch(TransactionBatch& batch,
+                    std::vector<ClientAck>& clientAcks)
+{
+    std::lock_guard<std::mutex> lock(g_clientRequestMutex);
+
+    if (g_clientRequestQueue.size() < SERVER_BATCH_SIZE)
     {
         return false;
     }
 
-    auto pending = std::move(g_clientBatchQueue.front());
-    g_clientBatchQueue.pop();
+    batch.transactions.clear();
+    clientAcks.clear();
 
-    batch = std::move(pending.batch);
-    batchId = pending.batchId;
-    clientFd = pending.clientFd;
+    for (size_t i = 0; i < SERVER_BATCH_SIZE; ++i)
+    {
+        auto pending = std::move(g_clientRequestQueue.front());
+        g_clientRequestQueue.pop();
+
+        batch.transactions.push_back(std::move(pending.txn));
+        clientAcks.push_back(ClientAck{pending.requestId, pending.clientFd});
+    }
 
     return true;
 }
@@ -2237,14 +2256,10 @@ OverlayManagerImpl::prop()
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
     std::string shortID = KeyUtils::toShortString(selfID);
 
-    size_t clientQueueSize = 0;
-    {
-        std::lock_guard<std::mutex> lock(g_clientBatchMutex);
-        clientQueueSize = g_clientBatchQueue.size();
-    }
+    size_t clientQueueSize = getClientRequestQueueSize();
 
     CLOG_DEBUG(Overlay,
-            "prop(): self={}, txn_count={}, latestCommittedView={}, currentView={}, clientBatchQueue={}",
+            "prop(): self={}, txn_count={}, latestCommittedView={}, currentView={}, clientRequestQueue={}",
             shortID,
             txn_count,
             latestCommittedView,
@@ -2275,33 +2290,30 @@ OverlayManagerImpl::prop()
         }
 
         TransactionBatch batch;
-        bool fromExternalClient = false;
-        uint64_t clientBatchId = 0;
-        int clientFd = -1;
+bool fromExternalClient = false;
+std::vector<ClientAck> clientAcks;
 
-        // If the custom client listener is active, use external client batches.
-        // Do not fall back to synthetic batches in this mode, otherwise your benchmark
-        // mixes internal and external workloads.
         if (g_clientListenerActive)
         {
-            if (!tryPopClientBatch(batch, clientBatchId, clientFd))
+            if (!tryBuildServerBatch(batch, clientAcks))
             {
                 CLOG_DEBUG(Overlay,
-                        "[CLIENT] No queued block-sized batch; not proposing view {} yet",
+                        "[CLIENT] Only {} queued requests; need {} to propose view {}",
+                        getClientRequestQueueSize(),
+                        SERVER_BATCH_SIZE,
                         currentView);
                 return;
             }
 
             fromExternalClient = true;
 
-            // In external-client mode:
-            // one client batch = one block = BLOCK_TXN_COUNT transactions.
-            releaseAssert(batch.transactions.size() == BLOCK_TXN_COUNT);
+            releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
+            releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
 
             CLOG_INFO(Overlay,
-                    "[CLIENT] Using batchId={} as one block, txns={}, view={}",
-                    clientBatchId,
+                    "[CLIENT SERVER-BATCH] built block txns={} requests={} view={}",
                     batch.transactions.size(),
+                    clientAcks.size(),
                     currentView);
         }
         else
@@ -2310,7 +2322,7 @@ OverlayManagerImpl::prop()
                 mApp,
                 shortID,
                 txn_count,
-                BLOCK_TXN_COUNT);
+                SERVER_BATCH_SIZE);
 
             CLOG_INFO(Overlay,
                     "[INTERNAL] Using synthetic block batch, txns={}, view={}",
@@ -2337,7 +2349,8 @@ OverlayManagerImpl::prop()
         // Remember which client batch should be ACKed when this exact block commits.
         if (fromExternalClient)
         {
-            g_blockClientAcks[key].push_back(ClientAck{clientBatchId, clientFd});
+            auto& acks = g_blockClientAcks[key];
+            acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
         }
 
         auto msg = makeProposalMessage(
@@ -3129,21 +3142,24 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         TransactionBatch batch;
         bool fromExternalClient = false;
-        uint64_t clientBatchId = 0;
-        int clientFd = -1;
+        std::vector<ClientAck> clientAcks;
 
         if (g_clientListenerActive)
         {
-            if (!tryPopClientBatch(batch, clientBatchId, clientFd))
+            if (!tryBuildServerBatch(batch, clientAcks))
             {
                 CLOG_DEBUG(Overlay,
-                        "[SLOW CLIENT] No queued client batch; not proposing slow-path view {} yet",
+                        "[SLOW CLIENT] Only {} queued requests; need {} to propose slow-path view {}",
+                        getClientRequestQueueSize(),
+                        SERVER_BATCH_SIZE,
                         currentView);
                 return;
             }
 
             fromExternalClient = true;
-            releaseAssert(batch.transactions.size() == BLOCK_TXN_COUNT);
+
+            releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
+            releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
         }
         else
         {
@@ -3151,7 +3167,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 mApp,
                 KeyUtils::toShortString(selfID),
                 txn_count,
-                BLOCK_TXN_COUNT);
+                SERVER_BATCH_SIZE);
         }
 
         if (batch.transactions.empty())
@@ -3169,7 +3185,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         if (fromExternalClient)
         {
-            g_blockClientAcks[newKey].push_back(ClientAck{clientBatchId, clientFd});
+            auto& acks = g_blockClientAcks[newKey];
+            acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
         }
 
         auto msg = std::make_shared<StellarMessage>();
