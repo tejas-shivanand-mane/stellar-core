@@ -39,8 +39,10 @@ if [ "${PHASE}" != "run" ]; then
 
     cd $STELLAR_DIR
 
-    make -j32 CC=/usr/bin/gcc CXX=/usr/bin/g++
+    # --- Remove stale object file from different architecture ---
+    rm -f $STELLAR_DIR/src/main/XDRFilesSha256.o
 
+    make -j32
     if [ $? -ne 0 ]; then
         echo "ERROR: stellar-core compile failed, aborting."
         exit 1
