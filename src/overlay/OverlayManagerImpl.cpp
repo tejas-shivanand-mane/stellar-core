@@ -2098,7 +2098,7 @@ OverlayManagerImpl::startClientListener(int port)
                         queueSize = g_clientRequestQueue.size();
                     }
 
-                    CLOG_INFO(Overlay,
+                    CLOG_DEBUG(Overlay,
                             "[CLIENT REQUEST QUEUE] queued requestId={} queueSize={} serverBatchSize={}",
                             requestId,
                             queueSize,
@@ -2423,7 +2423,7 @@ std::vector<ClientAck> clientAcks;
 
                 sendPrepare(cm.view, cm.blockHash, cm.data);
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                           "[SELF-LOCAL SEND PREPARE] block={} view={} parentView={} parentBlock={} prepareVotes={}",
                           hexAbbrev(blockHash),
                           currentView,
@@ -2435,7 +2435,7 @@ std::vector<ClientAck> clientAcks;
             }
             else
             {
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                           "[SELF-LOCAL NO PREPARE] block={} view={} preparedSent={} latestCommittedView={} expectedPrev={} parentView={} parentBlock={} localCommittedBlock={}",
                           hexAbbrev(blockHash),
                           currentView,
@@ -2504,7 +2504,7 @@ std::vector<ClientAck> clientAcks;
 
     broadcastMessage(sendMsg);
 
-    CLOG_INFO(Overlay,
+    CLOG_DEBUG(Overlay,
             "[SLOW SELF SEND] origin={} view={} vp={} bp={}",
             shortID,
             currentView,
@@ -3339,7 +3339,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 st.prepareVoters.insert(selfID);
                 sendPrepare(cm.view, cm.blockHash, cm.data);
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[SEND PREPARE] view={} block={} prepareVotes={} reason={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
@@ -3348,7 +3348,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             }
             else
             {
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[NO PREPARE] view={} block={} preparedSent={} fastExtendsCommitted={} slowProposalOk={} collectionSize={} latestCommittedView={} proposedParentView={} proposedParentBlock={} localCommittedBlock={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
@@ -3371,7 +3371,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         {
             bool inserted = st.prepareVoters.insert(sender).second;
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[FAST RECV PREPARE] self={} sender={} inserted={} view={} block={} prepareVotes={} threshold={}",
                     KeyUtils::toShortString(selfID),
                     KeyUtils::toShortString(sender),
@@ -3407,7 +3407,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                 }
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[FAST SEND COMMIT] view={} block={} prepareVotes={} commitVotes={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
@@ -3425,7 +3425,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         {
             bool inserted = st.commitVoters.insert(sender).second;
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
                     KeyUtils::toShortString(selfID),
                     KeyUtils::toShortString(sender),
@@ -3462,7 +3462,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                 }
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[FAST AMPLIFY COMMIT] view={} block={} commitVotes={}",
                         cm.view,
                         hexAbbrev(cm.blockHash),
