@@ -3833,7 +3833,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         case CUSTOM_ITHS_PROPOSE:
             if (cm.view == currentView)
             {
-                CLOG_INFO(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
+                CLOG_DEBUG(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
                         hexAbbrev(cm.blockHash), cm.view);
 
                 if (!st.ithsEchoSent && latestCommittedView <= cm.view - 1)
@@ -3850,7 +3850,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             if (cm.view == currentView)
             {
                 st.ithsEchoVoters.insert(sender);
-                CLOG_INFO(Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
+                CLOG_DEBUG(Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsEchoVoters.size());
 
                 if (st.ithsEchoVoters.size() >= 2*f + 1 && !st.ithsAcceptSent)
@@ -3858,7 +3858,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsAcceptSent = true;
                     st.ithsAcceptVoters.insert(selfID);
                     sendITHSAccept(cm.view, cm.blockHash, cm.data);
-                    CLOG_INFO(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
+                    CLOG_DEBUG(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
                             hexAbbrev(cm.blockHash), cm.view);
                 }
             }
@@ -3869,7 +3869,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             if (cm.view == currentView)
             {
                 st.ithsAcceptVoters.insert(sender);
-                CLOG_INFO(Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
+                CLOG_DEBUG(Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsAcceptVoters.size());
 
                 // f+1 → amplify (background protocol)
@@ -3890,7 +3890,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsLockSent = true;
                     st.ithsLockVoters.insert(selfID);
                     sendITHSLock(cm.view, cm.blockHash, cm.data);
-                    CLOG_INFO(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
+                    CLOG_DEBUG(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
                             cm.view, hexAbbrev(cm.blockHash));
                 }
             }
@@ -3902,7 +3902,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             if (cm.view == currentView)
             {
                 st.ithsLockVoters.insert(sender);
-                CLOG_INFO(Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
+                CLOG_DEBUG(Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsLockVoters.size());
 
                 if (st.ithsLockVoters.size() >= 2*f + 1 && st.committedView < cm.view)
