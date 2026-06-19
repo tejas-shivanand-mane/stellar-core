@@ -17,8 +17,6 @@ export RUSTUP_HOME=$HOME/local/rustup
 export CARGO_HOME=$HOME/local/cargo
 source $HOME/local/cargo/env
 
-# --- Activate conda AFTER module loads to avoid gcc conflict ---
-source /etc/profile.d/conda.sh 2>/dev/null || source $HOME/.bashrc
 conda activate /rhome/tmane002/stellar
 
 STELLAR_CORE=/rhome/tmane002/work/stellar-core/src/stellar-core
@@ -39,10 +37,8 @@ if [ "${PHASE}" != "run" ]; then
 
     cd $STELLAR_DIR
 
-    # --- Remove stale object file from different architecture ---
-    rm -f $STELLAR_DIR/src/main/XDRFilesSha256.o
 
-    make -j32
+    make -j32 CC=/usr/bin/gcc CXX=/usr/bin/g++
     if [ $? -ne 0 ]; then
         echo "ERROR: stellar-core compile failed, aborting."
         exit 1
