@@ -296,7 +296,7 @@ struct Client
         if (send(fd, &lenNet, 4, MSG_NOSIGNAL) < 0 ||
             send(fd, data.c_str(), data.size(), MSG_NOSIGNAL) < 0)
         {
-            std::cerr << "Send failed\n";
+            // std::cerr << "Send failed\n";
             return;
         }
 
