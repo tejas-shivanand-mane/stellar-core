@@ -1710,40 +1710,47 @@ OverlayManagerImpl::tick()
     // CLOG_INFO(Overlay, "This node's ID: {}", mApp.getConfig().toShortString(nodeID));
 
 
-    if (shabdiz_start==0)
+
+
+    if (shabdiz_start == 0)
     {
-
-
         size_t authenticatedPeers = getAuthenticatedPeersCount();
-        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size(); // +1 for self
+        size_t totalNodes = mApp.getConfig().KNOWN_PEERS.size();
         size_t expectedPeers = totalNodes - 1;
-        
-        CLOG_INFO(Overlay, "authenticatedPeers,  expectedPeers: {}, {}", authenticatedPeers,  expectedPeers);
 
+        CLOG_INFO(Overlay,
+                "authenticatedPeers, expectedPeers: {}, {}",
+                authenticatedPeers,
+                expectedPeers);
+
+        // Strict condition: start only after all nodes are connected.
         if (authenticatedPeers == expectedPeers)
-
         {
-
             if (mApp.getConfig().SEND_CUSTOM_MESSAGE &&
                 !ENABLE_SCP_TRACKING &&
                 !g_clientListenerActive)
             {
                 startClientListener(12000);
+                CLOG_INFO(Overlay, "[SHABDIZ READY] Client listener started after all peers connected");
             }
 
-
-            prop();
             shabdiz_start = 1;
 
             shabdizStartTime = std::chrono::steady_clock::now();
             shabdizStartTimeSet = true;
 
-            CLOG_INFO(Overlay, "Shabdiz started — timer armed");
-
-
-
-
+            CLOG_INFO(Overlay, "Shabdiz started — all peers connected, timer armed");
         }
+    }
+
+    // Retry proposal only after all peers are connected and listener is active.
+    // This prevents the startup race where prop() runs before the client queue has enough requests.
+    if (shabdiz_start == 1 &&
+        mApp.getConfig().SEND_CUSTOM_MESSAGE &&
+        g_clientListenerActive &&
+        latestCommittedView == currentView - 1)
+    {
+        prop();
     }
 
 
