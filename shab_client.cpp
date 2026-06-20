@@ -336,9 +336,9 @@ int main(int argc, char* argv[])
     }
 
     printf("Connected to %s:%d | max_in_flight=%d "
-       "total_requests=%d server_batch_size_hint=%d duration_sec=%d\n",
-       leaderIp.c_str(), port, MAX_IN_FLIGHT,
-       TOTAL_REQUESTS, SERVER_BATCH_SIZE_HINT, DURATION_SEC);
+        "total_requests=%d server_batch_size_hint=%d duration_sec=%d send_interval_us=%d\n",
+        leaderIp.c_str(), port, MAX_IN_FLIGHT,
+        TOTAL_REQUESTS, SERVER_BATCH_SIZE_HINT, DURATION_SEC, SEND_INTERVAL_US);
 
     Client client;
     client.fd = fd;
