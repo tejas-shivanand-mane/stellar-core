@@ -23,8 +23,8 @@ static int SERVER_BATCH_SIZE_HINT = 100;
 static int TOTAL_REQUESTS = 10000;
 
 
-static int DURATION_SEC = 60; // 0 = use total_batches, >0 = run for N seconds
-
+static int DURATION_SEC = 0; // 0 = use total_batches, >0 = run for N seconds
+static int SEND_INTERVAL_US = 0; // microseconds between consecutive requests
 
 // ---- Serialization ----
 static std::string
@@ -42,6 +42,17 @@ serializeRequest(uint64_t requestId, uint64_t txnId)
 
     return std::to_string(requestId) + "|" + txn.serialize();
 }
+
+static void
+sleepBetweenRequests()
+{
+    if (SEND_INTERVAL_US > 0)
+    {
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(SEND_INTERVAL_US));
+    }
+}
+
 
 // ---- Stats ----
 struct Stats {
@@ -227,6 +238,9 @@ struct Client {
 
             sendRequest();
 
+            sleepBetweenRequests();
+
+
             if (sent % 10000 == 0)
             {
                 auto now = std::chrono::steady_clock::now();
@@ -272,11 +286,13 @@ struct Client {
 int main(int argc, char* argv[])
 {
     if (argc < 6) {
-    fprintf(stderr,
-        "Usage: client <leader_ip> <port> "
-        "<max_in_flight> <total_requests> <server_batch_size_hint> [duration_sec]\n"
-        "Example: ./client 10.128.0.5 12000 500 10000 100 60\n");
-    return 1;
+        fprintf(stderr,
+            "Usage: client <leader_ip> <port> "
+            "<max_in_flight> <total_requests> <server_batch_size_hint> "
+            "[duration_sec] [send_interval_us]\n"
+            "Example fixed requests: ./client 10.128.0.5 12000 500 100000 100 0 50\n"
+            "Example duration run:   ./client 10.128.0.5 12000 500 100000 100 60 50\n");
+        return 1;
     }
 
 
@@ -290,7 +306,11 @@ int main(int argc, char* argv[])
     if (argc >= 7)
     {
         DURATION_SEC = std::stoi(argv[6]);
+    }
 
+    if (argc >= 8)
+    {
+        SEND_INTERVAL_US = std::stoi(argv[7]);
     }
 
     if (MAX_IN_FLIGHT < SERVER_BATCH_SIZE_HINT)
