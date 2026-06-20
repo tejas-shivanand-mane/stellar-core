@@ -61,7 +61,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = true;
+static bool ITHS_MODE = false;
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
@@ -3208,6 +3208,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         msg->customMessage().bp = maxBlock;
 
         msg->customMessage().data = batch.serialize();
+
+        CLOG_INFO(Overlay,
+          "[BATCH SIZE] txns={} serialized_batch_bytes={} bytes_per_txn={}",
+          batch.transactions.size(),
+          serializedBatch.size(),
+          serializedBatch.size() / batch.transactions.size());
+
 
         broadcastMessage(msg);
 
