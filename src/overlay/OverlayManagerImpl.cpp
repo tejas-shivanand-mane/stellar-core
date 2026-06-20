@@ -2360,6 +2360,13 @@ std::vector<ClientAck> clientAcks;
             acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
         }
 
+        std::string serializedBatch = batch.serialize();
+        CLOG_INFO(Overlay,
+          "[BATCH SIZE] path=fast txns={} serialized_batch_bytes={} bytes_per_txn={}",
+          batch.transactions.size(),
+          serializedBatch.size(),
+          batch.transactions.empty() ? 0 : serializedBatch.size() / batch.transactions.size());
+
         auto msg = makeProposalMessage(
             ITHS_MODE,
             currentView,
@@ -2367,6 +2374,9 @@ std::vector<ClientAck> clientAcks;
             latestCommittedView,
             latestCommittedBlock,
             batch.serialize());
+
+
+
 
         CLOG_INFO(Overlay,
                 "[FAST SEND PROPOSE] block={} view={} parentView={} parentBlock={} latestCommittedView={} latestCommittedBlock={} txns={} source={}",
@@ -3209,11 +3219,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         msg->customMessage().data = batch.serialize();
 
-        CLOG_INFO(Overlay,
-          "[BATCH SIZE] txns={} serialized_batch_bytes={} bytes_per_txn={}",
-          batch.transactions.size(),
-          serializedBatch.size(),
-          serializedBatch.size() / batch.transactions.size());
 
 
         broadcastMessage(msg);
