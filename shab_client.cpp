@@ -10,6 +10,7 @@
 #include <numeric>
 #include <cstring>
 #include <atomic>
+#include <memory>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <endian.h>
@@ -19,16 +20,21 @@
 #include "overlay/CustomProtocolTypes.h"
 
 // ---- Config ----
-static int MAX_IN_FLIGHT = 400;
+static int MAX_IN_FLIGHT = 400;          // per client thread
 static int SERVER_BATCH_SIZE_HINT = 100;
-static int TOTAL_REQUESTS = 10000;
+static int TOTAL_REQUESTS = 10000;       // total across all client threads
+static int DURATION_SEC = 0;             // 0 = use TOTAL_REQUESTS, >0 = run for N seconds
+static int SEND_INTERVAL_US = 0;         // per-thread sleep between requests
+static int CLIENT_THREADS = 1;
 
-static int DURATION_SEC = 0;      // 0 = use TOTAL_REQUESTS, >0 = run for N seconds
-static int SEND_INTERVAL_US = 0;  // microseconds between consecutive requests
+// If generateYCSBOp() uses shared/global RNG internally, protect it.
+// If you later confirm it is thread-safe and this becomes a bottleneck,
+// you can remove this mutex.
+static std::mutex g_workloadMutex;
 
 // ---- Serialization ----
 static std::string
-serializeRequest(uint64_t requestId, uint64_t txnId)
+serializeRequest(uint64_t requestId, uint64_t txnId, int workerId)
 {
     uint64_t ts =
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -36,9 +42,14 @@ serializeRequest(uint64_t requestId, uint64_t txnId)
 
     CustomTransaction txn;
     txn.txnId = txnId;
-    txn.payload = generateYCSBOp();
+
+    {
+        std::lock_guard<std::mutex> lock(g_workloadMutex);
+        txn.payload = generateYCSBOp();
+    }
+
     txn.timestamp = ts;
-    txn.sender = "client";
+    txn.sender = "client-" + std::to_string(workerId);
 
     return std::to_string(requestId) + "|" + txn.serialize();
 }
@@ -51,6 +62,27 @@ sleepBetweenRequests()
         std::this_thread::sleep_for(
             std::chrono::microseconds(SEND_INTERVAL_US));
     }
+}
+
+static bool
+sendAll(int fd, const void* data, size_t len)
+{
+    const char* p = static_cast<const char*>(data);
+    size_t sent = 0;
+
+    while (sent < len)
+    {
+        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
+
+        if (n <= 0)
+        {
+            return false;
+        }
+
+        sent += (size_t)n;
+    }
+
+    return true;
 }
 
 // ---- Stats ----
@@ -150,6 +182,7 @@ struct Stats
             }
 
             latUs.reserve(samples.size());
+
             for (auto const& s : samples)
             {
                 latUs.push_back(s.latUs);
@@ -157,6 +190,7 @@ struct Stats
         }
 
         std::sort(latUs.begin(), latUs.end());
+
         int n = (int)latUs.size();
 
         double mean =
@@ -263,49 +297,131 @@ struct Stats
     }
 };
 
-// ---- Sliding window client ----
-struct Client
+struct SharedState
 {
-    int fd;
+    std::string leaderIp;
+    int port;
 
-    std::mutex              mu;
-    std::condition_variable cv;
-
-    std::map<uint64_t,
-        std::chrono::steady_clock::time_point> inFlight;
+    std::chrono::steady_clock::time_point startTime;
 
     Stats stats;
 
-    uint64_t nextRequestId = 0;
-    uint64_t nextTxnId     = 0;
+    std::atomic<uint64_t> nextRequestId{0};
+    std::atomic<uint64_t> totalSent{0};
+    std::atomic<uint64_t> totalAcked{0};
 
-    int sent      = 0;
-    int committed = 0;
+    std::atomic<bool> stopRequested{false};
+};
+
+struct ClientWorker
+{
+    int workerId;
+    int fd = -1;
+
+    SharedState* shared = nullptr;
+
+    std::mutex mu;
+    std::condition_variable cv;
+
+    std::map<uint64_t, std::chrono::steady_clock::time_point> inFlight;
 
     std::atomic<bool> done{false};
 
-    void sendRequest()
+    bool connectToLeader()
     {
-        uint64_t requestId = nextRequestId++;
+        fd = socket(AF_INET, SOCK_STREAM, 0);
 
-        std::string data = serializeRequest(requestId, nextTxnId);
-        nextTxnId += 1;
+        if (fd < 0)
+        {
+            perror("socket");
+            return false;
+        }
 
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port   = htons(shared->port);
+
+        if (inet_pton(AF_INET, shared->leaderIp.c_str(), &addr.sin_addr) != 1)
+        {
+            fprintf(stderr, "Worker %d: invalid IP address: %s\n",
+                    workerId, shared->leaderIp.c_str());
+            close(fd);
+            fd = -1;
+            return false;
+        }
+
+        if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0)
+        {
+            fprintf(stderr, "Worker %d: failed to connect to %s:%d\n",
+                    workerId, shared->leaderIp.c_str(), shared->port);
+            close(fd);
+            fd = -1;
+            return false;
+        }
+
+        return true;
+    }
+
+    bool reserveRequest(uint64_t& requestId)
+    {
+        if (DURATION_SEC > 0)
+        {
+            auto elapsed =
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - shared->startTime).count();
+
+            if (elapsed >= DURATION_SEC)
+            {
+                return false;
+            }
+
+            requestId = shared->nextRequestId.fetch_add(1);
+            return true;
+        }
+
+        requestId = shared->nextRequestId.fetch_add(1);
+
+        if (requestId >= (uint64_t)TOTAL_REQUESTS)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool sendRequest(uint64_t requestId)
+    {
+        uint64_t txnId = requestId;
+
+        std::string data = serializeRequest(requestId, txnId, workerId);
         uint32_t lenNet = htonl((uint32_t)data.size());
 
-        if (send(fd, &lenNet, 4, MSG_NOSIGNAL) < 0 ||
-            send(fd, data.c_str(), data.size(), MSG_NOSIGNAL) < 0)
-        {
-            // std::cerr << "Send failed\n";
-            return;
-        }
+        auto sendTime = std::chrono::steady_clock::now();
 
         {
             std::lock_guard<std::mutex> lock(mu);
-            inFlight[requestId] = std::chrono::steady_clock::now();
+            inFlight[requestId] = sendTime;
         }
 
-        sent++;
+        bool ok =
+            sendAll(fd, &lenNet, 4) &&
+            sendAll(fd, data.data(), data.size());
+
+        if (!ok)
+        {
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                inFlight.erase(requestId);
+            }
+
+            shared->stopRequested.store(true);
+            cv.notify_one();
+            return false;
+        }
+
+        shared->totalSent.fetch_add(1);
+
+        return true;
     }
 
     void onAck(uint64_t requestId)
@@ -323,10 +439,10 @@ struct Client
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         now - it->second).count();
 
-                stats.record(latUs);
+                shared->stats.record(latUs);
+                shared->totalAcked.fetch_add(1);
 
                 inFlight.erase(it);
-                committed++;
             }
         }
 
@@ -335,9 +451,12 @@ struct Client
 
     void run()
     {
-        auto startTime = std::chrono::steady_clock::now();
+        if (!connectToLeader())
+        {
+            shared->stopRequested.store(true);
+            return;
+        }
 
-        // ACK receiver thread.
         std::thread ackThread([this]() {
             while (!done.load())
             {
@@ -354,85 +473,63 @@ struct Client
             }
         });
 
-        // Per-second client-side stats thread.
-        std::thread statsThread([this, startTime]() {
-            int secIndex = 1;
+        while (!shared->stopRequested.load())
+        {
+            uint64_t requestId = 0;
 
-            while (!done.load())
+            if (!reserveRequest(requestId))
             {
-                std::this_thread::sleep_until(
-                    startTime + std::chrono::seconds(secIndex));
+                break;
+            }
 
-                if (done.load())
+            {
+                std::unique_lock<std::mutex> lock(mu);
+
+                cv.wait(lock, [this]() {
+                    return shared->stopRequested.load() ||
+                           (int)inFlight.size() < MAX_IN_FLIGHT;
+                });
+
+                if (shared->stopRequested.load())
                 {
                     break;
                 }
-
-                stats.reportSecondWindow(startTime, secIndex);
-
-                secIndex++;
             }
-        });
 
-        // Send loop: fixed number of requests or duration-based.
-        auto shouldKeepSending = [&]() {
-            if (DURATION_SEC > 0)
+            if (!sendRequest(requestId))
             {
-                auto elapsed =
-                    std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::steady_clock::now() - startTime).count();
-
-                return elapsed < DURATION_SEC;
+                break;
             }
-
-            return sent < TOTAL_REQUESTS;
-        };
-
-        while (shouldKeepSending())
-        {
-            std::unique_lock<std::mutex> lock(mu);
-
-            cv.wait(lock, [this]() {
-                return (int)inFlight.size() < MAX_IN_FLIGHT;
-            });
-
-            lock.unlock();
-
-            sendRequest();
 
             sleepBetweenRequests();
         }
 
-        // Wait for all ACKs.
+        // Wait for all ACKs for this worker.
         {
             std::unique_lock<std::mutex> lock(mu);
 
             cv.wait(lock, [this]() {
-                return inFlight.empty();
+                return inFlight.empty() || shared->stopRequested.load();
             });
         }
 
         done.store(true);
 
-        // Wake the ACK receiver if it is blocked in recv(..., MSG_WAITALL).
-        shutdown(fd, SHUT_RDWR);
+        if (fd >= 0)
+        {
+            shutdown(fd, SHUT_RDWR);
+        }
 
         if (ackThread.joinable())
         {
             ackThread.join();
         }
 
-        if (statsThread.joinable())
+        if (fd >= 0)
         {
-            statsThread.join();
+            close(fd);
+            fd = -1;
         }
-
-        double elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - startTime).count() / 1000.0;
-
-        stats.report(elapsed);
-        stats.reportLastWindow(60.0);
     }
 };
 
@@ -442,17 +539,18 @@ int main(int argc, char* argv[])
     {
         fprintf(stderr,
             "Usage: client <leader_ip> <port> "
-            "<max_in_flight> <total_requests> <server_batch_size_hint> "
-            "[duration_sec] [send_interval_us]\n"
-            "Example fixed requests: ./client 10.128.0.5 12000 500 100000 100 0 50\n"
-            "Example duration run:   ./client 10.128.0.5 12000 500 100000 100 60 50\n");
+            "<max_in_flight_per_thread> <total_requests> <server_batch_size_hint> "
+            "[duration_sec] [send_interval_us] [client_threads]\n"
+            "Example fixed requests: ./client 10.128.0.5 12000 1000 100000 100 0 0 8\n"
+            "Example duration run:   ./client 10.128.0.5 12000 1000 100000 100 60 0 8\n");
 
         return 1;
     }
 
-    std::string leaderIp = argv[1];
+    SharedState shared;
 
-    int port = std::stoi(argv[2]);
+    shared.leaderIp = argv[1];
+    shared.port     = std::stoi(argv[2]);
 
     MAX_IN_FLIGHT          = std::stoi(argv[3]);
     TOTAL_REQUESTS         = std::stoi(argv[4]);
@@ -468,13 +566,26 @@ int main(int argc, char* argv[])
         SEND_INTERVAL_US = std::stoi(argv[7]);
     }
 
-    if (MAX_IN_FLIGHT < SERVER_BATCH_SIZE_HINT)
+    if (argc >= 9)
+    {
+        CLIENT_THREADS = std::stoi(argv[8]);
+    }
+
+    if (CLIENT_THREADS <= 0)
+    {
+        fprintf(stderr, "ERROR: client_threads must be > 0.\n");
+        return 1;
+    }
+
+    int totalMaxInFlight = MAX_IN_FLIGHT * CLIENT_THREADS;
+
+    if (totalMaxInFlight < SERVER_BATCH_SIZE_HINT)
     {
         fprintf(stderr,
-                "WARNING: max_in_flight=%d is smaller than server_batch_size_hint=%d.\n"
-                "This can deadlock because the server may wait for a full batch before ACKing.\n"
-                "Use max_in_flight >= server_batch_size_hint.\n",
-                MAX_IN_FLIGHT,
+                "WARNING: aggregate max_in_flight=%d is smaller than "
+                "server_batch_size_hint=%d.\n"
+                "This can deadlock because the server may wait for a full batch before ACKing.\n",
+                totalMaxInFlight,
                 SERVER_BATCH_SIZE_HINT);
     }
 
@@ -489,50 +600,88 @@ int main(int argc, char* argv[])
                 SERVER_BATCH_SIZE_HINT);
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-
-    if (fd < 0)
-    {
-        perror("socket");
-        return 1;
-    }
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(port);
-
-    if (inet_pton(AF_INET, leaderIp.c_str(), &addr.sin_addr) != 1)
-    {
-        fprintf(stderr, "Invalid IP address: %s\n", leaderIp.c_str());
-        close(fd);
-        return 1;
-    }
-
-    if (connect(fd, (sockaddr*)&addr, sizeof(addr)) < 0)
-    {
-        fprintf(stderr, "Failed to connect to %s:%d\n",
-                leaderIp.c_str(), port);
-
-        close(fd);
-        return 1;
-    }
-
-    printf("Connected to %s:%d | max_in_flight=%d "
-           "total_requests=%d server_batch_size_hint=%d "
-           "duration_sec=%d send_interval_us=%d\n",
-           leaderIp.c_str(),
-           port,
+    printf("Connected workload config | leader=%s:%d "
+           "client_threads=%d max_in_flight_per_thread=%d "
+           "aggregate_max_in_flight=%d total_requests=%d "
+           "server_batch_size_hint=%d duration_sec=%d send_interval_us=%d\n",
+           shared.leaderIp.c_str(),
+           shared.port,
+           CLIENT_THREADS,
            MAX_IN_FLIGHT,
+           totalMaxInFlight,
            TOTAL_REQUESTS,
            SERVER_BATCH_SIZE_HINT,
            DURATION_SEC,
            SEND_INTERVAL_US);
 
-    Client client;
-    client.fd = fd;
-    client.run();
+    shared.startTime = std::chrono::steady_clock::now();
 
-    close(fd);
+    std::thread statsThread([&shared]() {
+        int secIndex = 1;
+
+        while (!shared.stopRequested.load())
+        {
+            std::this_thread::sleep_until(
+                shared.startTime + std::chrono::seconds(secIndex));
+
+            if (shared.stopRequested.load())
+            {
+                break;
+            }
+
+            shared.stats.reportSecondWindow(shared.startTime, secIndex);
+            secIndex++;
+        }
+    });
+
+    std::vector<std::unique_ptr<ClientWorker>> workers;
+    std::vector<std::thread> workerThreads;
+
+    workers.reserve(CLIENT_THREADS);
+    workerThreads.reserve(CLIENT_THREADS);
+
+    for (int i = 0; i < CLIENT_THREADS; i++)
+    {
+        auto worker = std::make_unique<ClientWorker>();
+        worker->workerId = i;
+        worker->shared = &shared;
+
+        workers.push_back(std::move(worker));
+    }
+
+    for (int i = 0; i < CLIENT_THREADS; i++)
+    {
+        workerThreads.emplace_back([&, i]() {
+            workers[i]->run();
+        });
+    }
+
+    for (auto& t : workerThreads)
+    {
+        if (t.joinable())
+        {
+            t.join();
+        }
+    }
+
+    shared.stopRequested.store(true);
+
+    if (statsThread.joinable())
+    {
+        statsThread.join();
+    }
+
+    double elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - shared.startTime).count() / 1000.0;
+
+    printf("=== Multi-thread Client Summary ===\n");
+    printf("Client threads:      %d\n", CLIENT_THREADS);
+    printf("Total sent:          %lu\n", (unsigned long)shared.totalSent.load());
+    printf("Total ACKed:         %lu\n", (unsigned long)shared.totalAcked.load());
+
+    shared.stats.report(elapsed);
+    shared.stats.reportLastWindow(60.0);
 
     return 0;
 }
