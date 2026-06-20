@@ -1,7 +1,0 @@
-log_file,send_interval_us,error,leader_proposals_matched,leader_commits_matched,latency_pairs_matched,total_committed_txns,committed_blocks,fast_blocks,slow_blocks,stable_avg_throughput_tps,overall_throughput_tps,stable_avg_latency_ms,stable_median_latency_ms,overall_avg_latency_ms,overall_median_latency_ms,overall_p95_latency_ms,overall_p99_latency_ms,commit_duration_sec
-../work/experiments/shabdiz/shab_sleepbtw_request_8_0/tsm-sc-000/node1/stellar-core.log,0,file not found,,,,,,,,,,,,,,,,
-../work/experiments/shabdiz/shab_sleepbtw_request_8_20/tsm-sc-000/node1/stellar-core.log,20,file not found,,,,,,,,,,,,,,,,
-../work/experiments/shabdiz/shab_sleepbtw_request_8_50/tsm-sc-000/node1/stellar-core.log,50,file not found,,,,,,,,,,,,,,,,
-../work/experiments/shabdiz/shab_sleepbtw_request_8_100/tsm-sc-000/node1/stellar-core.log,100,file not found,,,,,,,,,,,,,,,,
-../work/experiments/shabdiz/shab_sleepbtw_request_8_500/tsm-sc-000/node1/stellar-core.log,500,file not found,,,,,,,,,,,,,,,,
-../work/experiments/shabdiz/shab_sleepbtw_request_8_2000/tsm-sc-000/node1/stellar-core.log,2000,,788.0,788.0,788.0,78800.0,788.0,788.0,0.0,461.6666666666667,465.22886544376814,4.185833333333333,4.0,4.026649746192893,4.0,5.0,8.129999999999995,169.379
