@@ -2373,7 +2373,7 @@ std::vector<ClientAck> clientAcks;
         }
 
         std::string serializedBatch = batch.serialize();
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
           "[BATCH SIZE] path=fast txns={} serialized_batch_bytes={} bytes_per_txn={}",
           batch.transactions.size(),
           serializedBatch.size(),
@@ -2424,7 +2424,7 @@ std::vector<ClientAck> clientAcks;
 
                 sendITHSEcho(cm.view, cm.blockHash, cm.data);
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[IT-HS SELF-LOCAL SEND ECHO] block={} view={} proposalLockView={} localLockView={}",
                         hexAbbrev(blockHash),
                         currentView,
@@ -2433,7 +2433,7 @@ std::vector<ClientAck> clientAcks;
             }
             else
             {
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                           "[IT-HS SELF-LOCAL NO ECHO] block={} view={} ithsEchoSent={} latestCommittedView={}",
                           hexAbbrev(blockHash),
                           currentView,
