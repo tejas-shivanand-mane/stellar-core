@@ -138,6 +138,7 @@ class OverlayManagerImpl : public OverlayManager
     void sendITHSEcho( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendITHSAccept( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendITHSLock( uint64_t view, Hash const& blockHash, std::string const& data) override;
+    void sendITHSCommit( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
 
     void startClientListener(int port = 12000);

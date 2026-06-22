@@ -61,10 +61,20 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = false;
+static bool ITHS_MODE = true;
+
+
+size_t N = 0;
+size_t f = 0;
+
 
 static uint64_t g_ithsLockView  = 0;
 static Hash     g_ithsLockBlock = Hash();
+
+static std::unordered_map<uint64_t, Hash> g_ithsEchoSentForView;
+static std::unordered_map<uint64_t, Hash> g_ithsAcceptSentForView;
+static std::unordered_map<uint64_t, Hash> g_ithsLockSentForView;
+static std::unordered_map<uint64_t, Hash> g_ithsCommitSentForView;
 
 size_t
 getRSS_MB()
@@ -799,11 +809,13 @@ struct TxnState {
 
     bool ithsEchoSent   = false;
     bool ithsAcceptSent = false;
+    bool ithsLockSent   = false;
+    bool ithsCommitSent = false;
 
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsEchoVoters;
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsAcceptVoters;
-    bool ithsLockSent = false;
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsLockVoters;
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> ithsCommitVoters;
 
 
 
@@ -2399,17 +2411,25 @@ std::vector<ClientAck> clientAcks;
 
         if (ITHS_MODE)
         {
-            if (!st.ithsEchoSent && latestCommittedView <= currentView - 1)
+            bool firstEchoThisView = !g_ithsEchoSentForView.count(cm.view);
+            // No view-change implementation: treat parent/lock metadata as the safety check.
+            bool safeForLocalLock = (cm.vp >= g_ithsLockView);
+
+            if (firstEchoThisView && safeForLocalLock)
             {
+                g_ithsEchoSentForView[cm.view] = cm.blockHash;
+
                 st.ithsEchoSent = true;
                 st.ithsEchoVoters.insert(selfID);
 
                 sendITHSEcho(cm.view, cm.blockHash, cm.data);
 
                 CLOG_INFO(Overlay,
-                          "[IT-HS SELF-LOCAL SEND ECHO] block={} view={}",
-                          hexAbbrev(blockHash),
-                          currentView);
+                        "[IT-HS SELF-LOCAL SEND ECHO] block={} view={} proposalLockView={} localLockView={}",
+                        hexAbbrev(blockHash),
+                        currentView,
+                        cm.vp,
+                        g_ithsLockView);
             }
             else
             {
@@ -3042,6 +3062,24 @@ OverlayManagerImpl::sendITHSLock(uint64_t view, Hash const& blockHash,
     broadcastMessage(msg);
 }
 
+void
+OverlayManagerImpl::sendITHSCommit(uint64_t view, Hash const& blockHash,
+                                   std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    msg->customMessage().msgType   = CUSTOM_ITHS_COMMIT;
+    msg->customMessage().view      = view;
+    msg->customMessage().blockHash = blockHash;
+    msg->customMessage().data      = data;
+
+    broadcastMessage(msg);
+
+    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast COMMIT block {} view {}",
+               hexAbbrev(blockHash), view);
+}
+
+
 
 void
 OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
@@ -3106,7 +3144,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     };
 
 
-    if (cm.view < currentView)
+    bool ithsOldBackgroundMsg =
+    ITHS_MODE &&
+    (cm.msgType == CUSTOM_ITHS_ACCEPT ||
+     cm.msgType == CUSTOM_ITHS_COMMIT);
+
+    if (cm.view < currentView && !ithsOldBackgroundMsg)
     {
         CLOG_DEBUG(Overlay,
                 "[FAST DROP OLD] type={} view={} currentView={} block={}",
@@ -3134,8 +3177,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     BlockKey key{cm.view, cm.blockHash};
     auto& st = g_txn[key];
 
-    size_t N = getAuthenticatedPeersCount() + 1;
-    size_t f = (N - 1) / 3;
+    if (N ==0)
+    {
+        N = getAuthenticatedPeersCount() + 1;
+        f = (N - 1) / 3;
+    }
+
 
 
 
@@ -3855,11 +3902,29 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_DEBUG(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
                         hexAbbrev(cm.blockHash), cm.view);
 
-                if (!st.ithsEchoSent && latestCommittedView <= cm.view - 1)
+                bool firstEchoThisView = !g_ithsEchoSentForView.count(cm.view);
+
+                // No view-change implementation: proposal's lock/parent view must
+                // be at least the local IT-HS lock view.
+                bool safeForLocalLock = (cm.vp >= g_ithsLockView);
+
+                if (firstEchoThisView && safeForLocalLock)
                 {
+                    g_ithsEchoSentForView[cm.view] = cm.blockHash;
+
                     st.ithsEchoSent = true;
                     st.ithsEchoVoters.insert(selfID);
                     sendITHSEcho(cm.view, cm.blockHash, cm.data);
+                }
+                else
+                {
+                    CLOG_DEBUG(Overlay,
+                            "[IT-HS] Reject/skip PROPOSE block {} view {} firstEchoThisView={} proposalLockView={} localLockView={}",
+                            hexAbbrev(cm.blockHash),
+                            cm.view,
+                            firstEchoThisView,
+                            cm.vp,
+                            g_ithsLockView);
                 }
             }
             break;
@@ -3869,14 +3934,21 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             if (cm.view == currentView)
             {
                 st.ithsEchoVoters.insert(sender);
+
                 CLOG_DEBUG(Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsEchoVoters.size());
 
-                if (st.ithsEchoVoters.size() >= 2*f + 1 && !st.ithsAcceptSent)
+                // Blog threshold is n-f, not always 2f+1.
+                if (st.ithsEchoVoters.size() >= N - f &&
+                    !g_ithsAcceptSentForView.count(cm.view))
                 {
+                    g_ithsAcceptSentForView[cm.view] = cm.blockHash;
+
                     st.ithsAcceptSent = true;
                     st.ithsAcceptVoters.insert(selfID);
+
                     sendITHSAccept(cm.view, cm.blockHash, cm.data);
+
                     CLOG_DEBUG(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
                             hexAbbrev(cm.blockHash), cm.view);
                 }
@@ -3885,85 +3957,168 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_ITHS_ACCEPT:
-            if (cm.view == currentView)
             {
                 st.ithsAcceptVoters.insert(sender);
+
                 CLOG_DEBUG(Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsAcceptVoters.size());
 
-                // f+1 → amplify (background protocol)
-                if (st.ithsAcceptVoters.size() >= f + 1 && !st.ithsAcceptSent)
+                // Background boosting: f+1 ACCEPT -> send ACCEPT.
+                // This should run even for old views.
+                if (st.ithsAcceptVoters.size() >= f + 1 &&
+                    !g_ithsAcceptSentForView.count(cm.view))
                 {
+                    g_ithsAcceptSentForView[cm.view] = cm.blockHash;
+
                     st.ithsAcceptSent = true;
                     st.ithsAcceptVoters.insert(selfID);
+
                     sendITHSAccept(cm.view, cm.blockHash, cm.data);
+
+                    CLOG_DEBUG(Overlay,
+                            "[IT-HS] Boosted ACCEPT block {} view {}",
+                            hexAbbrev(cm.blockHash), cm.view);
                 }
 
-                // n-f → set lock state + send LOCK
-                if (st.ithsAcceptVoters.size() >= 2*f + 1 && !st.ithsLockSent)
+                // Main lock rule: n-f ACCEPT -> set lock and send LOCK.
+                // Only do lock update for the current view.
+                if (cm.view == currentView &&
+                    st.ithsAcceptVoters.size() >= N - f &&
+                    !g_ithsLockSentForView.count(cm.view))
                 {
-                    // set lock = (v, b) per blog pseudocode
                     g_ithsLockView  = cm.view;
                     g_ithsLockBlock = cm.blockHash;
 
+                    g_ithsLockSentForView[cm.view] = cm.blockHash;
+
                     st.ithsLockSent = true;
                     st.ithsLockVoters.insert(selfID);
+
                     sendITHSLock(cm.view, cm.blockHash, cm.data);
+
                     CLOG_DEBUG(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
                             cm.view, hexAbbrev(cm.blockHash));
                 }
+
+                break;
             }
-            break;
 
         // ================================================================
 
         case CUSTOM_ITHS_LOCK:
+        {
             if (cm.view == currentView)
             {
                 st.ithsLockVoters.insert(sender);
+
                 CLOG_DEBUG(Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsLockVoters.size());
 
-                if (st.ithsLockVoters.size() >= 2*f + 1 && st.committedView < cm.view)
+                // Blog rule: n-f LOCK -> send COMMIT.
+                // Do NOT commit locally here.
+                if (st.ithsLockVoters.size() >= N - f &&
+                    !g_ithsCommitSentForView.count(cm.view))
                 {
-                    st.committedView     = cm.view;
-                    st.committedBlock    = cm.blockHash;
-                    latestCommittedView  = cm.view;
-                    latestCommittedBlock = cm.blockHash;
-                    currentView          = cm.view + 1;
+                    g_ithsCommitSentForView[cm.view] = cm.blockHash;
 
-                    BlockKey nextKey{currentView, Hash()};
-                    g_txn[nextKey].proposalSentForView = false;
+                    st.ithsCommitSent = true;
+                    st.ithsCommitVoters.insert(selfID);
 
-                    TransactionBatch batch = TransactionBatch::deserialize(cm.data);
-                    for (auto const& txn : batch.transactions)
+                    sendITHSCommit(cm.view, cm.blockHash, cm.data);
+
+                    CLOG_DEBUG(Overlay,
+                            "[IT-HS] Sent COMMIT after LOCK quorum block {} view {}",
+                            hexAbbrev(cm.blockHash), cm.view);
+                }
+            }
+
+            break;
+        }
+        // ================================================================
+        case CUSTOM_ITHS_COMMIT:
+        {
+            st.ithsCommitVoters.insert(sender);
+
+            CLOG_DEBUG(Overlay, "[IT-HS] Received COMMIT block {} view {} commits={}",
+                    hexAbbrev(cm.blockHash), cm.view, st.ithsCommitVoters.size());
+
+            // Background boosting: f+1 COMMIT -> send COMMIT.
+            // This should run even for old views.
+            if (st.ithsCommitVoters.size() >= f + 1 &&
+                !g_ithsCommitSentForView.count(cm.view))
+            {
+                g_ithsCommitSentForView[cm.view] = cm.blockHash;
+
+                st.ithsCommitSent = true;
+                st.ithsCommitVoters.insert(selfID);
+
+                sendITHSCommit(cm.view, cm.blockHash, cm.data);
+
+                CLOG_DEBUG(Overlay,
+                        "[IT-HS] Boosted COMMIT block {} view {}",
+                        hexAbbrev(cm.blockHash), cm.view);
+            }
+
+            // Blog termination/output rule: n-f COMMIT -> output.
+            // In your chain code, output means apply batch and advance currentView.
+            if (cm.view == currentView &&
+                st.ithsCommitVoters.size() >= N - f &&
+                st.committedView < cm.view)
+            {
+                st.committedView     = cm.view;
+                st.committedBlock    = cm.blockHash;
+                latestCommittedView  = cm.view;
+                latestCommittedBlock = cm.blockHash;
+
+                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                for (auto const& txn : batch.transactions)
+                {
+                    std::istringstream ss(txn.payload);
+                    std::string op, key, value;
+                    ss >> op >> key;
+
+                    if (op == "READ")
                     {
-                        std::istringstream ss(txn.payload);
-                        std::string op, key, value;
-                        ss >> op >> key;
-                        if (op == "READ") {
-                            auto it = g_kvStore.find(key);
-                            (void)it;
-                        } else if (op == "UPDATE" || op == "RMW") {
-                            ss >> value;
-                            g_kvStore[key] = value;
-                        }
+                        auto it = g_kvStore.find(key);
+                        (void)it;
                     }
+                    else if (op == "UPDATE" || op == "RMW")
+                    {
+                        ss >> value;
+                        g_kvStore[key] = value;
+                    }
+                }
 
-                    CLOG_INFO(Overlay,
-                            "[IT-HS] Committed block {} view {} with {} transactions",
-                            hexAbbrev(cm.blockHash),
-                            cm.view,
-                            batch.transactions.size());
+                CLOG_INFO(Overlay,
+                        "[IT-HS COMMITTED] block={} view={} txns={} nextView={}",
+                        hexAbbrev(cm.blockHash),
+                        cm.view,
+                        batch.transactions.size(),
+                        cm.view + 1);
 
-                    ackClientBatchesForBlock(cm.view, cm.blockHash);
+                ackClientBatchesForBlock(cm.view, cm.blockHash);
 
-                    cleanupOldTxnStates();
-                    deliverBufferedForCurrentView();
+                currentView = cm.view + 1;
+                lastCollectSentView = UINT64_MAX;
+
+                BlockKey nextKey{currentView, Hash()};
+                g_txn[nextKey].proposalSentForView = false;
+
+                cleanupOldTxnStates();
+                deliverBufferedForCurrentView();
+
+                if (latestCommittedView == currentView - 1)
+                {
                     prop();
                 }
             }
+
             break;
+        }
+
+
+
+
         
     }
 }

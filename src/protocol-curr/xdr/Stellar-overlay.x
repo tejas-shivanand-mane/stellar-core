@@ -68,7 +68,8 @@ enum CustomMessageType
     CUSTOM_ITHS_PROPOSE = 9,
     CUSTOM_ITHS_ECHO = 10,
     CUSTOM_ITHS_ACCEPT = 11,
-    CUSTOM_ITHS_LOCK = 12
+    CUSTOM_ITHS_LOCK = 12,
+    CUSTOM_ITHS_COMMIT = 13
 };
 
 struct CustomMessage
