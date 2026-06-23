@@ -2401,7 +2401,7 @@ std::vector<ClientAck> clientAcks;
                 batch.transactions.size(),
                 fromExternalClient ? "external-client" : "synthetic");
 
-        if (shabdizStartTimeSet=false)
+        if (shabdizStartTimeSet==false)
         {
             shabdizStartTime = std::chrono::steady_clock::now();
             shabdizStartTimeSet = true;
