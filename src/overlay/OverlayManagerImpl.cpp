@@ -104,7 +104,7 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 500;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 200;
 
 
 constexpr int FORCE_COLLECT_AFTER_SEC = 100;
@@ -1748,8 +1748,8 @@ OverlayManagerImpl::tick()
 
             shabdiz_start = 1;
 
-            shabdizStartTime = std::chrono::steady_clock::now();
-            shabdizStartTimeSet = true;
+            // shabdizStartTime = std::chrono::steady_clock::now();
+            // shabdizStartTimeSet = true;
 
             CLOG_INFO(Overlay, "Shabdiz started — all peers connected, timer armed");
         }
@@ -2400,6 +2400,12 @@ std::vector<ClientAck> clientAcks;
                 hexAbbrev(latestCommittedBlock),
                 batch.transactions.size(),
                 fromExternalClient ? "external-client" : "synthetic");
+
+        if (shabdizStartTimeSet=false)
+        {
+            shabdizStartTime = std::chrono::steady_clock::now();
+            shabdizStartTimeSet = true;
+        }
 
         broadcastMessage(msg);
 
