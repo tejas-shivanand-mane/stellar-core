@@ -61,7 +61,7 @@ namespace {
 
 
 static bool PBFT_MODE = false;
-static bool ITHS_MODE = true;
+static bool ITHS_MODE = false;
 
 
 size_t N = 0;
