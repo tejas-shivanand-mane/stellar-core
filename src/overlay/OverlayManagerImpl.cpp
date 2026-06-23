@@ -2499,7 +2499,7 @@ std::vector<ClientAck> clientAcks;
     // =====================================================
     if (lastCollectSentView == currentView)
     {
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
                 "[SLOW COLLECT SKIP] already sent COLLECT for view {}",
                 currentView);
         return;
@@ -3299,7 +3299,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         state.collection[target.origin] = {target.view, target.block};
 
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
                 "[SLOW DELIVER] origin={} target=(vp={}, bp={}) collectionSize={}",
                 KeyUtils::toShortString(target.origin),
                 target.view,
@@ -3743,7 +3743,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     st.readies[ovb].insert(selfID);
 
-                    CLOG_INFO(Overlay,
+                    CLOG_DEBUG(Overlay,
                             "Sending READY origin={} target=(vp={}, bp={})",
                             KeyUtils::toShortString(cm.origin),
                             cm.vp,
@@ -3777,7 +3777,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     broadcastMessage(msg);
 
-                    CLOG_INFO(Overlay,
+                    CLOG_DEBUG(Overlay,
                             "Sending CONDREADY origin={} target=(vp={}, bp={}) dependency=(vp={}, bp={})",
                             KeyUtils::toShortString(cm.origin),
                             cm.vp,
