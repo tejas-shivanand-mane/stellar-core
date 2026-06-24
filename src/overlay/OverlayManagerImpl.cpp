@@ -3532,14 +3532,31 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_COMMIT:
         {
-            bool inserted = st.commitVoters.insert(sender).second;
 
 
+            static int droppedCommitMessages = 0;
+            static constexpr int MAX_DROPPED_COMMITS = 5000;
 
-            if (mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view %10000 < 3000)
+            if (mApp.getConfig().MEMORY_PROF &&
+                cm.view > 20000 &&
+                droppedCommitMessages < MAX_DROPPED_COMMITS)
             {
+                droppedCommitMessages++;
+
+                CLOG_INFO(Overlay,
+                    "[Memory EXP Failure] droppedCommitMessages={} view={}",
+                    droppedCommitMessages,
+                    cm.view);
+
                 return;
             }
+
+
+
+
+
+
+            bool inserted = st.commitVoters.insert(sender).second;
 
             CLOG_DEBUG(Overlay,
                     "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
