@@ -29,7 +29,7 @@ static double zipfian_alpha = 0.99;
 static uint64_t zipfian_n = 1000000;
 
 // Change this for each experiment.
-static YCSBWorkload currentWorkload = WORKLOAD_R0;
+static YCSBWorkload currentWorkload = WORKLOAD_R10;
 
 static uint64_t
 zipfianNext()
@@ -104,6 +104,9 @@ generateYCSBOp()
         // New read-ratio workloads
         case WORKLOAD_R0:
             return generateReadUpdateOp(key, r, 0.00);
+
+        case WORKLOAD_R10:
+            return generateReadUpdateOp(key, r, 0.10);
 
         case WORKLOAD_R25:
             return generateReadUpdateOp(key, r, 0.25);
