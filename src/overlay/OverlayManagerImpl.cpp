@@ -3385,6 +3385,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_PROPOSE:
         {
+
+            CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
+
+
             CLOG_DEBUG(Overlay,
                     "[RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={} parentView={} parentBlock={}",
                     KeyUtils::toShortString(selfID),
@@ -3529,6 +3533,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         case CUSTOM_COMMIT:
         {
             bool inserted = st.commitVoters.insert(sender).second;
+
+
+
+            // if (mApp.getConfig().MEMORY_PROF && cm.view > 30000 && cm.view %10000 < 3000)
+            // {
+            //     return;
+            // }
 
             CLOG_DEBUG(Overlay,
                     "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",

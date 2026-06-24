@@ -29,7 +29,7 @@ static double zipfian_alpha = 0.99;
 static uint64_t zipfian_n = 1000000;
 
 // Change this for each experiment.
-static YCSBWorkload currentWorkload = WORKLOAD_R10;
+static YCSBWorkload currentWorkload = WORKLOAD_W;
 
 static uint64_t
 zipfianNext()
