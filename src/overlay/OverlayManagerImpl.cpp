@@ -3536,10 +3536,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-            // if (mApp.getConfig().MEMORY_PROF && cm.view > 30000 && cm.view %10000 < 3000)
-            // {
-            //     return;
-            // }
+            if (mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view %10000 < 3000)
+            {
+                return;
+            }
 
             CLOG_DEBUG(Overlay,
                     "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
