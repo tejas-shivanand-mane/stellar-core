@@ -32,6 +32,9 @@ static int CLIENT_THREADS = 1;
 // you can remove this mutex.
 static std::mutex g_workloadMutex;
 
+
+
+
 // ---- Serialization ----
 static std::string
 serializeRequest(uint64_t requestId, uint64_t txnId, int workerId)

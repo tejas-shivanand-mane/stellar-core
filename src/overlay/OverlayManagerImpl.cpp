@@ -2105,6 +2105,39 @@ OverlayManagerImpl::startClientListener(int port)
                         continue;
                     }
 
+                    // Fast path for read-only requests.
+                    // READ requests are ACKed immediately and do not enter Shabdiz / IT-HS consensus.
+                    {
+                        std::istringstream ss(txn.payload);
+                        std::string op;
+                        ss >> op;
+
+                        if (op == "READ")
+                        {
+                            uint64_t ackNet = htobe64(requestId);
+
+                            ssize_t sent = send(clientFd, &ackNet, 8, MSG_NOSIGNAL);
+                            if (sent != 8)
+                            {
+                                CLOG_WARNING(Overlay,
+                                            "[CLIENT READ ACK FAILED] requestId={} fd={}",
+                                            requestId,
+                                            clientFd);
+                                break;
+                            }
+
+                            CLOG_DEBUG(Overlay,
+                                    "[CLIENT READ FAST ACK] requestId={} payload='{}'",
+                                    requestId,
+                                    txn.payload);
+
+                            continue;
+                        }
+                    }
+
+
+
+
                     size_t queueSize = 0;
                     {
                         PendingClientRequest pending;
