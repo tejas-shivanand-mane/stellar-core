@@ -14,9 +14,14 @@ enum YCSBWorkload
 
     // New explicit read-ratio workloads
     WORKLOAD_R0,
+    WORKLOAD_R10,
+    WORKLOAD_R20,
     WORKLOAD_R25,
+    WORKLOAD_R40,
     WORKLOAD_R50,
+    WORKLOAD_R60,
     WORKLOAD_R75,
+    WORKLOAD_R80,
     WORKLOAD_R100
 };
 
@@ -24,7 +29,7 @@ static double zipfian_alpha = 0.99;
 static uint64_t zipfian_n = 1000000;
 
 // Change this for each experiment.
-static YCSBWorkload currentWorkload = WORKLOAD_R0;
+static YCSBWorkload currentWorkload = WORKLOAD_R20;
 
 static uint64_t
 zipfianNext()
@@ -102,6 +107,20 @@ generateYCSBOp()
 
         case WORKLOAD_R25:
             return generateReadUpdateOp(key, r, 0.25);
+
+        case WORKLOAD_R20:
+            return generateReadUpdateOp(key, r, 0.20);
+
+
+        case WORKLOAD_R40:
+            return generateReadUpdateOp(key, r, 0.40);
+
+        case WORKLOAD_R60:
+            return generateReadUpdateOp(key, r, 0.60);
+
+
+        case WORKLOAD_R80:
+            return generateReadUpdateOp(key, r, 0.80);
 
         case WORKLOAD_R50:
             return generateReadUpdateOp(key, r, 0.50);
