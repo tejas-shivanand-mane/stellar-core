@@ -3645,7 +3645,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 BlockKey nextKey{currentView, Hash()};
                 g_txn[nextKey].proposalSentForView = false;
 
-                cleanupOldTxnStates();
+                // cleanupOldTxnStates();
 
                 // Critical: deliver buffered messages for the new view before proposing again.
                 deliverBufferedForCurrentView();
