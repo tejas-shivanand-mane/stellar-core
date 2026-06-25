@@ -946,6 +946,8 @@ void cleanupOldTxnStates()
         return;
     }
 
+    bool clean_done = false;
+
     const uint64_t cutoffView = latestCommittedView - MAX_HISTORY;
 
     // ================================================================
@@ -959,6 +961,12 @@ void cleanupOldTxnStates()
         if (it->first.view < cutoffView)
         {
             it = g_txn.erase(it);
+
+
+            if (clean_done==false)
+            {
+                clean_done = true;
+            }
         }
         else
         {
@@ -1092,7 +1100,7 @@ void cleanupOldTxnStates()
     //     }
     // }
 
-    if (latestCommittedView % 1000 == 0)
+    if (clean_done)
     {
         g_txn.rehash(0);
         g_ps.rehash(0);
@@ -3800,10 +3808,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-                // if (!(mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view%5000 < 1500))
-                // {
-                //     cleanupOldTxnStates();
-                // }
+                if (!(mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view%5000 < 1500))
+                {
+                    cleanupOldTxnStates();
+                }
 
                 // Critical: deliver buffered messages for the new view before proposing again.
                 deliverBufferedForCurrentView();
