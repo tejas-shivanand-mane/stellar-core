@@ -3809,9 +3809,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
                 // if (!(mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view%5000 < 1500))
-                {
-                    cleanupOldTxnStates();
-                }
+                // {
+                    // cleanupOldTxnStates();
+                // }
 
                 // Critical: deliver buffered messages for the new view before proposing again.
                 deliverBufferedForCurrentView();
