@@ -933,16 +933,30 @@ rememberLocalPrepared(uint64_t view, Hash const& block)
 
 void cleanupOldTxnStates()
 {
+    if (PBFT_MODE)
+    {
+        return;
+    }
 
+    static const uint64_t MAX_HISTORY = MAX_VIEW_HISTORY;
 
-    if (PBFT_MODE) return;
+    // Nothing is old enough to clean yet.
+    if (latestCommittedView <= MAX_HISTORY)
+    {
+        return;
+    }
 
-    static const int MAX_HISTORY = MAX_VIEW_HISTORY;
+    const uint64_t cutoffView = latestCommittedView - MAX_HISTORY;
 
+    // ================================================================
+    // Per-block protocol state.
+    // Safe to remove only states far behind latestCommittedView.
+    // This also frees TxnState internals: prepareVoters, commitVoters,
+    // collection, echoes, readies, delivered, pendingCondReady, etc.
+    // ================================================================
     for (auto it = g_txn.begin(); it != g_txn.end(); )
     {
-        // BlockKey has a .view (uint64_t) field, right?
-        if (it->first.view + MAX_HISTORY < latestCommittedView)
+        if (it->first.view < cutoffView)
         {
             it = g_txn.erase(it);
         }
@@ -952,10 +966,14 @@ void cleanupOldTxnStates()
         }
     }
 
-
+    // ================================================================
+    // Prepared set.
+    // Keep recent prepared certificates because they may still be used
+    // for safety checks / dependencies.
+    // ================================================================
     for (auto it = g_ps.begin(); it != g_ps.end(); )
     {
-        if (it->view + MAX_HISTORY < latestCommittedView)
+        if (it->view < cutoffView)
         {
             it = g_ps.erase(it);
         }
@@ -965,7 +983,127 @@ void cleanupOldTxnStates()
         }
     }
 
+    // ================================================================
+    // Client ACK bookkeeping.
+    // Committed blocks are already erased by ackClientBatchesForBlock().
+    // This removes abandoned/stale ACK records for old views only.
+    // ================================================================
+    for (auto it = g_blockClientAcks.begin(); it != g_blockClientAcks.end(); )
+    {
+        if (it->first.view < cutoffView)
+        {
+            it = g_blockClientAcks.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 
+    // ================================================================
+    // Future-message buffer.
+    // IMPORTANT: do NOT clear all of g_futureFastMsgs.
+    // Only remove entries that are no longer future and are far behind.
+    // ================================================================
+    for (auto it = g_futureFastMsgs.begin(); it != g_futureFastMsgs.end(); )
+    {
+        uint64_t bufferedView = it->first;
+
+        if (bufferedView < cutoffView)
+        {
+            it = g_futureFastMsgs.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // ================================================================
+    // Fast-path proposed-view history.
+    // Old proposed-view markers are not needed once those views are far
+    // behind latestCommittedView.
+    // ================================================================
+    for (auto it = g_fastProposedViews.begin(); it != g_fastProposedViews.end(); )
+    {
+        if (*it < cutoffView)
+        {
+            it = g_fastProposedViews.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // // ================================================================
+    // // IT-HotStuff per-view sent-message maps.
+    // // These are only per-view "already sent" markers, so old views are safe.
+    // // Do NOT clean g_ithsLockView / g_ithsLockBlock here.
+    // // ================================================================
+    // for (auto it = g_ithsEchoSentForView.begin(); it != g_ithsEchoSentForView.end(); )
+    // {
+    //     if (it->first < cutoffView)
+    //     {
+    //         it = g_ithsEchoSentForView.erase(it);
+    //     }
+    //     else
+    //     {
+    //         ++it;
+    //     }
+    // }
+
+    // for (auto it = g_ithsAcceptSentForView.begin(); it != g_ithsAcceptSentForView.end(); )
+    // {
+    //     if (it->first < cutoffView)
+    //     {
+    //         it = g_ithsAcceptSentForView.erase(it);
+    //     }
+    //     else
+    //     {
+    //         ++it;
+    //     }
+    // }
+
+    // for (auto it = g_ithsLockSentForView.begin(); it != g_ithsLockSentForView.end(); )
+    // {
+    //     if (it->first < cutoffView)
+    //     {
+    //         it = g_ithsLockSentForView.erase(it);
+    //     }
+    //     else
+    //     {
+    //         ++it;
+    //     }
+    // }
+
+    // for (auto it = g_ithsCommitSentForView.begin(); it != g_ithsCommitSentForView.end(); )
+    // {
+    //     if (it->first < cutoffView)
+    //     {
+    //         it = g_ithsCommitSentForView.erase(it);
+    //     }
+    //     else
+    //     {
+    //         ++it;
+    //     }
+    // }
+
+    CLOG_DEBUG(Overlay,
+        "[CLEANUP] latestCommittedView={} cutoffView={} "
+        "g_txn={} g_ps={} g_blockClientAcks={} g_futureFastMsgs={} "
+        "g_fastProposedViews={} ithsEcho={} ithsAccept={} ithsLock={} ithsCommit={}",
+        latestCommittedView,
+        cutoffView,
+        g_txn.size(),
+        g_ps.size(),
+        g_blockClientAcks.size(),
+        g_futureFastMsgs.size(),
+        g_fastProposedViews.size(),
+        g_ithsEchoSentForView.size(),
+        g_ithsAcceptSentForView.size(),
+        g_ithsLockSentForView.size(),
+        g_ithsCommitSentForView.size());
 }
 
 
