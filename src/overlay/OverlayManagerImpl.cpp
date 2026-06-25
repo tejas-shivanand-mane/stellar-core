@@ -1099,19 +1099,6 @@ void cleanupOldTxnStates()
         g_blockClientAcks.rehash(0);
         g_fastProposedViews.rehash(0);
 
-        CLOG_DEBUG(Overlay,
-            "[CLEANUP SHRINK] g_txn size={} buckets={} "
-            "g_blockClientAcks size={} buckets={} "
-            "g_futureFastMsgs size={} buckets={} "
-            "g_fastProposedViews size={} buckets={}",
-            g_txn.size(),
-            g_txn.bucket_count(),
-            g_blockClientAcks.size(),
-            g_blockClientAcks.bucket_count(),
-            g_futureFastMsgs.size(),
-            g_futureFastMsgs.bucket_count(),
-            g_fastProposedViews.size(),
-            g_fastProposedViews.bucket_count());
     }
 
 
