@@ -3532,54 +3532,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_COMMIT:
         {
-
-
-
-            static auto memoryExpStartTime = std::chrono::steady_clock::now();
-            static int lastPauseBucket = -1;
-
-            auto now = std::chrono::steady_clock::now();
-            auto elapsedSec =
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    now - memoryExpStartTime).count();
-
-            // After 120 seconds, pause once every 30 seconds.
-            bool memoryExpActive =
-                mApp.getConfig().MEMORY_PROF &&
-                elapsedSec >= 120;
-
-            // One pause bucket every 30 seconds.
-            int pauseBucket = static_cast<int>((elapsedSec - 120) / 30);
-
-            if (memoryExpActive && pauseBucket != lastPauseBucket)
-            {
-                lastPauseBucket = pauseBucket;
-
-                CLOG_INFO(Overlay,
-                    "[Memory EXP Slow Failure] pausing COMMIT processing for 5s "
-                    "elapsedSec={} bucket={} currentView={} msgView={}",
-                    elapsedSec,
-                    pauseBucket,
-                    currentView,
-                    cm.view);
-
-                std::this_thread::sleep_for(std::chrono::seconds(10));
-
-                CLOG_INFO(Overlay,
-                    "[Memory EXP Recovery] resumed COMMIT processing "
-                    "elapsedSec={} bucket={} currentView={} msgView={}",
-                    elapsedSec,
-                    pauseBucket,
-                    currentView,
-                    cm.view);
-            }
-
-
-
-
-
-
-
             
 
             bool inserted = st.commitVoters.insert(sender).second;
@@ -3696,8 +3648,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-                
-                cleanupOldTxnStates();
+                if (!(mApp.getConfig().MEMORY_PROF && cm.view > 20000 && cm.view %10000 < 3000))
+                {
+                    cleanupOldTxnStates();
+                }
 
                 // Critical: deliver buffered messages for the new view before proposing again.
                 deliverBufferedForCurrentView();
