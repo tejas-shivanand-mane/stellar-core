@@ -965,6 +965,7 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
+    g_txn.rehash(0);
 
     // ================================================================
     // Prepared set.
@@ -982,7 +983,7 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-
+    g_ps.rehash(0);
     // ================================================================
     // Client ACK bookkeeping.
     // Committed blocks are already erased by ackClientBatchesForBlock().
@@ -999,7 +1000,7 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-
+    g_blockClientAcks.rehash(0);
     // ================================================================
     // Future-message buffer.
     // IMPORTANT: do NOT clear all of g_futureFastMsgs.
@@ -1019,6 +1020,7 @@ void cleanupOldTxnStates()
         }
     }
 
+
     // ================================================================
     // Fast-path proposed-view history.
     // Old proposed-view markers are not needed once those views are far
@@ -1035,6 +1037,7 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
+    g_fastProposedViews.rehash(0);
 
     // // ================================================================
     // // IT-HotStuff per-view sent-message maps.
