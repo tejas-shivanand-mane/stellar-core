@@ -965,7 +965,6 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    g_txn.rehash(0);
 
     // ================================================================
     // Prepared set.
@@ -983,7 +982,6 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    g_ps.rehash(0);
     // ================================================================
     // Client ACK bookkeeping.
     // Committed blocks are already erased by ackClientBatchesForBlock().
@@ -1000,7 +998,6 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    g_blockClientAcks.rehash(0);
     // ================================================================
     // Future-message buffer.
     // IMPORTANT: do NOT clear all of g_futureFastMsgs.
@@ -1037,7 +1034,10 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    g_fastProposedViews.rehash(0);
+
+
+
+
 
     // // ================================================================
     // // IT-HotStuff per-view sent-message maps.
@@ -1091,6 +1091,30 @@ void cleanupOldTxnStates()
     //         ++it;
     //     }
     // }
+
+    if (latestCommittedView % 1000 == 0)
+    {
+        g_txn.rehash(0);
+        g_ps.rehash(0);
+        g_blockClientAcks.rehash(0);
+        g_fastProposedViews.rehash(0);
+
+        CLOG_DEBUG(Overlay,
+            "[CLEANUP SHRINK] g_txn size={} buckets={} "
+            "g_blockClientAcks size={} buckets={} "
+            "g_futureFastMsgs size={} buckets={} "
+            "g_fastProposedViews size={} buckets={}",
+            g_txn.size(),
+            g_txn.bucket_count(),
+            g_blockClientAcks.size(),
+            g_blockClientAcks.bucket_count(),
+            g_futureFastMsgs.size(),
+            g_futureFastMsgs.bucket_count(),
+            g_fastProposedViews.size(),
+            g_fastProposedViews.bucket_count());
+    }
+
+
 
     CLOG_DEBUG(Overlay,
         "[CLEANUP] latestCommittedView={} cutoffView={} "
