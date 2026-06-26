@@ -2523,6 +2523,10 @@ tryBuildServerBatch(TransactionBatch& batch,
 void
 OverlayManagerImpl::pbftProp()
 {
+
+
+
+
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
     std::string shortID = KeyUtils::toShortString(selfID);
 
@@ -2530,6 +2534,21 @@ OverlayManagerImpl::pbftProp()
     {
         return;
     }
+
+    if (g_pbftNextSeq != g_pbftLastExecuted + 1)
+    {
+        CLOG_DEBUG(Overlay,
+                "[PBFT PROP SKIP] one slot already in flight: "
+                "nextSeq={} lastExecuted={}",
+                g_pbftNextSeq,
+                g_pbftLastExecuted);
+        return;
+    }
+
+
+
+
+
 
     TransactionBatch batch;
     bool fromExternalClient = false;
