@@ -60,8 +60,11 @@ namespace {
 }
 
 
-static bool PBFT_MODE = false;
+static bool NonPrune_MODE = false;
 static bool ITHS_MODE = false;
+
+static bool PBFT_MODE = true;
+
 
 
 size_t N = 0;
@@ -647,6 +650,11 @@ makeBlock(Hash const& prev, int txnCount)
     return sha256(input);
 }
 
+static Hash
+pbftDigest(std::string const& data)
+{
+    return sha256(data);
+}
 
 
 // Key type for (view, blockHash) used in echoes/readies
@@ -751,6 +759,50 @@ struct NodeIDEq {
         return a == b;
     }
 };
+
+
+struct PbftSlotKey
+{
+    uint64_t view; // PBFT view, fixed to 0 without view change
+    uint64_t seq;  // PBFT sequence number
+
+    bool operator==(PbftSlotKey const& other) const noexcept
+    {
+        return view == other.view && seq == other.seq;
+    }
+};
+
+struct PbftSlotKeyHash
+{
+    size_t operator()(PbftSlotKey const& k) const noexcept
+    {
+        return std::hash<uint64_t>()(k.view) ^
+               (std::hash<uint64_t>()(k.seq) << 1);
+    }
+};
+
+struct PbftState
+{
+    bool prePrepared = false;
+    bool prepareSent = false;
+    bool prepared = false;
+    bool commitSent = false;
+    bool committedLocal = false;
+    bool executed = false;
+
+    Hash digest{};
+    std::string data;
+
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> prepareVoters;
+    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> commitVoters;
+};
+
+static std::unordered_map<PbftSlotKey, PbftState, PbftSlotKeyHash> g_pbft;
+static std::unordered_map<PbftSlotKey, Hash, PbftSlotKeyHash> g_pbftAcceptedDigest;
+
+static uint64_t g_pbftView = 0;
+static uint64_t g_pbftNextSeq = 1;
+static uint64_t g_pbftLastExecuted = 0;
 
 
 struct OriginViewBlockKeyHash
@@ -933,7 +985,7 @@ rememberLocalPrepared(uint64_t view, Hash const& block)
 
 void cleanupOldTxnStates()
 {
-    if (PBFT_MODE)
+    if (NonPrune_MODE)
     {
         return;
     }
@@ -1919,10 +1971,16 @@ OverlayManagerImpl::tick()
     // This prevents the startup race where prop() runs before the client queue has enough requests.
     if (shabdiz_start == 1 &&
         mApp.getConfig().SEND_CUSTOM_MESSAGE &&
-        g_clientListenerActive &&
-        latestCommittedView == currentView - 1)
+        g_clientListenerActive)
     {
-        prop();
+        if (PBFT_MODE)
+        {
+            prop();
+        }
+        else if (latestCommittedView == currentView - 1)
+        {
+            prop();
+        }
     }
 
 
@@ -2463,6 +2521,94 @@ tryBuildServerBatch(TransactionBatch& batch,
 
 
 void
+OverlayManagerImpl::pbftProp()
+{
+    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+    std::string shortID = KeyUtils::toShortString(selfID);
+
+    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    {
+        return;
+    }
+
+    TransactionBatch batch;
+    bool fromExternalClient = false;
+    std::vector<ClientAck> clientAcks;
+
+    if (g_clientListenerActive)
+    {
+        if (!tryBuildServerBatch(batch, clientAcks))
+        {
+            CLOG_DEBUG(Overlay,
+                       "[PBFT CLIENT] Only {} queued requests; need {}",
+                       getClientRequestQueueSize(),
+                       SERVER_BATCH_SIZE);
+            return;
+        }
+
+        fromExternalClient = true;
+
+        releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
+        releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
+    }
+    else
+    {
+        batch = makeSyntheticYCSBBatch(
+            mApp,
+            shortID,
+            txn_count,
+            SERVER_BATCH_SIZE);
+    }
+
+    if (batch.transactions.empty())
+    {
+        CLOG_WARNING(Overlay, "[PBFT PROP SKIP] empty batch");
+        return;
+    }
+
+    txn_count += batch.transactions.size();
+
+    std::string data = batch.serialize();
+    Hash digest = pbftDigest(data);
+
+    uint64_t view = g_pbftView;
+    uint64_t seq = g_pbftNextSeq++;
+
+    PbftSlotKey slot{view, seq};
+    auto& st = g_pbft[slot];
+
+    st.prePrepared = true;
+    st.digest = digest;
+    st.data = data;
+
+    g_pbftAcceptedDigest[slot] = digest;
+
+    if (fromExternalClient)
+    {
+        // For benchmark compatibility with current shab_client:
+        // use seq as the "view" field in existing ACK map.
+        BlockKey ackKey{seq, digest};
+        auto& acks = g_blockClientAcks[ackKey];
+        acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
+    }
+
+    CLOG_INFO(Overlay,
+              "[PBFT SEND PRE-PREPARE] view={} seq={} digest={} txns={} source={}",
+              view,
+              seq,
+              hexAbbrev(digest),
+              batch.transactions.size(),
+              fromExternalClient ? "external-client" : "synthetic");
+
+    sendPBFTPrePrepare(view, seq, digest, data);
+
+    // Optional: primary participates in prepare too.
+    // For faithful PBFT paper semantics, primary does not need to send PREPARE.
+    // If you do include primary prepare, use 2f+1 threshold instead of 2f.
+}
+
+
+void
 OverlayManagerImpl::prop()
 {
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
@@ -2482,6 +2628,13 @@ OverlayManagerImpl::prop()
     if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
     {
         txn_count++;
+        return;
+    }
+
+
+    if (PBFT_MODE)
+    {
+        pbftProp();
         return;
     }
 
@@ -3219,6 +3372,81 @@ OverlayManagerImpl::sendExecute(uint64_t view, Hash const& blockHash, std::strin
 
 
 void
+OverlayManagerImpl::sendPBFTPrePrepare(uint64_t pbftView,
+                                        uint64_t seq,
+                                        Hash const& digest,
+                                        std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+
+    msg->customMessage().msgType = CUSTOM_PBFT_PRE_PREPARE;
+
+    // Reuse fields:
+    // view = PBFT sequence number
+    // vp   = PBFT view number
+    msg->customMessage().view = seq;
+    msg->customMessage().vp = pbftView;
+    msg->customMessage().blockHash = digest;
+    msg->customMessage().data = data;
+
+    broadcastMessage(msg);
+
+    CLOG_DEBUG(Overlay,
+               "[PBFT PRE-PREPARE] view={} seq={} digest={}",
+               pbftView, seq, hexAbbrev(digest));
+}
+
+void
+OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
+                                    uint64_t seq,
+                                    Hash const& digest)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+
+    msg->customMessage().msgType = CUSTOM_PBFT_PREPARE;
+    msg->customMessage().view = seq;
+    msg->customMessage().vp = pbftView;
+    msg->customMessage().blockHash = digest;
+
+    broadcastMessage(msg);
+
+    CLOG_DEBUG(Overlay,
+               "[PBFT PREPARE] view={} seq={} digest={}",
+               pbftView, seq, hexAbbrev(digest));
+}
+
+void
+OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
+                                   uint64_t seq,
+                                   Hash const& digest)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+
+    msg->customMessage().msgType = CUSTOM_PBFT_COMMIT;
+    msg->customMessage().view = seq;
+    msg->customMessage().vp = pbftView;
+    msg->customMessage().blockHash = digest;
+
+    broadcastMessage(msg);
+
+    CLOG_DEBUG(Overlay,
+               "[PBFT COMMIT] view={} seq={} digest={}",
+               pbftView, seq, hexAbbrev(digest));
+}
+
+
+
+
+
+
+
+
+
+
+void
 OverlayManagerImpl::sendITHSEcho(uint64_t view, Hash const& blockHash,
                                   std::string const& data)
 {
@@ -3279,6 +3507,216 @@ OverlayManagerImpl::sendITHSCommit(uint64_t view, Hash const& blockHash,
 }
 
 
+void
+OverlayManagerImpl::tryExecutePBFT()
+{
+    while (true)
+    {
+        uint64_t nextSeq = g_pbftLastExecuted + 1;
+        PbftSlotKey slot{g_pbftView, nextSeq};
+
+        auto it = g_pbft.find(slot);
+        if (it == g_pbft.end())
+        {
+            return;
+        }
+
+        auto& st = it->second;
+
+        if (!st.committedLocal || st.executed)
+        {
+            return;
+        }
+
+        TransactionBatch batch = TransactionBatch::deserialize(st.data);
+
+        for (auto const& txn : batch.transactions)
+        {
+            std::istringstream ss(txn.payload);
+
+            std::string op;
+            std::string key;
+            std::string value;
+
+            ss >> op >> key;
+
+            if (op == "READ")
+            {
+                auto kvIt = g_kvStore.find(key);
+                (void)kvIt;
+            }
+            else if (op == "UPDATE" || op == "RMW")
+            {
+                ss >> value;
+                g_kvStore[key] = value;
+            }
+        }
+
+        st.executed = true;
+        g_pbftLastExecuted = nextSeq;
+
+        CLOG_INFO(Overlay,
+                  "[PBFT EXECUTED] view={} seq={} digest={} txns={}",
+                  g_pbftView,
+                  nextSeq,
+                  hexAbbrev(st.digest),
+                  batch.transactions.size());
+
+        // Benchmark-compatible ACK to current shab_client.
+        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+        {
+            ackClientBatchesForBlock(nextSeq, st.digest);
+        }
+
+        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+        {
+            prop();
+        }
+    }
+}
+
+
+
+void
+OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
+                                      Peer::pointer peer)
+{
+    auto const& cm = stellarMsg.customMessage();
+
+    NodeID sender = peer->getPeerID();
+    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+    uint64_t seq = cm.view;
+    uint64_t view = cm.vp;
+    Hash digest = cm.blockHash;
+
+    if (view != g_pbftView)
+    {
+        CLOG_DEBUG(Overlay,
+                   "[PBFT DROP] wrong view msgView={} localView={} seq={}",
+                   view, g_pbftView, seq);
+        return;
+    }
+
+    PbftSlotKey slot{view, seq};
+    auto& st = g_pbft[slot];
+
+    switch (cm.msgType)
+    {
+        case CUSTOM_PBFT_PRE_PREPARE:
+        {
+            auto existing = g_pbftAcceptedDigest.find(slot);
+            if (existing != g_pbftAcceptedDigest.end() &&
+                existing->second != digest)
+            {
+                CLOG_WARNING(Overlay,
+                             "[PBFT REJECT PRE-PREPARE] conflicting digest view={} seq={}",
+                             view, seq);
+                return;
+            }
+
+            if (pbftDigest(cm.data) != digest)
+            {
+                CLOG_WARNING(Overlay,
+                             "[PBFT REJECT PRE-PREPARE] digest mismatch view={} seq={}",
+                             view, seq);
+                return;
+            }
+
+            g_pbftAcceptedDigest[slot] = digest;
+
+            st.prePrepared = true;
+            st.digest = digest;
+            st.data = cm.data;
+
+            if (!st.prepareSent)
+            {
+                st.prepareSent = true;
+
+                // Count own PREPARE.
+                st.prepareVoters.insert(selfID);
+
+                sendPBFTPrepare(view, seq, digest);
+            }
+
+            CLOG_DEBUG(Overlay,
+                       "[PBFT GOT PRE-PREPARE] view={} seq={} digest={}",
+                       view, seq, hexAbbrev(digest));
+            return;
+        }
+
+        case CUSTOM_PBFT_PREPARE:
+        {
+            if (!st.prePrepared || st.digest != digest)
+            {
+                CLOG_DEBUG(Overlay,
+                           "[PBFT WAIT PRE-PREPARE] prepare view={} seq={} digest={}",
+                           view, seq, hexAbbrev(digest));
+                return;
+            }
+
+            st.prepareVoters.insert(sender);
+
+            // Faithful PBFT paper condition:
+            // prepared = pre-prepare + 2f matching PREPAREs.
+            if (!st.prepared && st.prepareVoters.size() >= 2 * f)
+            {
+                st.prepared = true;
+
+                if (!st.commitSent)
+                {
+                    st.commitSent = true;
+                    st.commitVoters.insert(selfID);
+
+                    sendPBFTCommit(view, seq, digest);
+                }
+
+                CLOG_DEBUG(Overlay,
+                           "[PBFT PREPARED] view={} seq={} digest={} prepares={}",
+                           view, seq, hexAbbrev(digest), st.prepareVoters.size());
+            }
+
+            return;
+        }
+
+        case CUSTOM_PBFT_COMMIT:
+        {
+            if (!st.prepared || st.digest != digest)
+            {
+                CLOG_DEBUG(Overlay,
+                           "[PBFT WAIT PREPARED] commit view={} seq={} digest={}",
+                           view, seq, hexAbbrev(digest));
+                return;
+            }
+
+            st.commitVoters.insert(sender);
+
+            if (!st.committedLocal && st.commitVoters.size() >= 2 * f + 1)
+            {
+                st.committedLocal = true;
+
+                CLOG_INFO(Overlay,
+                          "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} commits={}",
+                          view, seq, hexAbbrev(digest), st.commitVoters.size());
+
+                tryExecutePBFT();
+            }
+
+            return;
+        }
+
+        default:
+            return;
+    }
+}
+
+
+
+
+
+
+
+
 
 void
 OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
@@ -3316,6 +3754,16 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     auto const& cm = stellarMsg.customMessage();
     NodeID sender = peer->getPeerID();
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+
+    if (PBFT_MODE &&
+    (cm.msgType == CUSTOM_PBFT_PRE_PREPARE ||
+     cm.msgType == CUSTOM_PBFT_PREPARE ||
+     cm.msgType == CUSTOM_PBFT_COMMIT))
+    {
+        handlePBFTMessage(stellarMsg, peer);
+        return;
+    }
 
 
     auto deliverBufferedForCurrentView = [this]() {
@@ -3665,7 +4113,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 ViewBlockKey dependency{cm.view, cm.blockHash};
                 activatePendingCondReadyForDependency(st, dependency);
 
-                if (!PBFT_MODE)
+                if (!NonPrune_MODE)
                 {
                     for (auto it = g_ps.begin(); it != g_ps.end(); )
                     {
@@ -3722,7 +4170,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 ViewBlockKey dependency{cm.view, cm.blockHash};
                 activatePendingCondReadyForDependency(st, dependency);
 
-                if (!PBFT_MODE)
+                if (!NonPrune_MODE)
                 {
                     for (auto it = g_ps.begin(); it != g_ps.end(); )
                     {
@@ -3756,7 +4204,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 ViewBlockKey dependency{cm.view, cm.blockHash};
                 activatePendingCondReadyForDependency(st, dependency);
 
-                if (!PBFT_MODE)
+                if (!NonPrune_MODE)
                 {
                     for (auto it = g_ps.begin(); it != g_ps.end(); )
                     {
