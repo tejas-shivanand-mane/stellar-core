@@ -63,7 +63,7 @@ namespace {
 static bool NonPrune_MODE = false;
 static bool ITHS_MODE = false;
 
-static bool PBFT_MODE = true;
+static bool PBFT_MODE = false;
 
 
 
@@ -4360,7 +4360,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             rememberBlockData(cm.view, cm.blockHash, cm.data);
 
-            tryCommitShabdizBlock(cm.view, cm.blockHash);
+            // tryCommitShabdizBlock(cm.view, cm.blockHash);
 
             CLOG_DEBUG(Overlay,
                     "[RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={} parentView={} parentBlock={}",
