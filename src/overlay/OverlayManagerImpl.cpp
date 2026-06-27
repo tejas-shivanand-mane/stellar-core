@@ -748,6 +748,13 @@ static std::unordered_map<BlockKey,
                           std::vector<ClientAck>,
                           BlockKeyHash> g_blockClientAcks;
 
+
+// Full batch data is carried only by PROPOSE.
+// PREPARE/COMMIT become digest-only and execution reads data from here.
+static std::unordered_map<BlockKey,
+                          std::string,
+                          BlockKeyHash> g_blockData;
+
 // NodeID hashing helpers
 struct NodeIDHash {
     size_t operator()(NodeID const& n) const noexcept {
@@ -1027,6 +1034,35 @@ rememberLocalPrepared(uint64_t view, Hash const& block)
     }
 }
 
+static void
+rememberBlockData(uint64_t view, Hash const& blockHash, std::string const& data)
+{
+    if (data.empty())
+    {
+        return;
+    }
+
+    BlockKey key{view, blockHash};
+
+    auto it = g_blockData.find(key);
+    if (it == g_blockData.end())
+    {
+        g_blockData.emplace(key, data);
+        return;
+    }
+
+    if (it->second != data)
+    {
+        CLOG_WARNING(Overlay,
+                     "[BLOCK DATA CONFLICT] view={} block={} oldBytes={} newBytes={}",
+                     view,
+                     hexAbbrev(blockHash),
+                     it->second.size(),
+                     data.size());
+    }
+}
+
+
 
 void cleanupOldTxnStates()
 {
@@ -1103,6 +1139,31 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
+
+
+    // ================================================================
+    // Full proposal data cache.
+    // Safe to remove old committed/proposed block data far behind the
+    // latest committed view.
+    // ================================================================
+    for (auto it = g_blockData.begin(); it != g_blockData.end(); )
+    {
+        if (it->first.view < cutoffView)
+        {
+            it = g_blockData.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+
+
+
+
+
+
     // ================================================================
     // Future-message buffer.
     // IMPORTANT: do NOT clear all of g_futureFastMsgs.
@@ -1203,6 +1264,7 @@ void cleanupOldTxnStates()
         g_ps.rehash(0);
         g_blockClientAcks.rehash(0);
         g_fastProposedViews.rehash(0);
+        g_blockData.rehash(0);
 
     }
 
@@ -2790,11 +2852,14 @@ std::vector<ClientAck> clientAcks;
         }
 
         std::string serializedBatch = batch.serialize();
+
+        rememberBlockData(currentView, blockHash, serializedBatch);
+
         CLOG_DEBUG(Overlay,
-          "[BATCH SIZE] path=fast txns={} serialized_batch_bytes={} bytes_per_txn={}",
-          batch.transactions.size(),
-          serializedBatch.size(),
-          batch.transactions.empty() ? 0 : serializedBatch.size() / batch.transactions.size());
+        "[BATCH SIZE] path=fast txns={} serialized_batch_bytes={} bytes_per_txn={}",
+        batch.transactions.size(),
+        serializedBatch.size(),
+        batch.transactions.empty() ? 0 : serializedBatch.size() / batch.transactions.size());
 
         auto msg = makeProposalMessage(
             ITHS_MODE,
@@ -2802,7 +2867,7 @@ std::vector<ClientAck> clientAcks;
             blockHash,
             latestCommittedView,
             latestCommittedBlock,
-            batch.serialize());
+            serializedBatch);
 
 
 
@@ -2881,7 +2946,7 @@ std::vector<ClientAck> clientAcks;
 
                 st.prepareVoters.insert(selfID);
 
-                sendPrepare(cm.view, cm.blockHash, cm.data);
+                sendPrepare(cm.view, cm.blockHash, "");
 
                 CLOG_DEBUG(Overlay,
                           "[SELF-LOCAL SEND PREPARE] block={} view={} parentView={} parentBlock={} prepareVotes={}",
@@ -3394,31 +3459,49 @@ OverlayManagerImpl::recvFloodedMsgID(Peer::pointer peer, Hash const& msgID)
 void
 OverlayManagerImpl::sendPrepare(uint64_t view, Hash const& blockHash, std::string const& data)
 {
+    (void)data; // Shabdiz payload optimization: PREPARE is digest-only.
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
 
     msg->customMessage().msgType   = CUSTOM_PREPARE;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // Do NOT attach full batch data here.
+    msg->customMessage().data.clear();
 
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "Broadcast PREPARE for block {} view {}", hexAbbrev(blockHash), view);
+
+    CLOG_DEBUG(Overlay,
+               "[SHABDIZ SEND PREPARE] view={} block={} data_bytes=0",
+               view,
+               hexAbbrev(blockHash));
 }
 
 void
-OverlayManagerImpl::sendCommit(uint64_t view, Hash const& blockHash, std::string const& data)
+OverlayManagerImpl::sendCommit(uint64_t view,
+                               Hash const& blockHash,
+                               std::string const& data)
 {
+    (void)data; // Shabdiz payload optimization: COMMIT is digest-only.
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
 
     msg->customMessage().msgType   = CUSTOM_COMMIT;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // Do NOT attach full batch data here.
+    msg->customMessage().data.clear();
 
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "Broadcast COMMIT for block {} view {}", hexAbbrev(blockHash), view);
+
+    CLOG_DEBUG(Overlay,
+               "[SHABDIZ SEND COMMIT] view={} block={} data_bytes=0",
+               view,
+               hexAbbrev(blockHash));
 }
 
 void
@@ -4059,7 +4142,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         msg->customMessage().vp = maxView;
         msg->customMessage().bp = maxBlock;
 
-        msg->customMessage().data = batch.serialize();
+        std::string serializedBatch = batch.serialize();
+
+        rememberBlockData(currentView, newBlock, serializedBatch);
+
+        msg->customMessage().data = serializedBatch;
 
 
 
@@ -4144,6 +4231,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             CLOG_INFO(Overlay, "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of elements: {}", getRSS_MB(),g_txn.size());
 
+            rememberBlockData(cm.view, cm.blockHash, cm.data);
 
             CLOG_DEBUG(Overlay,
                     "[RECV PROPOSE] self={} sender={} view={} block={} currentView={} latestCommittedView={} parentView={} parentBlock={}",
@@ -4202,7 +4290,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_ps.insert(BlockKey{cm.view, cm.blockHash});
 
                 st.prepareVoters.insert(selfID);
-                sendPrepare(cm.view, cm.blockHash, cm.data);
+                sendPrepare(cm.view, cm.blockHash, "");
 
                 CLOG_DEBUG(Overlay,
                         "[SEND PREPARE] view={} block={} prepareVotes={} reason={}",
@@ -4251,7 +4339,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data);
+                sendCommit(cm.view, cm.blockHash, "");
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4309,7 +4397,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data);
+                sendCommit(cm.view, cm.blockHash, "");
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4363,7 +4451,21 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                 }
 
-                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                auto dataIt = g_blockData.find(BlockKey{cm.view, cm.blockHash});
+                if (dataIt == g_blockData.end())
+                {
+                    CLOG_WARNING(Overlay,
+                                "[FAST COMMIT WAIT DATA] missing proposal data view={} block={} commits={}",
+                                cm.view,
+                                hexAbbrev(cm.blockHash),
+                                st.commitVoters.size());
+                    break;
+                }
+
+                TransactionBatch batch = TransactionBatch::deserialize(dataIt->second);
+
+
+
                 for (auto const& txn : batch.transactions)
                 {
                     std::istringstream ss(txn.payload);
