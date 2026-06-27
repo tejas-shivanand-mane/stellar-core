@@ -2783,6 +2783,24 @@ OverlayManagerImpl::prop()
     bool canUseFastPath =
         (latestCommittedView == currentView - 1) && !force_collect;
 
+
+    CLOG_INFO(Overlay,
+        "[PROP DECISION] self={} currentView={} latestCommittedView={} "
+        "expectedPrev={} force_collect={} collectWindowActive={} "
+        "shabdizStartTimeSet={} collectWindowArmed={} canUseFastPath={} "
+        "clientQueue={} sendCustom={}",
+        shortID,
+        currentView,
+        latestCommittedView,
+        currentView - 1,
+        force_collect,
+        collectWindowActive,
+        shabdizStartTimeSet,
+        collectWindowArmed,
+        canUseFastPath,
+        clientQueueSize,
+        mApp.getConfig().SEND_CUSTOM_MESSAGE);
+
     if (canUseFastPath)
     {
         // Avoid duplicate proposals for the same view.
@@ -3004,6 +3022,21 @@ std::vector<ClientAck> clientAcks;
     CLOG_INFO(Overlay,
               "Leader initiating COLLECT for view {}",
               currentView);
+
+    CLOG_INFO(Overlay,
+            "[COLLECT START DEBUG] self={} currentView={} latestCommittedView={} "
+            "expectedPrev={} force_collect={} collectWindowActive={} "
+            "shabdizStartTimeSet={} collectWindowArmed={} clientQueue={} sendCustom={}",
+            shortID,
+            currentView,
+            latestCommittedView,
+            currentView - 1,
+            force_collect,
+            collectWindowActive,
+            shabdizStartTimeSet,
+            collectWindowArmed,
+            clientQueueSize,
+            mApp.getConfig().SEND_CUSTOM_MESSAGE);
 
     broadcastMessage(msg);
 
