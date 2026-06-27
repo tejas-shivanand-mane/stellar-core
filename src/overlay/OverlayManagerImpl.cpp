@@ -4597,7 +4597,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
             tryCommitShabdizBlock(cm.view, cm.blockHash);
 
-
+        }
         // ================================================================
         case CUSTOM_COLLECT:
             CLOG_INFO(Overlay, "Received COLLECT for view {} from {}",
