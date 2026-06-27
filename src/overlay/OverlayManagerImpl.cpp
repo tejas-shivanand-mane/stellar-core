@@ -63,7 +63,7 @@ namespace {
 static bool NonPrune_MODE = false;
 static bool ITHS_MODE = false;
 
-static bool PBFT_MODE = true;
+static bool PBFT_MODE = false;
 
 
 
@@ -922,6 +922,9 @@ struct TxnState {
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> prepareVoters;
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> commitVoters;
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> executeVoters;
+
+
+    std::string data;
 
 
     // ====== For collection / Bracha-like broadcast ======
@@ -4198,11 +4201,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 st.preparedSent = true;
                 st.preparedView = cm.view;
                 st.preparedBlock = cm.blockHash;
+                
+                st.data = std::move(cm.data);
+
 
                 g_ps.insert(BlockKey{cm.view, cm.blockHash});
 
                 st.prepareVoters.insert(selfID);
-                sendPrepare(cm.view, cm.blockHash, cm.data);
+                sendPrepare(cm.view, cm.blockHash, "");
 
                 CLOG_DEBUG(Overlay,
                         "[SEND PREPARE] view={} block={} prepareVotes={} reason={}",
@@ -4251,7 +4257,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data);
+                sendCommit(cm.view, cm.blockHash, "");
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4309,7 +4315,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, cm.data);
+                sendCommit(cm.view, cm.blockHash, "");
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4339,6 +4345,21 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             // Final commit: 2f+1 COMMITs and not already committed this view.
             if (st.commitVoters.size() >= 2 * f + 1 && latestCommittedView < currentView)
             {
+
+                if (st.data.empty())
+
+                {
+                    st.committedView  = cm.view;
+                    st.committedBlock = cm.blockHash;
+
+                    CLOG_INFO(Overlay,
+                        "[FAST COMMITTED] MISSING DATA");
+
+                    break;
+
+                }
+
+
                 st.committedView = cm.view;
                 st.committedBlock = cm.blockHash;
 
@@ -4363,7 +4384,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                 }
 
-                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                // TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                TransactionBatch batch = TransactionBatch::deserialize(st.data);
+
                 for (auto const& txn : batch.transactions)
                 {
                     std::istringstream ss(txn.payload);
