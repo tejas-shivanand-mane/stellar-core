@@ -2784,7 +2784,7 @@ OverlayManagerImpl::prop()
         (latestCommittedView == currentView - 1) && !force_collect;
 
 
-    CLOG_INFO(Overlay,
+    CLOG_DEBUG(Overlay,
         "[PROP DECISION] self={} currentView={} latestCommittedView={} "
         "expectedPrev={} force_collect={} collectWindowActive={} "
         "shabdizStartTimeSet={} collectWindowArmed={} canUseFastPath={} "
