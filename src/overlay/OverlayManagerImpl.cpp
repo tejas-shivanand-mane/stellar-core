@@ -3700,6 +3700,18 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
 
         case CUSTOM_PBFT_COMMIT:
         {
+
+            CLOG_INFO(Overlay,
+                    "[PBFT COMMIT VOTE] view={} seq={} digest={} commits={} threshold={} N={} f={}",
+                    view,
+                    seq,
+                    hexAbbrev(digest),
+                    st.commitVoters.size(),
+                    2 * f + 1,
+                    N,
+                    f);
+
+
             if (!st.prepared || st.digest != digest)
             {
                 CLOG_DEBUG(Overlay,
@@ -3746,6 +3758,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
+
     // In any handler where you need the index:
     auto computeNodeIndex = [this]() {
         NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
@@ -3773,6 +3786,18 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     auto const& cm = stellarMsg.customMessage();
     NodeID sender = peer->getPeerID();
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+
+
+
+
+    if (N ==0)
+    {
+        N = getAuthenticatedPeersCount() + 1;
+        f = (N - 1) / 3;
+    }
+
+
+
 
 
     if (PBFT_MODE &&
@@ -3842,12 +3867,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
     BlockKey key{cm.view, cm.blockHash};
     auto& st = g_txn[key];
-
-    if (N ==0)
-    {
-        N = getAuthenticatedPeersCount() + 1;
-        f = (N - 1) / 3;
-    }
 
 
 
