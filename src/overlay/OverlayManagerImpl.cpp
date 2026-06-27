@@ -3657,7 +3657,7 @@ OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& dige
     {
         st.prepared = true;
 
-        CLOG_INFO(Overlay,
+        CLOG_DEBUG(Overlay,
                   "[PBFT PREPARED] view={} seq={} digest={} prepares={} threshold={} N={} f={}",
                   view,
                   seq,
@@ -3680,7 +3680,7 @@ OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& dige
 
     size_t commitCount = pbftCommitCount(st, digest);
 
-    CLOG_INFO(Overlay,
+    CLOG_DEBUG(Overlay,
               "[PBFT COMMIT CHECK] view={} seq={} digest={} commits={} threshold={} prepared={} N={} f={}",
               view,
               seq,
@@ -3772,7 +3772,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
                 sendPBFTPrepare(view, seq, digest);
             }
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[PBFT GOT PRE-PREPARE] view={} seq={} digest={} prepares_buffered={} commits_buffered={}",
                     view,
                     seq,
@@ -3790,7 +3790,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
         {
             bool inserted = st.prepareVotersByDigest[digest].insert(sender).second;
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[PBFT PREPARE VOTE] view={} seq={} digest={} inserted={} prepares={} threshold={} prePrepared={} N={} f={}",
                     view,
                     seq,
@@ -3812,7 +3812,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
         {
             bool inserted = st.commitVotersByDigest[digest].insert(sender).second;
 
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "[PBFT COMMIT VOTE] view={} seq={} digest={} inserted={} commits={} threshold={} prepared={} N={} f={}",
                     view,
                     seq,
