@@ -3482,7 +3482,7 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
 
-    msg->customMessage().data = data;
+    msg->customMessage().data = "";
 
 
     broadcastMessage(msg);
@@ -3507,7 +3507,7 @@ OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
     msg->customMessage().blockHash = digest;
 
 
-    msg->customMessage().data = data;
+    msg->customMessage().data = "";
 
 
     broadcastMessage(msg);
