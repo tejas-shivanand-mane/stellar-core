@@ -63,7 +63,7 @@ namespace {
 static bool NonPrune_MODE = false;
 static bool ITHS_MODE = false;
 
-static bool PBFT_MODE = false;
+static bool PBFT_MODE = true;
 
 
 
@@ -2635,6 +2635,13 @@ OverlayManagerImpl::pbftProp()
     std::string data = batch.serialize();
     Hash digest = pbftDigest(data);
 
+
+    CLOG_INFO(Overlay,
+          "[PBFT BATCH SIZE] txns={} data_bytes={} bytes_per_txn={}",
+          batch.transactions.size(),
+          data.size(),
+          batch.transactions.empty() ? 0 : data.size() / batch.transactions.size());
+
     uint64_t view = g_pbftView;
     uint64_t seq = g_pbftNextSeq++;
 
@@ -3464,7 +3471,8 @@ OverlayManagerImpl::sendPBFTPrePrepare(uint64_t pbftView,
 void
 OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
                                     uint64_t seq,
-                                    Hash const& digest)
+                                    Hash const& digest,
+                                    std::string const& data)
 {
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
@@ -3473,6 +3481,9 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
     msg->customMessage().view = seq;
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
+
+    msg->customMessage().data = data;
+
 
     broadcastMessage(msg);
 
@@ -3484,7 +3495,8 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
 void
 OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
                                    uint64_t seq,
-                                   Hash const& digest)
+                                   Hash const& digest,
+                                    std::string const& data)
 {
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
@@ -3493,6 +3505,10 @@ OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
     msg->customMessage().view = seq;
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
+
+
+    msg->customMessage().data = data;
+
 
     broadcastMessage(msg);
 
@@ -3674,7 +3690,7 @@ OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& dige
             st.commitVotersByDigest[digest].insert(
                 mApp.getConfig().NODE_SEED.getPublicKey());
 
-            sendPBFTCommit(view, seq, digest);
+            sendPBFTCommit(view, seq, digest, st.data);
         }
     }
 
@@ -3769,7 +3785,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
                 // Count own PREPARE.
                 st.prepareVotersByDigest[digest].insert(selfID);
 
-                sendPBFTPrepare(view, seq, digest);
+                sendPBFTPrepare(view, seq, digest, cm.data);
             }
 
             CLOG_DEBUG(Overlay,

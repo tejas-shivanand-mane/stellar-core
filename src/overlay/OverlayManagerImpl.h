@@ -143,8 +143,8 @@ class OverlayManagerImpl : public OverlayManager
     void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
     void sendPBFTPrePrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
-    void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash) override;
-    void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash) override;
+    void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
+    void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
 
     void sendITHSEcho( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendITHSAccept( uint64_t view, Hash const& blockHash, std::string const& data) override;
