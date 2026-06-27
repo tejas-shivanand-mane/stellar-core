@@ -111,6 +111,7 @@ class OverlayManagerImpl : public OverlayManager
                            std::shared_ptr<Peer> peer);
     void tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& digest);
 
+    void tryCommitShabdizBlock(uint64_t view, Hash const& blockHash);
 
     void updateTimerAndMaybeDropRandomPeer(bool shouldDrop);
     VirtualTimer mTimer;
