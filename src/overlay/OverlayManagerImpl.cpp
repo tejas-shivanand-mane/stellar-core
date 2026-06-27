@@ -61,7 +61,7 @@ namespace {
 
 
 static bool NonPrune_MODE = false;
-static bool ITHS_MODE = false;
+static bool ITHS_MODE = true;
 
 static bool PBFT_MODE = false;
 
@@ -2917,7 +2917,7 @@ std::vector<ClientAck> clientAcks;
                 st.ithsEchoSent = true;
                 st.ithsEchoVoters.insert(selfID);
 
-                sendITHSEcho(cm.view, cm.blockHash, cm.data);
+                sendITHSEcho(cm.view, cm.blockHash, "");
 
                 CLOG_DEBUG(Overlay,
                         "[IT-HS SELF-LOCAL SEND ECHO] block={} view={} proposalLockView={} localLockView={}",
@@ -3609,72 +3609,111 @@ OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
 
 
 
-
-
-
-
-
-
-
 void
-OverlayManagerImpl::sendITHSEcho(uint64_t view, Hash const& blockHash,
-                                  std::string const& data)
+OverlayManagerImpl::sendITHSEcho(uint64_t view,
+                                 Hash const& blockHash,
+                                 std::string const& data)
 {
+    (void)data;
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
+
     msg->customMessage().msgType   = CUSTOM_ITHS_ECHO;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // IT-HS payload optimization:
+    // ECHO carries only the value identifier, not the full batch.
+    msg->customMessage().data.clear();
+
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ECHO block {} view {}",
-               hexAbbrev(blockHash), view);
+
+    CLOG_DEBUG(Overlay,
+               "[IT-HS SEND ECHO] block={} view={} data_bytes=0",
+               hexAbbrev(blockHash),
+               view);
 }
 
+
 void
-OverlayManagerImpl::sendITHSAccept(uint64_t view, Hash const& blockHash,
-                                    std::string const& data)
+OverlayManagerImpl::sendITHSAccept(uint64_t view,
+                                   Hash const& blockHash,
+                                   std::string const& data)
 {
+    (void)data;
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
+
     msg->customMessage().msgType   = CUSTOM_ITHS_ACCEPT;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // ACCEPT carries only the value identifier.
+    msg->customMessage().data.clear();
+
     broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ACCEPT block {} view {}",
-               hexAbbrev(blockHash), view);
+
+    CLOG_DEBUG(Overlay,
+               "[IT-HS SEND ACCEPT] block={} view={} data_bytes=0",
+               hexAbbrev(blockHash),
+               view);
 }
 
+
 void
-OverlayManagerImpl::sendITHSLock(uint64_t view, Hash const& blockHash,
-                                  std::string const& data)
+OverlayManagerImpl::sendITHSLock(uint64_t view,
+                                 Hash const& blockHash,
+                                 std::string const& data)
 {
+    (void)data;
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
+
     msg->customMessage().msgType   = CUSTOM_ITHS_LOCK;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // LOCK carries only the value identifier.
+    msg->customMessage().data.clear();
+
     broadcastMessage(msg);
+
+    CLOG_DEBUG(Overlay,
+               "[IT-HS SEND LOCK] block={} view={} data_bytes=0",
+               hexAbbrev(blockHash),
+               view);
 }
 
 void
-OverlayManagerImpl::sendITHSCommit(uint64_t view, Hash const& blockHash,
+OverlayManagerImpl::sendITHSCommit(uint64_t view,
+                                   Hash const& blockHash,
                                    std::string const& data)
 {
+    (void)data;
+
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
+
     msg->customMessage().msgType   = CUSTOM_ITHS_COMMIT;
     msg->customMessage().view      = view;
     msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data      = data;
+
+    // COMMIT carries only the value identifier.
+    msg->customMessage().data.clear();
 
     broadcastMessage(msg);
 
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast COMMIT block {} view {}",
-               hexAbbrev(blockHash), view);
+    CLOG_DEBUG(Overlay,
+               "[IT-HS SEND COMMIT] block={} view={} data_bytes=0",
+               hexAbbrev(blockHash),
+               view);
 }
+
+
+
 
 
 void
@@ -4845,6 +4884,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_ITHS_PROPOSE:
+            rememberBlockData(cm.view, cm.blockHash, cm.data);
             if (cm.view == currentView)
             {
                 CLOG_DEBUG(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
@@ -4862,7 +4902,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                     st.ithsEchoSent = true;
                     st.ithsEchoVoters.insert(selfID);
-                    sendITHSEcho(cm.view, cm.blockHash, cm.data);
+                    sendITHSEcho(cm.view, cm.blockHash, "");
                 }
                 else
                 {
@@ -4895,7 +4935,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsAcceptSent = true;
                     st.ithsAcceptVoters.insert(selfID);
 
-                    sendITHSAccept(cm.view, cm.blockHash, cm.data);
+                    sendITHSAccept(cm.view, cm.blockHash, "");
 
                     CLOG_DEBUG(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
                             hexAbbrev(cm.blockHash), cm.view);
@@ -4921,7 +4961,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsAcceptSent = true;
                     st.ithsAcceptVoters.insert(selfID);
 
-                    sendITHSAccept(cm.view, cm.blockHash, cm.data);
+                    sendITHSAccept(cm.view, cm.blockHash, "");
 
                     CLOG_DEBUG(Overlay,
                             "[IT-HS] Boosted ACCEPT block {} view {}",
@@ -4942,7 +4982,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsLockSent = true;
                     st.ithsLockVoters.insert(selfID);
 
-                    sendITHSLock(cm.view, cm.blockHash, cm.data);
+                    sendITHSLock(cm.view, cm.blockHash, "");
 
                     CLOG_DEBUG(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
                             cm.view, hexAbbrev(cm.blockHash));
@@ -4972,7 +5012,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     st.ithsCommitSent = true;
                     st.ithsCommitVoters.insert(selfID);
 
-                    sendITHSCommit(cm.view, cm.blockHash, cm.data);
+                    sendITHSCommit(cm.view, cm.blockHash, "");
 
                     CLOG_DEBUG(Overlay,
                             "[IT-HS] Sent COMMIT after LOCK quorum block {} view {}",
@@ -5018,7 +5058,19 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 latestCommittedView  = cm.view;
                 latestCommittedBlock = cm.blockHash;
 
-                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
+                auto dataIt = g_blockData.find(BlockKey{cm.view, cm.blockHash});
+                if (dataIt == g_blockData.end())
+                {
+                    CLOG_WARNING(Overlay,
+                                "[IT-HS COMMIT WAIT DATA] missing proposal data view={} block={} commits={}",
+                                cm.view,
+                                hexAbbrev(cm.blockHash),
+                                st.ithsCommitVoters.size());
+                    break;
+                }
+
+                TransactionBatch batch = TransactionBatch::deserialize(dataIt->second);
+
                 for (auto const& txn : batch.transactions)
                 {
                     std::istringstream ss(txn.payload);
