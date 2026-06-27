@@ -781,6 +781,20 @@ struct PbftSlotKeyHash
     }
 };
 
+struct HashHash
+{
+    size_t operator()(Hash const& h) const noexcept
+    {
+        size_t out = 0;
+        for (auto b : h)
+        {
+            out = (out * 131) ^ b;
+        }
+        return out;
+    }
+};
+
+
 struct PbftState
 {
     bool prePrepared = false;
@@ -793,9 +807,40 @@ struct PbftState
     Hash digest{};
     std::string data;
 
-    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> prepareVoters;
-    std::unordered_set<NodeID, NodeIDHash, NodeIDEq> commitVoters;
+    std::unordered_map<Hash,
+                    std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
+                    HashHash> prepareVotersByDigest;
+
+    std::unordered_map<Hash,
+                    std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
+                    HashHash> commitVotersByDigest;
 };
+
+
+static size_t
+pbftPrepareCount(PbftState const& st, Hash const& digest)
+{
+    auto it = st.prepareVotersByDigest.find(digest);
+    if (it == st.prepareVotersByDigest.end())
+    {
+        return 0;
+    }
+    return it->second.size();
+}
+
+static size_t
+pbftCommitCount(PbftState const& st, Hash const& digest)
+{
+    auto it = st.commitVotersByDigest.find(digest);
+    if (it == st.commitVotersByDigest.end())
+    {
+        return 0;
+    }
+    return it->second.size();
+}
+
+
+
 
 static std::unordered_map<PbftSlotKey, PbftState, PbftSlotKeyHash> g_pbft;
 static std::unordered_map<PbftSlotKey, Hash, PbftSlotKeyHash> g_pbftAcceptedDigest;
@@ -3595,6 +3640,73 @@ OverlayManagerImpl::tryExecutePBFT()
 }
 
 
+void
+OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& digest)
+{
+    PbftSlotKey slot{view, seq};
+    auto& st = g_pbft[slot];
+
+    if (!st.prePrepared || st.digest != digest)
+    {
+        return;
+    }
+
+    size_t prepareCount = pbftPrepareCount(st, digest);
+
+    if (!st.prepared && prepareCount >= 2 * f)
+    {
+        st.prepared = true;
+
+        CLOG_INFO(Overlay,
+                  "[PBFT PREPARED] view={} seq={} digest={} prepares={} threshold={} N={} f={}",
+                  view,
+                  seq,
+                  hexAbbrev(digest),
+                  prepareCount,
+                  2 * f,
+                  N,
+                  f);
+
+        if (!st.commitSent)
+        {
+            st.commitSent = true;
+
+            st.commitVotersByDigest[digest].insert(
+                mApp.getConfig().NODE_SEED.getPublicKey());
+
+            sendPBFTCommit(view, seq, digest);
+        }
+    }
+
+    size_t commitCount = pbftCommitCount(st, digest);
+
+    CLOG_INFO(Overlay,
+              "[PBFT COMMIT CHECK] view={} seq={} digest={} commits={} threshold={} prepared={} N={} f={}",
+              view,
+              seq,
+              hexAbbrev(digest),
+              commitCount,
+              2 * f + 1,
+              st.prepared,
+              N,
+              f);
+
+    if (st.prepared &&
+        !st.committedLocal &&
+        commitCount >= 2 * f + 1)
+    {
+        st.committedLocal = true;
+
+        CLOG_INFO(Overlay,
+                  "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} commits={}",
+                  view,
+                  seq,
+                  hexAbbrev(digest),
+                  commitCount);
+
+        tryExecutePBFT();
+    }
+}
 
 void
 OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
@@ -3629,16 +3741,18 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
                 existing->second != digest)
             {
                 CLOG_WARNING(Overlay,
-                             "[PBFT REJECT PRE-PREPARE] conflicting digest view={} seq={}",
-                             view, seq);
+                            "[PBFT REJECT PRE-PREPARE] conflicting digest view={} seq={}",
+                            view,
+                            seq);
                 return;
             }
 
             if (pbftDigest(cm.data) != digest)
             {
                 CLOG_WARNING(Overlay,
-                             "[PBFT REJECT PRE-PREPARE] digest mismatch view={} seq={}",
-                             view, seq);
+                            "[PBFT REJECT PRE-PREPARE] digest mismatch view={} seq={}",
+                            view,
+                            seq);
                 return;
             }
 
@@ -3653,85 +3767,65 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
                 st.prepareSent = true;
 
                 // Count own PREPARE.
-                st.prepareVoters.insert(selfID);
+                st.prepareVotersByDigest[digest].insert(selfID);
 
                 sendPBFTPrepare(view, seq, digest);
             }
 
-            CLOG_DEBUG(Overlay,
-                       "[PBFT GOT PRE-PREPARE] view={} seq={} digest={}",
-                       view, seq, hexAbbrev(digest));
+            CLOG_INFO(Overlay,
+                    "[PBFT GOT PRE-PREPARE] view={} seq={} digest={} prepares_buffered={} commits_buffered={}",
+                    view,
+                    seq,
+                    hexAbbrev(digest),
+                    pbftPrepareCount(st, digest),
+                    pbftCommitCount(st, digest));
+
+            // Important: previously buffered PREPARE/COMMIT votes may now be usable.
+            tryAdvancePBFT(view, seq, digest);
+
             return;
         }
 
         case CUSTOM_PBFT_PREPARE:
         {
-            if (!st.prePrepared || st.digest != digest)
-            {
-                CLOG_DEBUG(Overlay,
-                           "[PBFT WAIT PRE-PREPARE] prepare view={} seq={} digest={}",
-                           view, seq, hexAbbrev(digest));
-                return;
-            }
+            bool inserted = st.prepareVotersByDigest[digest].insert(sender).second;
 
-            st.prepareVoters.insert(sender);
+            CLOG_INFO(Overlay,
+                    "[PBFT PREPARE VOTE] view={} seq={} digest={} inserted={} prepares={} threshold={} prePrepared={} N={} f={}",
+                    view,
+                    seq,
+                    hexAbbrev(digest),
+                    inserted,
+                    pbftPrepareCount(st, digest),
+                    2 * f,
+                    st.prePrepared,
+                    N,
+                    f);
 
-            // Faithful PBFT paper condition:
-            // prepared = pre-prepare + 2f matching PREPAREs.
-            if (!st.prepared && st.prepareVoters.size() >= 2 * f)
-            {
-                st.prepared = true;
-
-                if (!st.commitSent)
-                {
-                    st.commitSent = true;
-                    st.commitVoters.insert(selfID);
-
-                    sendPBFTCommit(view, seq, digest);
-                }
-
-                CLOG_DEBUG(Overlay,
-                           "[PBFT PREPARED] view={} seq={} digest={} prepares={}",
-                           view, seq, hexAbbrev(digest), st.prepareVoters.size());
-            }
+            // Do not drop early PREPAREs. Store them and advance if possible.
+            tryAdvancePBFT(view, seq, digest);
 
             return;
         }
 
         case CUSTOM_PBFT_COMMIT:
         {
+            bool inserted = st.commitVotersByDigest[digest].insert(sender).second;
 
             CLOG_INFO(Overlay,
-                    "[PBFT COMMIT VOTE] view={} seq={} digest={} commits={} threshold={} N={} f={}",
+                    "[PBFT COMMIT VOTE] view={} seq={} digest={} inserted={} commits={} threshold={} prepared={} N={} f={}",
                     view,
                     seq,
                     hexAbbrev(digest),
-                    st.commitVoters.size(),
+                    inserted,
+                    pbftCommitCount(st, digest),
                     2 * f + 1,
+                    st.prepared,
                     N,
                     f);
 
-
-            if (!st.prepared || st.digest != digest)
-            {
-                CLOG_DEBUG(Overlay,
-                           "[PBFT WAIT PREPARED] commit view={} seq={} digest={}",
-                           view, seq, hexAbbrev(digest));
-                return;
-            }
-
-            st.commitVoters.insert(sender);
-
-            if (!st.committedLocal && st.commitVoters.size() >= 2 * f + 1)
-            {
-                st.committedLocal = true;
-
-                CLOG_INFO(Overlay,
-                          "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} commits={}",
-                          view, seq, hexAbbrev(digest), st.commitVoters.size());
-
-                tryExecutePBFT();
-            }
+            // Do not drop early COMMITs. Store them and advance if possible.
+            tryAdvancePBFT(view, seq, digest);
 
             return;
         }

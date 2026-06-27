@@ -109,7 +109,7 @@ class OverlayManagerImpl : public OverlayManager
 
     void handlePBFTMessage(StellarMessage const& stellarMsg,
                            std::shared_ptr<Peer> peer);
-
+    void tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& digest);
 
 
     void updateTimerAndMaybeDropRandomPeer(bool shouldDrop);
