@@ -2530,6 +2530,10 @@ makeProposalMessage(bool ithsMode,
 
     msg->customMessage().data = data;
 
+
+
+    
+
     return msg;
 }
 
@@ -2808,6 +2812,7 @@ std::vector<ClientAck> clientAcks;
             batch.serialize());
 
 
+        
 
 
         CLOG_INFO(Overlay,
@@ -2827,6 +2832,10 @@ std::vector<ClientAck> clientAcks;
             shabdizStartTimeSet = true;
         }
 
+
+
+
+
         broadcastMessage(msg);
 
         // =====================================================
@@ -2834,6 +2843,12 @@ std::vector<ClientAck> clientAcks;
         // =====================================================
         auto& st = g_txn[key];
         auto const& cm = msg->customMessage();
+
+
+        // Important for cached-data version.
+        // The leader does not enter case CUSTOM_PROPOSE for its own proposal.
+        st.data = serializedBatch;
+
 
         if (ITHS_MODE)
         {
@@ -4065,6 +4080,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         msg->customMessage().data = batch.serialize();
 
 
+        auto& proposedState = g_txn[newKey];
+        proposedState.data = msg->customMessage().data;
 
         broadcastMessage(msg);
 
@@ -4202,7 +4219,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 st.preparedView = cm.view;
                 st.preparedBlock = cm.blockHash;
                 
-                st.data = std::move(cm.data);
+                st.data = cm.data;
 
 
                 g_ps.insert(BlockKey{cm.view, cm.blockHash});
