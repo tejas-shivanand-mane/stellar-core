@@ -924,9 +924,6 @@ struct TxnState {
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> executeVoters;
 
 
-    std::string data;
-
-
     // ====== For collection / Bracha-like broadcast ======
 
     // Which origin/value I already echoed.
@@ -2530,10 +2527,6 @@ makeProposalMessage(bool ithsMode,
 
     msg->customMessage().data = data;
 
-
-
-    
-
     return msg;
 }
 
@@ -2812,7 +2805,6 @@ std::vector<ClientAck> clientAcks;
             batch.serialize());
 
 
-        
 
 
         CLOG_INFO(Overlay,
@@ -2832,10 +2824,6 @@ std::vector<ClientAck> clientAcks;
             shabdizStartTimeSet = true;
         }
 
-
-
-
-
         broadcastMessage(msg);
 
         // =====================================================
@@ -2843,12 +2831,6 @@ std::vector<ClientAck> clientAcks;
         // =====================================================
         auto& st = g_txn[key];
         auto const& cm = msg->customMessage();
-
-
-        // Important for cached-data version.
-        // The leader does not enter case CUSTOM_PROPOSE for its own proposal.
-        st.data = serializedBatch;
-
 
         if (ITHS_MODE)
         {
@@ -3500,7 +3482,7 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView,
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
 
-    msg->customMessage().data = "";
+    msg->customMessage().data = data;
 
 
     broadcastMessage(msg);
@@ -3525,7 +3507,7 @@ OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView,
     msg->customMessage().blockHash = digest;
 
 
-    msg->customMessage().data = "";
+    msg->customMessage().data = data;
 
 
     broadcastMessage(msg);
@@ -4080,8 +4062,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         msg->customMessage().data = batch.serialize();
 
 
-        auto& proposedState = g_txn[newKey];
-        proposedState.data = msg->customMessage().data;
 
         broadcastMessage(msg);
 
@@ -4218,14 +4198,11 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 st.preparedSent = true;
                 st.preparedView = cm.view;
                 st.preparedBlock = cm.blockHash;
-                
-                st.data = cm.data;
-
 
                 g_ps.insert(BlockKey{cm.view, cm.blockHash});
 
                 st.prepareVoters.insert(selfID);
-                sendPrepare(cm.view, cm.blockHash, "");
+                sendPrepare(cm.view, cm.blockHash, cm.data);
 
                 CLOG_DEBUG(Overlay,
                         "[SEND PREPARE] view={} block={} prepareVotes={} reason={}",
@@ -4274,7 +4251,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, "");
+                sendCommit(cm.view, cm.blockHash, cm.data);
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4332,7 +4309,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 g_csentView = currentView;
 
                 st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, "");
+                sendCommit(cm.view, cm.blockHash, cm.data);
 
                 st.preparedView  = cm.view;
                 st.preparedBlock = cm.blockHash;
@@ -4362,21 +4339,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             // Final commit: 2f+1 COMMITs and not already committed this view.
             if (st.commitVoters.size() >= 2 * f + 1 && latestCommittedView < currentView)
             {
-
-                if (st.data.empty())
-
-                {
-                    st.committedView  = cm.view;
-                    st.committedBlock = cm.blockHash;
-
-                    CLOG_INFO(Overlay,
-                        "[FAST COMMITTED] MISSING DATA");
-
-                    break;
-
-                }
-
-
                 st.committedView = cm.view;
                 st.committedBlock = cm.blockHash;
 
@@ -4401,9 +4363,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     }
                 }
 
-                // TransactionBatch batch = TransactionBatch::deserialize(cm.data);
-                TransactionBatch batch = TransactionBatch::deserialize(st.data);
-
+                TransactionBatch batch = TransactionBatch::deserialize(cm.data);
                 for (auto const& txn : batch.transactions)
                 {
                     std::istringstream ss(txn.payload);
