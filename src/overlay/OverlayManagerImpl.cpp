@@ -4576,61 +4576,63 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
         // ================================================================
         case CUSTOM_COMMIT:
-        {
-            
-
-            bool inserted = st.commitVoters.insert(sender).second;
-
-            CLOG_DEBUG(Overlay,
-                    "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
-                    KeyUtils::toShortString(selfID),
-                    KeyUtils::toShortString(sender),
-                    inserted,
-                    cm.view,
-                    hexAbbrev(cm.blockHash),
-                    st.commitVoters.size(),
-                    f + 1,
-                    2 * f + 1);
-
-            // Amplification: f+1 COMMITs and I have not sent COMMIT in this view.
-            if (st.commitVoters.size() >= f + 1 && g_csentView < currentView)
             {
-                g_csentView = currentView;
+                
 
-                st.commitVoters.insert(selfID);
-                sendCommit(cm.view, cm.blockHash, "");
-
-                st.preparedView  = cm.view;
-                st.preparedBlock = cm.blockHash;
-                rememberLocalPrepared(cm.view, cm.blockHash);
-
-                ViewBlockKey dependency{cm.view, cm.blockHash};
-                activatePendingCondReadyForDependency(st, dependency);
-
-                if (!NonPrune_MODE)
-                {
-                    for (auto it = g_ps.begin(); it != g_ps.end(); )
-                    {
-                        if (it->view != st.preparedView)
-                            it = g_ps.erase(it);
-                        else
-                            ++it;
-                    }
-                }
+                bool inserted = st.commitVoters.insert(sender).second;
 
                 CLOG_DEBUG(Overlay,
-                        "[FAST AMPLIFY COMMIT] view={} block={} commitVotes={}",
+                        "[FAST RECV COMMIT] self={} sender={} inserted={} view={} block={} commitVotes={} fPlusOne={} quorum={}",
+                        KeyUtils::toShortString(selfID),
+                        KeyUtils::toShortString(sender),
+                        inserted,
                         cm.view,
                         hexAbbrev(cm.blockHash),
-                        st.commitVoters.size());
+                        st.commitVoters.size(),
+                        f + 1,
+                        2 * f + 1);
+
+                // Amplification: f+1 COMMITs and I have not sent COMMIT in this view.
+                if (st.commitVoters.size() >= f + 1 && g_csentView < currentView)
+                {
+                    g_csentView = currentView;
+
+                    st.commitVoters.insert(selfID);
+                    sendCommit(cm.view, cm.blockHash, "");
+
+                    st.preparedView  = cm.view;
+                    st.preparedBlock = cm.blockHash;
+                    rememberLocalPrepared(cm.view, cm.blockHash);
+
+                    ViewBlockKey dependency{cm.view, cm.blockHash};
+                    activatePendingCondReadyForDependency(st, dependency);
+
+                    if (!NonPrune_MODE)
+                    {
+                        for (auto it = g_ps.begin(); it != g_ps.end(); )
+                        {
+                            if (it->view != st.preparedView)
+                                it = g_ps.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
+
+                    CLOG_DEBUG(Overlay,
+                            "[FAST AMPLIFY COMMIT] view={} block={} commitVotes={}",
+                            cm.view,
+                            hexAbbrev(cm.blockHash),
+                            st.commitVoters.size());
+                }
+
+                // Final commit: 2f+1 COMMITs and not already committed this view.
+
+
+                tryCommitShabdizBlock(cm.view, cm.blockHash);
+
             }
+            break;
 
-            // Final commit: 2f+1 COMMITs and not already committed this view.
-
-
-            tryCommitShabdizBlock(cm.view, cm.blockHash);
-
-        }
         // ================================================================
         case CUSTOM_COLLECT:
             CLOG_INFO(Overlay, "Received COLLECT for view {} from {}",
