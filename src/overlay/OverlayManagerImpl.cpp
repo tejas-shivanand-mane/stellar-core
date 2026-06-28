@@ -2636,7 +2636,7 @@ OverlayManagerImpl::pbftProp()
     Hash digest = pbftDigest(data);
 
 
-    CLOG_INFO(Overlay,
+    CLOG_DEBUG(Overlay,
           "[PBFT BATCH SIZE] txns={} data_bytes={} bytes_per_txn={}",
           batch.transactions.size(),
           data.size(),
@@ -3635,7 +3635,33 @@ OverlayManagerImpl::tryExecutePBFT()
         st.executed = true;
         g_pbftLastExecuted = nextSeq;
 
-        CLOG_INFO(Overlay,
+        static constexpr uint64_t PBFT_HISTORY = 1000;
+
+        if (g_pbftLastExecuted > PBFT_HISTORY)
+        {
+            uint64_t cutoff = g_pbftLastExecuted - PBFT_HISTORY;
+
+            for (auto it = g_pbft.begin(); it != g_pbft.end(); )
+            {
+                if (it->first.seq < cutoff)
+                    it = g_pbft.erase(it);
+                else
+                    ++it;
+            }
+
+            for (auto it = g_pbftAcceptedDigest.begin();
+                it != g_pbftAcceptedDigest.end(); )
+            {
+                if (it->first.seq < cutoff)
+                    it = g_pbftAcceptedDigest.erase(it);
+                else
+                    ++it;
+            }
+        }
+
+
+
+        CLOG_DEBUG(Overlay,
                   "[PBFT EXECUTED] view={} seq={} digest={} txns={}",
                   g_pbftView,
                   nextSeq,
@@ -3661,6 +3687,17 @@ OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& dige
 {
     PbftSlotKey slot{view, seq};
     auto& st = g_pbft[slot];
+
+
+    if (seq <= g_pbftLastExecuted)
+    {
+        CLOG_INFO(Overlay,
+                "[PBFT DROP OLD] view={} seq={} lastExecuted={}",
+                view,
+                seq,
+                g_pbftLastExecuted);
+        return;
+    }
 
     if (!st.prePrepared || st.digest != digest)
     {
