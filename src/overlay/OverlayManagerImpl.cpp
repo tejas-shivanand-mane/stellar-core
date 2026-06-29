@@ -1296,6 +1296,10 @@ TransactionEnvelope createSCPTxFromProposal(
 
 static bool ENABLE_SCP_TRACKING = true;
 
+
+static constexpr int SCP_NATIVE_ROUNDS = 1;
+static constexpr int SCP_OPS_PER_TX = 100;
+
 struct SCPStats {
     int totalBatches = 0;
     std::vector<int64_t> batchLatencies;
@@ -1307,48 +1311,59 @@ struct SCPStats {
 static SCPStats g_scpStats;
 
 
-
 void submitNextBatchOfTransactions(Application& app)
 {
-    static uint32_t lastLedger = 0;  // ✅ Track last ledger we submitted for
-    
+    static uint32_t lastLedger = 0;
+
     if (!ENABLE_SCP_TRACKING)
     {
         return;
     }
 
+    // Only one node injects workload.
     if (!app.getConfig().SEND_CUSTOM_MESSAGE)
     {
-        // Silently skip on nodes that shouldn't submit
         return;
     }
-        
-    
-    uint32_t currentLedger = app.getLedgerManager().getLastClosedLedgerNum();
-    
-    //  Same check as before
-    if (currentLedger > lastLedger)
-    {
-        auto submitTime = std::chrono::steady_clock::now();
-        
-        CLOG_INFO(Overlay, "[SCP SUBMIT] Submitting {} operations for ledger {} at t={}",
-                  NUM_TEST_ACCOUNTS * 100, currentLedger + 1,
-                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                     submitTime.time_since_epoch()).count());
 
-        
-        //  Same submission logic as before
-        for (int batchno = 0; batchno < 1; batchno++)
-        {
-            for (int accountIdx = 0; accountIdx < NUM_TEST_ACCOUNTS; accountIdx++)
-            {
-                submitBatchedTransactionToSCP(app, accountIdx, 100);
-            }
-        }
-        
-        lastLedger = currentLedger;  // ✅ Update tracker
+    uint32_t currentLedger = app.getLedgerManager().getLastClosedLedgerNum();
+
+    // This function is called after externalization. Avoid duplicate submissions
+    // for the same closed ledger.
+    if (currentLedger <= lastLedger)
+    {
+        return;
     }
 
+    auto submitTime = std::chrono::steady_clock::now();
+
+    int submittedOps = 0;
+
+    for (int round = 0; round < SCP_NATIVE_ROUNDS; round++)
+    {
+        for (int accountIdx = 0; accountIdx < NUM_TEST_ACCOUNTS; accountIdx++)
+        {
+            submitBatchedTransactionToSCP(app, accountIdx, SCP_OPS_PER_TX);
+            submittedOps += SCP_OPS_PER_TX;
+        }
+    }
+
+    CLOG_INFO(Overlay,
+              "[SCP NATIVE SUBMIT] closedLedger={} nextLedger={} rounds={} "
+              "opsPerTx={} accounts={} submittedOps={} totalSubmittedTxs={} "
+              "totalSubmittedOps={} t_ms={}",
+              currentLedger,
+              currentLedger + 1,
+              SCP_NATIVE_ROUNDS,
+              SCP_OPS_PER_TX,
+              NUM_TEST_ACCOUNTS,
+              submittedOps,
+              g_scpTxnStats.totalSubmitted,
+              g_scpTxnStats.totalOperations,
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  submitTime.time_since_epoch()).count());
+
+    lastLedger = currentLedger;
 }
 
 
@@ -2248,11 +2263,11 @@ OverlayManagerImpl::tick()
 
                 // Submit FIRST batch of transactions here
                 // This ensures there are transactions for ledger 1
-                for (int batchno = 0; batchno < 1; batchno++)
+                for (int round = 0; round < SCP_NATIVE_ROUNDS; round++)
                 {
                     for (int accountIdx = 0; accountIdx < NUM_TEST_ACCOUNTS; accountIdx++)
                     {
-                        submitBatchedTransactionToSCP(mApp, accountIdx, 100);
+                        submitBatchedTransactionToSCP(mApp, accountIdx, SCP_OPS_PER_TX);
                     }
                 }
 
