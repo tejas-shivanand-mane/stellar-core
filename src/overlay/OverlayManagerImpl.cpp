@@ -63,7 +63,7 @@ namespace {
 static bool NonPrune_MODE = false;
 static bool ITHS_MODE = false;
 
-static bool PBFT_MODE = true;
+static bool PBFT_MODE = false;
 
 
 
@@ -1294,7 +1294,7 @@ TransactionEnvelope createSCPTxFromProposal(
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = false;
+static bool ENABLE_SCP_TRACKING = true;
 
 struct SCPStats {
     int totalBatches = 0;
