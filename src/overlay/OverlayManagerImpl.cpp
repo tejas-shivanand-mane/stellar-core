@@ -158,7 +158,7 @@ static bool g_accountCreationSubmitted = false;
 
 
 
-static constexpr int NUM_TEST_ACCOUNTS = 100;
+static constexpr int NUM_TEST_ACCOUNTS = 80;
 static std::vector<SecretKey> g_testAccounts;
 static std::vector<std::string> g_testAccountKeys;
 static bool g_multiAccountsInitialized = false;
