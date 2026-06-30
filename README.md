@@ -1,4 +1,4 @@
-## Stellar-O3RUBC:
+## Stellar-Shabdiz:
 
 This is the repository for project titled "Common-case latency-optimum Responsive Unauthenticated Byzantine Consensus"
 
