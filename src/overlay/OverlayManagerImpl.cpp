@@ -494,8 +494,15 @@ void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int b
             }
             else
             {
-                CLOG_WARNING(Overlay, "[SCP BATCH] Batched tx from account {} (hash={}) rejected - Result={}", 
-                            accountIndex, hexAbbrev(txHash), static_cast<int>(result.code));
+                CLOG_WARNING(Overlay,
+                            "[SCP BATCH REJECT] account={} hash={} resultCode={} batchSize={} "
+                            "totalSubmittedTxs={} totalSubmittedOps={}",
+                            accountIndex,
+                            hexAbbrev(txHash),
+                            static_cast<int>(result.code),
+                            batchSize,
+                            g_scpTxnStats.totalSubmitted,
+                            g_scpTxnStats.totalOperations);
             }
         }
     }
