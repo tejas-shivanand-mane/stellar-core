@@ -131,3 +131,5 @@ SCPPost.ipynb
 SetupGCP.ipynb
 StellarComparison.ipynb
 
+experiments/*
+
