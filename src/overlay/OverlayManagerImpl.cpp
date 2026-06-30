@@ -158,7 +158,7 @@ static bool g_accountCreationSubmitted = false;
 
 
 
-static const int NUM_TEST_ACCOUNTS = 50;
+static constexpr int NUM_TEST_ACCOUNTS = 50;
 static std::vector<SecretKey> g_testAccounts;
 static std::vector<std::string> g_testAccountKeys;
 static bool g_multiAccountsInitialized = false;
@@ -1297,7 +1297,7 @@ TransactionEnvelope createSCPTxFromProposal(
 static bool ENABLE_SCP_TRACKING = true;
 
 
-static constexpr int SCP_NATIVE_ROUNDS = 2;
+static constexpr int SCP_NATIVE_ROUNDS = 1;
 static constexpr int SCP_OPS_PER_TX = 100;
 
 struct SCPStats {
