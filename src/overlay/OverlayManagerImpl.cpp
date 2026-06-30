@@ -1297,7 +1297,7 @@ TransactionEnvelope createSCPTxFromProposal(
 static bool ENABLE_SCP_TRACKING = true;
 
 
-static constexpr int SCP_NATIVE_ROUNDS = 2;
+static constexpr int SCP_NATIVE_ROUNDS = 4;
 static constexpr int SCP_OPS_PER_TX = 100;
 
 struct SCPStats {
@@ -1365,6 +1365,7 @@ void submitNextBatchOfTransactions(Application& app)
 
     lastLedger = currentLedger;
 }
+
 
 
 
