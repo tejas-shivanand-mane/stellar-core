@@ -107,10 +107,10 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 50;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 10;
 
 
-constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
+constexpr int FORCE_COLLECT_AFTER_SEC = 100;
 
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
@@ -1204,14 +1204,14 @@ void cleanupOldTxnStates()
     //     }
     // }
 
-    if (clean_done)
-    {
-        g_txn.rehash(0);
-        g_ps.rehash(0);
-        g_blockClientAcks.rehash(0);
-        g_fastProposedViews.rehash(0);
+    // if (clean_done)
+    // {
+    //     g_txn.rehash(0);
+    //     g_ps.rehash(0);
+    //     g_blockClientAcks.rehash(0);
+    //     g_fastProposedViews.rehash(0);
 
-    }
+    // }
 
 
 
@@ -1301,7 +1301,7 @@ TransactionEnvelope createSCPTxFromProposal(
 // SCP TRACKING (Fair Comparison)
 // ============================================================================
 
-static bool ENABLE_SCP_TRACKING = true;
+static bool ENABLE_SCP_TRACKING = false;
 
 
 static constexpr int SCP_NATIVE_ROUNDS = 1;
