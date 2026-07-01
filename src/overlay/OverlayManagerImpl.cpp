@@ -107,7 +107,7 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 300;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 50;
 
 
 constexpr int FORCE_COLLECT_AFTER_SEC = 120;
@@ -2975,7 +2975,7 @@ std::vector<ClientAck> clientAcks;
     // =====================================================
     if (g_proposedViews.count(currentView))
     {
-        CLOG_WARNING(Overlay,
+        CLOG_DEBUG(Overlay,
                 "[SLOW COLLECT SKIP] proposal already sent for view {}",
                 currentView);
         return;
@@ -4625,7 +4625,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_SEND:
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "Received SEND target=(vp={}, bp={}) view={} from={} origin={}",
                     cm.vp,
                     hexAbbrev(cm.bp),
@@ -4651,7 +4651,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.echoes[ovb].insert(selfID);
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "Sending ECHO origin={} target=(vp={}, bp={})",
                         KeyUtils::toShortString(cm.origin),
                         cm.vp,
@@ -4664,7 +4664,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_ECHO:
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "Received ECHO origin={} target=(vp={}, bp={}) view={} from={}",
                     KeyUtils::toShortString(cm.origin),
                     cm.vp,
@@ -4744,7 +4744,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_READY:
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "Received READY origin={} target=(vp={}, bp={}) view={} from={}",
                     KeyUtils::toShortString(cm.origin),
                     cm.vp,
@@ -4774,7 +4774,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.readies[ovb].insert(selfID);
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "[READY AMPLIFY] origin={} target=(vp={}, bp={}) readies={}",
                         KeyUtils::toShortString(cm.origin),
                         cm.vp,
@@ -4794,7 +4794,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         // ================================================================
         case CUSTOM_CONDREADY:
         {
-            CLOG_INFO(Overlay,
+            CLOG_DEBUG(Overlay,
                     "Received CONDREADY origin={} target=(vp={}, bp={}) dependency=(vp={}, bp={}) view={} from={}",
                     KeyUtils::toShortString(cm.origin),
                     cm.vp,
@@ -4840,7 +4840,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
                 st.pendingCondReady[dependency].push_back(std::move(pending));
 
-                CLOG_INFO(Overlay,
+                CLOG_DEBUG(Overlay,
                         "CONDREADY deferred origin={} target=(vp={}, bp={}) waiting for dependency=(vp={}, bp={})",
                         KeyUtils::toShortString(cm.origin),
                         cm.vp,
