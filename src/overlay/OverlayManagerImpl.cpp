@@ -107,7 +107,7 @@ static bool collectWindowActive = false;
 static uint64_t collectWindowStartView = 0;
 
 static uint64_t collectAttempts = 0;
-static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 10;
+static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 1;
 
 
 constexpr int FORCE_COLLECT_AFTER_SEC = 120;
@@ -1018,7 +1018,12 @@ static int shabdiz_start = 0;
 
 static uint64_t g_csentView = 0; // algorithm variable csent: last view where COMMIT was sent
 static std::unordered_set<uint64_t> g_fastProposedViews;
-// static int forceCollectRound = 0;
+
+// Tracks both fast and slow proposals.
+// This prevents FAST(v) and SLOW(v) from both consuming client batches.
+static std::unordered_set<uint64_t> g_proposedViews;
+
+
 
 
 static uint64_t g_localPreparedView = 0;
@@ -1147,7 +1152,17 @@ void cleanupOldTxnStates()
         }
     }
 
-
+    for (auto it = g_proposedViews.begin(); it != g_proposedViews.end(); )
+    {
+        if (*it < cutoffView)
+        {
+            it = g_proposedViews.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 
 
 
@@ -2495,6 +2510,10 @@ updateForcedCollectState()
             collectWindowActive = true;
             collectAttempts     = 0;
 
+            collectWindowStartView = currentView;
+            force_collect          = true;
+
+
             CLOG_INFO(Overlay,
                       "⏱️ Forcing COLLECT for next {} views starting at view {}",
                       MAX_COLLECT_ATTEMPTS,
@@ -2740,16 +2759,26 @@ OverlayManagerImpl::prop()
 
     updateForcedCollectState();
 
+    bool collectAlreadyStartedForThisView =
+        (lastCollectSentView == currentView);
+
+    bool proposalAlreadySentForThisView =
+        (g_proposedViews.count(currentView) != 0);
+
     bool canUseFastPath =
-        (latestCommittedView == currentView - 1) && !force_collect;
+        (latestCommittedView == currentView - 1) &&
+        !force_collect &&
+        !collectAlreadyStartedForThisView &&
+        !proposalAlreadySentForThisView;
 
     if (canUseFastPath)
     {
         // Avoid duplicate proposals for the same view.
-        if (g_fastProposedViews.count(currentView))
+        if (g_proposedViews.count(currentView) ||
+            g_fastProposedViews.count(currentView))
         {
             CLOG_DEBUG(Overlay,
-                    "[FAST PROP SKIP] already proposed in view {}",
+                    "[FAST PROP SKIP] proposal already sent in view {}",
                     currentView);
             return;
         }
@@ -2805,6 +2834,7 @@ std::vector<ClientAck> clientAcks;
 
         // Only mark the view as proposed after we actually have a non-empty batch.
         g_fastProposedViews.insert(currentView);
+        g_proposedViews.insert(currentView);
 
         txn_count += batch.transactions.size();
 
@@ -2943,6 +2973,14 @@ std::vector<ClientAck> clientAcks;
     // =====================================================
     // Slow path / forced COLLECT path
     // =====================================================
+    if (g_proposedViews.count(currentView))
+    {
+        CLOG_WARNING(Overlay,
+                "[SLOW COLLECT SKIP] proposal already sent for view {}",
+                currentView);
+        return;
+    }
+
     if (lastCollectSentView == currentView)
     {
         CLOG_DEBUG(Overlay,
@@ -4047,14 +4085,55 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-    auto tryLeaderSendSlowProposal = [&](decltype(st)& state) {
+    auto tryLeaderSendSlowProposal =
+    [&](decltype(st)& state, uint64_t collectView)
+    {
         if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
         {
             return;
         }
 
-        if (state.proposalSentForView)
+        // This collection is stale. Do not consume another client batch.
+        if (collectView != currentView)
         {
+            CLOG_DEBUG(Overlay,
+                    "[SLOW PROP SKIP] stale collectView={} currentView={}",
+                    collectView,
+                    currentView);
+            return;
+        }
+
+        // The view already committed. Do not build an orphan slow block.
+        if (latestCommittedView >= collectView)
+        {
+            CLOG_DEBUG(Overlay,
+                    "[SLOW PROP SKIP] view already committed collectView={} latestCommittedView={}",
+                    collectView,
+                    latestCommittedView);
+            return;
+        }
+
+        // Slow proposal should only happen for a view where the leader actually
+        // initiated COLLECT.
+        if (lastCollectSentView != collectView)
+        {
+            CLOG_DEBUG(Overlay,
+                    "[SLOW PROP SKIP] no active COLLECT for view {} lastCollectSentView={}",
+                    collectView,
+                    lastCollectSentView);
+            return;
+        }
+
+        // Per-state and global per-view duplicate protection.
+        // IMPORTANT: this is before tryBuildServerBatch(), so duplicate slow proposals
+        // cannot pop 100 client requests and orphan them.
+        if (state.proposalSentForView || g_proposedViews.count(collectView))
+        {
+            CLOG_WARNING(Overlay,
+                    "[SLOW PROP SKIP] proposal already sent for view {} stateSent={} globalSent={}",
+                    collectView,
+                    state.proposalSentForView,
+                    g_proposedViews.count(collectView));
             return;
         }
 
@@ -4077,7 +4156,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         "[SLOW CLIENT] Only {} queued requests; need {} to propose slow-path view {}",
                         getClientRequestQueueSize(),
                         SERVER_BATCH_SIZE,
-                        currentView);
+                        collectView);
                 return;
             }
 
@@ -4099,14 +4178,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         {
             CLOG_WARNING(Overlay,
                         "[SLOW PROP SKIP] empty batch for view {}",
-                        currentView);
+                        collectView);
             return;
         }
 
         txn_count += batch.transactions.size();
 
         Hash newBlock = makeBlock(maxBlock, txn_count);
-        BlockKey newKey{currentView, newBlock};
+        BlockKey newKey{collectView, newBlock};
 
         if (fromExternalClient)
         {
@@ -4117,26 +4196,26 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         auto msg = std::make_shared<StellarMessage>();
         msg->type(CUSTOM_MESSAGE);
         msg->customMessage().msgType   = CUSTOM_PROPOSE;
-        msg->customMessage().view      = currentView;
+        msg->customMessage().view      = collectView;
         msg->customMessage().blockHash = newBlock;
 
-        // Important: slow-path proposal extends the highest prepared block
+        // Slow-path proposal extends the highest prepared block
         // selected from the collection.
         msg->customMessage().vp = maxView;
         msg->customMessage().bp = maxBlock;
-
         msg->customMessage().data = batch.serialize();
 
-
+        // Mark before broadcasting, so recursive/local processing cannot create
+        // another proposal for the same view.
+        state.proposalSentForView = true;
+        g_proposedViews.insert(collectView);
 
         broadcastMessage(msg);
-
-        state.proposalSentForView = true;
 
         CLOG_INFO(Overlay,
                 "[SLOW SEND PROPOSE] block={} view={} parentView={} parentBlock={} txns={} source={}",
                 hexAbbrev(newBlock),
-                currentView,
+                collectView,
                 maxView,
                 hexAbbrev(maxBlock),
                 batch.transactions.size(),
@@ -4161,7 +4240,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 hexAbbrev(target.block),
                 state.collection.size());
 
-        tryLeaderSendSlowProposal(state);
+        tryLeaderSendSlowProposal(state, cm.view);
     };
 
     auto activatePendingCondReadyForDependency =
