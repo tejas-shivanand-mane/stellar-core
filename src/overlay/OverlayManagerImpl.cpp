@@ -99,7 +99,7 @@ getRSS_MB()
 
 
 
-// ---- Forced COLLECT window control ----
+//  Forced COLLECT window control 
 static std::chrono::steady_clock::time_point shabdizStartTime;
 static bool shabdizStartTimeSet = false;
 
@@ -143,7 +143,7 @@ static std::queue<PendingClientRequest> g_clientRequestQueue;
 struct SCPTxnStats {
     int totalSubmitted = 0;
     int totalCommitted = 0;
-    int totalOperations = 0;  // ADD THIS - track total operations
+    int totalOperations = 0;  
     std::vector<int64_t> txLatencies;
     std::unordered_map<Hash, std::chrono::steady_clock::time_point> submitTimes;
     std::chrono::steady_clock::time_point testStart;
@@ -163,14 +163,14 @@ static std::vector<SecretKey> g_testAccounts;
 static std::vector<std::string> g_testAccountKeys;
 static bool g_multiAccountsInitialized = false;
 
-// Check if account exists in the ledger (visible to all nodes)
+// Return whether the account exists in this node's current ledger state.
 bool accountExistsInLedger(Application& app, PublicKey const& pk)
 {
     try
     {
         LedgerTxn ltx(app.getLedgerTxnRoot());
         auto acc = stellar::loadAccount(ltx, pk);
-        bool exists = (bool)acc;  // Convert to bool instead of comparing to nullptr
+        bool exists = (bool)acc;  
         ltx.commit();
         return exists;
     }
@@ -180,7 +180,7 @@ bool accountExistsInLedger(Application& app, PublicKey const& pk)
     }
 }
 
-// Create account through a CREATE_ACCOUNT transaction (goes through SCP)
+// Create NODE_SEED directly in the local ledger for benchmark setup; this bypasses SCP.
 void submitAccountCreationTransaction(Application& app)
 {
     if (g_accountCreationSubmitted)
@@ -188,10 +188,10 @@ void submitAccountCreationTransaction(Application& app)
     
     CLOG_INFO(Overlay, "[SCP TXN] Submitting account creation transaction...");
     
-    // You need a "root" account that already exists with funds
-    // In Stellar testnet/local, this is usually a pre-funded account
-    // For this example, we'll assume NODE_SEED itself has funds initially
-    // If not, you'll need to use a genesis account or create accounts in genesis ledger
+    //  A CREATE_ACCOUNT transaction would require an existing funded source account.
+    // 
+    // 
+    // 
     
     auto source = app.getConfig().NODE_SEED;
     auto pk = source.getPublicKey();
@@ -204,9 +204,9 @@ void submitAccountCreationTransaction(Application& app)
         return;
     }
     
-    // For now, create it directly (this is the problem!)
-    // In production, you'd need to use a CREATE_ACCOUNT operation
-    // from an account that already has funds
+    // Benchmark-only fallback: create the account directly in the local ledger.
+    // 
+    // 
     try
     {
         std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
@@ -218,7 +218,7 @@ void submitAccountCreationTransaction(Application& app)
         
         if (!acc)
         {
-            // Create the account directly (NOT through SCP - this is the issue!)
+            // 
             LedgerEntry le;
             le.data.type(ACCOUNT);
             le.data.account().accountID = accountID;
@@ -330,7 +330,7 @@ void initializeMultipleAccounts(Application& app)
         }
         else
         {
-            // Create account locally (same as your existing approach)
+            // Benchmark-only fallback: create the account directly in the local ledger.
             CLOG_WARNING(Overlay, "[Multi-Account] Account {} doesn't exist, creating locally", i);
             
             AccountID accountID;
@@ -375,11 +375,11 @@ makeBatchedPaymentTx(Application& app, SecretKey const& source,
     auto pk = source.getPublicKey();
     std::string accountKey = KeyUtils::toStrKey<PublicKey>(pk);
     
-    // Build AccountID from PublicKey
+    //
     AccountID accountID;
     accountID.ed25519() = pk.ed25519();
 
-    // Get next sequence from tracker
+    // Allocate the next locally tracked sequence number.
     if (!g_accountSequences.count(accountKey))
     {
         g_accountSequences[accountKey] = 0;
@@ -387,7 +387,7 @@ makeBatchedPaymentTx(Application& app, SecretKey const& source,
     
     uint64_t nextSeq = g_accountSequences[accountKey]++;
 
-    // Fee: base fee × number of operations
+    // Charge at least 100 stroops per operation.
     uint32_t baseFeePerOp = app.getLedgerManager().getLastTxFee();
     uint32_t fee = std::max<uint32_t>(baseFeePerOp * numOps, 100u * numOps);
 
@@ -411,7 +411,7 @@ makeBatchedPaymentTx(Application& app, SecretKey const& source,
         PaymentOp pay;
         pay.destination = muxDest;
         pay.asset.type(ASSET_TYPE_NATIVE);
-        pay.amount = 1; // 1 stroop per operation
+        pay.amount = 1; // One-stroop self-payment.
 
         Operation op;
         op.body.type(PAYMENT);
@@ -474,7 +474,7 @@ void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int b
         {
             Hash txHash = txFrame->getFullHash();
             
-            // Track submission time
+            // 
             g_scpTxnStats.submitTimes[txHash] = std::chrono::steady_clock::now();
             
             auto result = app.getHerder().recvTransaction(txFrame, true);
@@ -482,7 +482,7 @@ void submitBatchedTransactionToSCP(Application& app, int accountIndex = 0, int b
             if (result.code == TransactionQueue::AddResultCode::ADD_STATUS_PENDING)
             {
                 g_scpTxnStats.totalSubmitted++;
-                g_scpTxnStats.totalOperations += batchSize;  // Track operations
+                g_scpTxnStats.totalOperations += batchSize;  // 
                 CLOG_DEBUG(Overlay, "[SCP BATCH] Submitted batched tx from account {} ({} ops, hash={}) - PENDING", 
                           accountIndex, batchSize, hexAbbrev(txHash));
                 txCounters[accountIndex]++;
@@ -931,7 +931,7 @@ struct TxnState {
     std::unordered_set<NodeID, NodeIDHash, NodeIDEq> executeVoters;
 
 
-    // ====== For collection / Bracha-like broadcast ======
+    //  For collection / Bracha-like broadcast 
 
     // Which origin/value I already echoed.
     std::unordered_set<OriginViewBlockKey, OriginViewBlockKeyHash> eSent;
@@ -958,7 +958,7 @@ struct TxnState {
                        NodeIDHash,
                        NodeIDEq> collection;
 
-    // ====== NEW for conditional ready ======
+    // Conditional-ready state
 
     // Deferred CondReady votes:
     // dependency (vp,bp) -> list of CONDREADY votes waiting for that dependency.
@@ -1059,12 +1059,12 @@ void cleanupOldTxnStates()
 
     const uint64_t cutoffView = latestCommittedView - MAX_HISTORY;
 
-    // ================================================================
+    // 
     // Per-block protocol state.
     // Safe to remove only states far behind latestCommittedView.
     // This also frees TxnState internals: prepareVoters, commitVoters,
     // collection, echoes, readies, delivered, pendingCondReady, etc.
-    // ================================================================
+    // 
     for (auto it = g_txn.begin(); it != g_txn.end(); )
     {
         if (it->first.view < cutoffView)
@@ -1083,11 +1083,11 @@ void cleanupOldTxnStates()
         }
     }
 
-    // ================================================================
+    // 
     // Prepared set.
     // Keep recent prepared certificates because they may still be used
     // for safety checks / dependencies.
-    // ================================================================
+    // 
     for (auto it = g_ps.begin(); it != g_ps.end(); )
     {
         if (it->view < cutoffView)
@@ -1099,11 +1099,11 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    // ================================================================
+    // 
     // Client ACK bookkeeping.
     // Committed blocks are already erased by ackClientBatchesForBlock().
     // This removes abandoned/stale ACK records for old views only.
-    // ================================================================
+    // 
     for (auto it = g_blockClientAcks.begin(); it != g_blockClientAcks.end(); )
     {
         if (it->first.view < cutoffView)
@@ -1115,11 +1115,11 @@ void cleanupOldTxnStates()
             ++it;
         }
     }
-    // ================================================================
+    // 
     // Future-message buffer.
-    // IMPORTANT: do NOT clear all of g_futureFastMsgs.
-    // Only remove entries that are no longer future and are far behind.
-    // ================================================================
+    // Retain future messages and prune only entries older than cutoffView
+    // 
+    // 
     for (auto it = g_futureFastMsgs.begin(); it != g_futureFastMsgs.end(); )
     {
         uint64_t bufferedView = it->first;
@@ -1135,11 +1135,11 @@ void cleanupOldTxnStates()
     }
 
 
-    // ================================================================
+    // 
     // Fast-path proposed-view history.
     // Old proposed-view markers are not needed once those views are far
     // behind latestCommittedView.
-    // ================================================================
+    // 
     for (auto it = g_fastProposedViews.begin(); it != g_fastProposedViews.end(); )
     {
         if (*it < cutoffView)
@@ -1166,11 +1166,11 @@ void cleanupOldTxnStates()
 
 
 
-    // // ================================================================
+    // // 
     // // IT-HotStuff per-view sent-message maps.
     // // These are only per-view "already sent" markers, so old views are safe.
     // // Do NOT clean g_ithsLockView / g_ithsLockBlock here.
-    // // ================================================================
+    // // 
     // for (auto it = g_ithsEchoSentForView.begin(); it != g_ithsEchoSentForView.end(); )
     // {
     //     if (it->first < cutoffView)
@@ -1312,9 +1312,9 @@ TransactionEnvelope createSCPTxFromProposal(
 
 
 
-// ============================================================================
+// 
 // SCP TRACKING (Fair Comparison)
-// ============================================================================
+// 
 
 static bool ENABLE_SCP_TRACKING = false;
 
@@ -1327,7 +1327,7 @@ struct SCPStats {
     std::vector<int64_t> batchLatencies;
     std::chrono::steady_clock::time_point testStart;
     std::chrono::steady_clock::time_point lastBatchTime;
-    static const int BATCH_SIZE = 100; // Match your custom protocol batch size
+    static const int BATCH_SIZE = 100; //
 };
 
 static SCPStats g_scpStats;
@@ -2226,7 +2226,7 @@ OverlayManagerImpl::tick()
         
         if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
         {
-            // Silently skip on nodes that shouldn't submit
+            // 
             return;
         }
         
@@ -2246,7 +2246,7 @@ OverlayManagerImpl::tick()
                 CLOG_WARNING(Overlay, "⚠️  For proper testing, pre-create accounts in genesis ledger");
                 CLOG_INFO(Overlay, "========================================");
                 
-                // Initialize test start time
+                //
                 g_scpTxnStats.testStart = std::chrono::steady_clock::now();
                 
                 submitAccountCreationTransaction(mApp);
@@ -2255,7 +2255,7 @@ OverlayManagerImpl::tick()
                 g_scpStats.lastBatchTime = std::chrono::steady_clock::now();
             }
             
-            // Wait up to 2 ticks for account creation to complete
+            // Wait five ticks for local account creation
             initWaitTicks++;
             
             if (initWaitTicks <= 5)
@@ -2265,7 +2265,7 @@ OverlayManagerImpl::tick()
                 return;
             }
             
-            // Initialize sequence tracking
+            // 
             if (!g_accountInitialized)
             {
                 initializeSequenceTracking(mApp);
@@ -2290,8 +2290,8 @@ OverlayManagerImpl::tick()
             {
 
 
-                // Submit FIRST batch of transactions here
-                // This ensures there are transactions for ledger 1
+                // Seed the first transaction batch after initialization.
+                // 
                 for (int round = 0; round < SCP_NATIVE_ROUNDS; round++)
                 {
                     for (int accountIdx = 0; accountIdx < NUM_TEST_ACCOUNTS; accountIdx++)
@@ -2316,8 +2316,8 @@ OverlayManagerImpl::tick()
     }
 
     
-    // Call this - it won't access LedgerManager anymore
-    // checkSCPCommits(mApp);
+    // 
+    // 
 
 
 
@@ -2373,7 +2373,7 @@ OverlayManagerImpl::startClientListener(int port)
                     uint32_t len = ntohl(lenNet);
                     if (len == 0 || len > 1024 * 1024) break;
 
-                    // Read data
+                    // 
                     std::string data(len, '\0');
                     n = recv(clientFd, &data[0], len, MSG_WAITALL);
                     if (n <= 0) break;
@@ -2721,9 +2721,9 @@ OverlayManagerImpl::pbftProp()
 
     sendPBFTPrePrepare(view, seq, digest, data);
 
-    // Optional: primary participates in prepare too.
-    // For faithful PBFT paper semantics, primary does not need to send PREPARE.
-    // If you do include primary prepare, use 2f+1 threshold instead of 2f.
+    // The primary does not send PREPARE;
+    // replicas use a 2f PREPARE threshold.
+    //
 }
 
 
@@ -2885,9 +2885,9 @@ std::vector<ClientAck> clientAcks;
 
         broadcastMessage(msg);
 
-        // =====================================================
+        // 
         // Local leader handling: the leader also participates.
-        // =====================================================
+        // 
         auto& st = g_txn[key];
         auto const& cm = msg->customMessage();
 
@@ -2970,9 +2970,9 @@ std::vector<ClientAck> clientAcks;
         return;
     }
 
-    // =====================================================
+    // 
     // Slow path / forced COLLECT path
-    // =====================================================
+    // 
     if (g_proposedViews.count(currentView))
     {
         CLOG_DEBUG(Overlay,
@@ -3500,7 +3500,7 @@ OverlayManagerImpl::sendExecute(uint64_t view, Hash const& blockHash, std::strin
     msg->customMessage().blockHash = blockHash;
     msg->customMessage().data      = data;
 
-    // Send only if this node is leader (SEND_CUSTOM_MESSAGE == true)
+    // 
 
     broadcastMessage(msg);
     CLOG_DEBUG(Overlay, "Broadcast EXECUTE for block {} view {}", hexAbbrev(blockHash), view);
@@ -3900,7 +3900,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
                     pbftPrepareCount(st, digest),
                     pbftCommitCount(st, digest));
 
-            // Important: previously buffered PREPARE/COMMIT votes may now be usable.
+            // Re-evaluate buffered votes after accepting the PRE-PREPARE.
             tryAdvancePBFT(view, seq, digest);
 
             return;
@@ -3973,7 +3973,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
-    // In any handler where you need the index:
+    // Derive this node's deterministic index from the sorted membership.
     auto computeNodeIndex = [this]() {
         NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
         std::vector<NodeID> allNodes;
@@ -4124,9 +4124,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             return;
         }
 
-        // Per-state and global per-view duplicate protection.
-        // IMPORTANT: this is before tryBuildServerBatch(), so duplicate slow proposals
-        // cannot pop 100 client requests and orphan them.
+        // Check for a duplicate proposal before consuming a client batch.
+        // 
+        // 
         if (state.proposalSentForView || g_proposedViews.count(collectView))
         {
             CLOG_WARNING(Overlay,
@@ -4554,10 +4554,10 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     cleanupOldTxnStates();
                 }
 
-                // Critical: deliver buffered messages for the new view before proposing again.
+                // Process messages buffered for the new view before proposing.
                 deliverBufferedForCurrentView();
 
-                // Only the leader node actually proposes because prop() checks SEND_CUSTOM_MESSAGE.
+                // prop() is a no-op on non-leader nodes.
                 if (latestCommittedView == currentView - 1)
                 {
                     prop();
@@ -4608,7 +4608,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 }
 
 
-                //  Step 1: Broadcast SEND (for others)
+                //  Broadcast this node's SEND.
                 auto sendMsg = std::make_shared<StellarMessage>();
                 sendMsg->type(CUSTOM_MESSAGE);
                 sendMsg->customMessage().msgType    = CUSTOM_SEND;
@@ -4715,14 +4715,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                     msg->customMessage().msgType = CUSTOM_CONDREADY;
                     msg->customMessage().view    = cm.view;
 
-                    // Target.
+                    // Preserve the original SEND target and attach the higher prepared dependency
                     msg->customMessage().vp = cm.vp;
                     msg->customMessage().bp = cm.bp;
 
-                    // Original SEND origin.
+                    //
                     msg->customMessage().origin = cm.origin;
 
-                    // Higher prepared dependency.
+                    // 
                     msg->customMessage().dependencyVp = g_localPreparedView;
                     msg->customMessage().dependencyBp = g_localPreparedBlock;
 
@@ -4895,7 +4895,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_DEBUG(Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsEchoVoters.size());
 
-                // Blog threshold is n-f, not always 2f+1.
+                // IT-HS ECHO quorum: n - f.
                 if (st.ithsEchoVoters.size() >= N - f &&
                     !g_ithsAcceptSentForView.count(cm.view))
                 {
@@ -4920,8 +4920,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_DEBUG(Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsAcceptVoters.size());
 
-                // Background boosting: f+1 ACCEPT -> send ACCEPT.
-                // This should run even for old views.
+                // Relay ACCEPT after f + 1 votes, including for prior views.
+                // 
                 if (st.ithsAcceptVoters.size() >= f + 1 &&
                     !g_ithsAcceptSentForView.count(cm.view))
                 {
@@ -4971,8 +4971,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                 CLOG_DEBUG(Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
                         hexAbbrev(cm.blockHash), cm.view, st.ithsLockVoters.size());
 
-                // Blog rule: n-f LOCK -> send COMMIT.
-                // Do NOT commit locally here.
+                // Relay COMMIT after an n - f LOCK quorum
+                // local commit occurs on a COMMIT quorum
                 if (st.ithsLockVoters.size() >= N - f &&
                     !g_ithsCommitSentForView.count(cm.view))
                 {
@@ -4999,8 +4999,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
             CLOG_DEBUG(Overlay, "[IT-HS] Received COMMIT block {} view {} commits={}",
                     hexAbbrev(cm.blockHash), cm.view, st.ithsCommitVoters.size());
 
-            // Background boosting: f+1 COMMIT -> send COMMIT.
-            // This should run even for old views.
+            // Relay COMMIT after f + 1 votes, including for prior views.
+            // 
             if (st.ithsCommitVoters.size() >= f + 1 &&
                 !g_ithsCommitSentForView.count(cm.view))
             {
@@ -5016,8 +5016,8 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
                         hexAbbrev(cm.blockHash), cm.view);
             }
 
-            // Blog termination/output rule: n-f COMMIT -> output.
-            // In your chain code, output means apply batch and advance currentView.
+            // Apply the batch and advance currentView after an n - f COMMIT quorum.
+            // 
             if (cm.view == currentView &&
                 st.ithsCommitVoters.size() >= N - f &&
                 st.committedView < cm.view)
@@ -5258,7 +5258,7 @@ OverlayManagerImpl::recordMessageMetric(StellarMessage const& stellarMsg,
     
 
 
-    // added return to prevent metrics
+    // 
     return; 
 
     auto logMessage = [&](bool unique, std::string const& msgType) {
