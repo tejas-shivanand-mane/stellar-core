@@ -55,24 +55,9 @@ and their corresponding .h files
 
 ## Running Experiments
 
-Run the four-node Shabdiz experiment:
+Run the four-node Shabdiz experiment with RUNGCP.ipynb. Stores results in /home/user/work/experiments/shabdiz/latest_4node_run
 
-python3 run_shabdiz_4nodes.py
-
-Results are saved under:
-
-~/work/experiments/shabdiz/
 
 ## Post-Processing
 
-Plot throughput and latency for the latest run:
-
-python3 plot_shabdiz_timeseries.py
-
-Or specify a run directory:
-
-python3 plot_shabdiz_timeseries.py <run-directory>
-
-Generated plots and CSV files are saved in:
-
-<run-directory>/plots/
+Post process the results with PostProcess.ipynb. Uses results stored in /home/user/work/experiments/shabdiz/latest_4node_run to plot throughput and latency vs time plots
