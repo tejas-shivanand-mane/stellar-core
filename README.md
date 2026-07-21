@@ -55,24 +55,24 @@ and their corresponding .h files
 
 ## Running Experiments
 
-The codebase setup and installation are similar to stellar-core, but additional scripts are provided to run experiments on Google Cloud Platform (GCP).
+Run the four-node Shabdiz experiment:
 
-RunGCP.ipynb contains the code required to run experiments using Google Cloud Compute Engine. The experiment configuration (e.g., regions and number of nodes) is defined in the notebook, as shown below:
+python3 run_shabdiz_4nodes.py
 
-```python
-default_region = ['us-west1-b']
-regions = ['us-west1-b', 'us-west1-b', 'us-west1-b', 'us-west1-b']
+Results are saved under:
 
-zone_no = 0
-for num_nodes in [4]:
-```
-
-The network latency for half of the nodes can be controlled by selecting zone_no. Half of the nodes are deployed in the default_region, while the other half are deployed in regions[zone_no].
-
-Each run (without any iterations) produces log files for one specific configuration.
+~/work/experiments/shabdiz/
 
 ## Post-Processing
 
-PostProcess.ipynb contains the post-processing code used to evaluate experiments and extract throughput and latency metrics from the experiment log files.
+Plot throughput and latency for the latest run:
 
+python3 plot_shabdiz_timeseries.py
 
+Or specify a run directory:
+
+python3 plot_shabdiz_timeseries.py <run-directory>
+
+Generated plots and CSV files are saved in:
+
+<run-directory>/plots/
