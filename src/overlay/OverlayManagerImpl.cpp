@@ -110,7 +110,7 @@ static uint64_t collectAttempts = 0;
 static constexpr uint64_t MAX_COLLECT_ATTEMPTS = 300;
 
 
-constexpr int FORCE_COLLECT_AFTER_SEC = 120;
+constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
 
 static bool collectWindowArmed = false;
 static uint64_t lastCollectSentView = UINT64_MAX;
