@@ -105,7 +105,7 @@ template <typename Node, typename Digest> class SimpleITNormal
     {
         size_t result = 0;
         for (auto const& v : mVotes[phase - 1])
-            result += (!excludeLeader || v.first != leader) && v.second == *mProposal;
+            result += (!excludeLeader || !(v.first == leader)) && v.second == *mProposal;
         return result;
     }
 

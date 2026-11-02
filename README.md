@@ -45,7 +45,7 @@ Build every replica from the same revision, using the default **current** protoc
 
 ## Select a protocol
 
-The existing source switches are in `src/overlay/OverlayManagerImpl.cpp`:
+The build-time settings are in [`src/overlay/experiments/ExperimentConfig.h`](src/overlay/experiments/ExperimentConfig.h). Edit this header and rebuild the affected binaries. The protocol switches are:
 
 | Run | `ITHS_MODE` | `PBFT_MODE` | `ENABLE_SCP_TRACKING` |
 | --- | --- | --- | --- |
@@ -97,7 +97,7 @@ For every custom-protocol run, set `SEND_CUSTOM_MESSAGE=true` only on the leader
 
 The setup script recreates node directories in its `start` step; use a separate output directory for each fresh experiment. Replicas must share the same network passphrase and membership, have sufficient overlay connection capacity, and be fully connected. Preserve the generated `KNOWN_PEERS` convention, which includes all replica endpoints including self: the experiment startup gate expects `KNOWN_PEERS.size()-1` authenticated peers.
 
-For TetraBFT, Simple-IT, and Forget-IT, membership is the union of the local node and validators in its resolved `QUORUM_SET`. This must describe the same set of at least four replicas everywhere. Instances are kept within a bounded window of 64 ahead of local execution; this is not a catch-up mechanism for disconnected or restarted replicas. Simple-IT also retains recent completed instances to finish auxiliary RBC messages.
+For TetraBFT, Simple-IT, and Forget-IT, membership is the union of the local node and validators in its resolved `QUORUM_SET`. This must describe the same set of at least four replicas everywhere. Instances are kept within a bounded window (default 64, `NORMAL_PATH_WINDOW`) ahead of local execution; this is not a catch-up mechanism for disconnected or restarted replicas. Simple-IT also retains recent completed instances to finish auxiliary RBC messages.
 
 ### Custom-protocol workload
 
@@ -107,15 +107,15 @@ Run the client against the leader's port 12000:
 ./shab_client <leader-ip> 12000 150 100000000 100 360 0 2
 ```
 
-Arguments are, in order: leader address, port, maximum in-flight requests **per thread**, total request limit, server batch-size hint, duration in seconds, send interval in microseconds, and number of client threads. The example uses two threads with 150 outstanding requests each for a 360-second run. The server batch size is fixed at 100 in `OverlayManagerImpl.cpp`; the client hint does not change it. Provide enough outstanding writes to fill a batch. An incomplete final batch is not flushed automatically.
+Arguments are, in order: leader address, port, maximum in-flight requests **per thread**, total request limit, server batch-size hint, duration in seconds, send interval in microseconds, and number of client threads. The example uses two threads with 150 outstanding requests each for a 360-second run. The server batch size defaults to 100 (`SERVER_BATCH_SIZE` in `ExperimentConfig.h`); the client hint does not change it. Provide enough outstanding writes to fill a batch. An incomplete final batch is not flushed automatically.
 
-Select the operation mix through `currentWorkload` in `src/overlay/CustomYCSBWorkload.h` and rebuild the client. The default `WORKLOAD_W` generates updates only; the header also provides A, B, F, and explicit read-ratio workloads. Record the workload, key distribution, batch size, concurrency, and measurement interval with each run.
+Select the operation mix through `currentWorkload` in `src/overlay/experiments/ExperimentConfig.h` and rebuild the client. The default `WORKLOAD_W` generates updates only; the header also provides A, B, F, and explicit read-ratio workloads. Record the workload, key distribution, batch size, concurrency, and measurement interval with each run.
 
 READ requests retain the same immediate-ACK behavior across all custom protocols: they bypass consensus and do not return a stored value. Report these separately from committed-write throughput and do not interpret them as linearizable read measurements. Write ACKs for the new paths indicate execution at the leader, not a Byzantine client quorum certificate.
 
 ### SCP workload
 
-Set `ENABLE_SCP_TRACKING=true`, rebuild the replicas, and enable `SEND_CUSTOM_MESSAGE` on the load-generating node. This harness creates accounts and submits native Stellar transactions through SCP; it does not use the custom TCP client. Its workload parameters include `NUM_TEST_ACCOUNTS` and `SCP_OPS_PER_TX` in `OverlayManagerImpl.cpp`. Use the private network's native ledger bootstrap and check successful ledger advancement and transaction application before measuring. Report SCP operations and ledger-close measurements with their units; they are not the custom key-value client's ACK measurements.
+Set `ENABLE_SCP_TRACKING=true`, rebuild the replicas, and enable `SEND_CUSTOM_MESSAGE` on the load-generating node. This harness creates accounts and submits native Stellar transactions through SCP; it does not use the custom TCP client. Its workload parameters include `NUM_TEST_ACCOUNTS` and `SCP_OPS_PER_TX` in `ExperimentConfig.h`. Use the private network's native ledger bootstrap and check successful ledger advancement and transaction application before measuring. Report SCP operations and ledger-close measurements with their units; they are not the custom key-value client's ACK measurements.
 
 ## Experiment orchestration and results
 
@@ -134,4 +134,24 @@ Retain the source revision, build configuration, node configurations, client out
 - [Optimistic reliable broadcast, Figure 1](https://arxiv.org/abs/2505.02761v4).
 - [Forget-IT, Algorithm 1](https://eprint.iacr.org/2026/355).
 
-The main integration is in `src/overlay/OverlayManagerImpl.cpp`; the new normal-path voting state is in `src/overlay/NormalPathConsensus.h`. Runtime options are defined in `src/main/Config.h` and parsed in `src/main/Config.cpp`.
+## Code organization
+
+`src/overlay/OverlayManagerImpl.cpp` handles overlay connections, peer management, and message transport. Experiment code lives in `src/overlay/experiments/`:
+
+| File | Responsibility |
+| --- | --- |
+| `Shabdiz.cpp` | Shabdiz proposals, votes, and COLLECT path |
+| `ITHS.cpp` | IT-HS proposals and voting phases |
+| `PBFT.cpp` | PBFT slots, proposals, votes, and execution |
+| `TetraBFT.cpp` | TetraBFT normal-path progression |
+| `SimpleIT.cpp` | Simple-IT normal-path progression and parent check |
+| `ForgetIT.cpp` | Forget-IT normal-path progression and vote acceptance |
+| `SCPBenchmark.cpp` | Native SCP workload generation and tracking; SCP consensus remains in `src/scp/` |
+| `NormalPathProtocol.cpp` | Shared transport, validation, and ordered execution for the three new normal paths |
+| `Experiment.cpp` / `ExperimentState.h` | Protocol dispatch, shared legacy proposal construction, and benchmark bookkeeping |
+| `ExperimentClient.cpp` | TCP request handling, immediate read ACKs, server batching, and write ACKs |
+| `ExperimentConfig.h` | Build-time protocol selection and run/workload parameters |
+
+`ExperimentConfig.h` centralizes the legacy protocol switches, client port, server batch size, history/window limits, forced-COLLECT timing, SCP workload size, and YCSB workload/key distribution. Runtime options for TetraBFT, Simple-IT, and Forget-IT remain in each node's `stellar-core.cfg`, with parsing in `src/main/Config.cpp`. The shared normal-path voting state remains in `src/overlay/NormalPathConsensus.h`.
+
+After pulling a revision that adds or moves source files, run `./autogen.sh`, then your usual `./configure` options and `make`. The build generates its source list from tracked files; `make` alone may otherwise retain the old list.
