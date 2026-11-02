@@ -44,6 +44,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include "overlay/CustomProtocolTypes.h"
+#include "scp/LocalNode.h"
 #include "overlay/CustomYCSBWorkload.h"
 
 
@@ -1681,6 +1682,24 @@ OverlayManagerImpl::OverlayManagerImpl(Application& app)
     , mResolvingPeersRetryCount(0)
     , mScheduledMessages(100000, true)
 {
+    if (mApp.getConfig().TETRABFT_MODE)
+    {
+        auto const& cfg = mApp.getConfig();
+        if (PBFT_MODE || ITHS_MODE || ENABLE_SCP_TRACKING)
+            throw std::invalid_argument("TETRABFT_MODE conflicts with another protocol");
+        mTetraLeader = KeyUtils::fromStrKey<PublicKey>(cfg.TETRABFT_LEADER);
+        mTetraMembers.insert(mApp.getNodeID());
+        LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
+            mTetraMembers.insert(id);
+            return true;
+        });
+        if (mTetraMembers.size() < 4 || !mTetraMembers.count(mTetraLeader) ||
+            cfg.SEND_CUSTOM_MESSAGE != (mApp.getNodeID() == mTetraLeader))
+            throw std::invalid_argument("TetraBFT needs >=4 fixed members and SEND_CUSTOM_MESSAGE only on its configured leader");
+        mTetraQuorum = mTetraMembers.size() - (mTetraMembers.size() - 1) / 3;
+        CLOG_INFO(Overlay, "[TETRA CONFIG] members={} quorum={} normal_path_only=true",
+                  mTetraMembers.size(), mTetraQuorum);
+    }
     mPeerSources[PeerType::INBOUND] = std::make_unique<RandomPeerSource>(
         mPeerManager, RandomPeerSource::nextAttemptCutoff(PeerType::INBOUND));
     mPeerSources[PeerType::OUTBOUND] = std::make_unique<RandomPeerSource>(
@@ -2062,7 +2081,7 @@ OverlayManagerImpl::tick()
         mApp.getConfig().SEND_CUSTOM_MESSAGE &&
         g_clientListenerActive)
     {
-        if (PBFT_MODE)
+        if (PBFT_MODE || mApp.getConfig().TETRABFT_MODE)
         {
             prop();
         }
@@ -2413,7 +2432,7 @@ OverlayManagerImpl::startClientListener(int port)
                     }
 
                     // Fast path for read-only requests.
-                    // READ requests are ACKed immediately and do not enter Shabdiz / IT-HS consensus.
+                    // READ requests are ACKed immediately for all custom protocols.
                     {
                         std::istringstream ss(txn.payload);
                         std::string op;
@@ -2614,6 +2633,139 @@ tryBuildServerBatch(TransactionBatch& batch,
 
 
 void
+OverlayManagerImpl::tetraSend(CustomMessageType type, uint64_t seq,
+                             Hash const& digest, std::string const& data)
+{
+    auto msg = std::make_shared<StellarMessage>();
+    msg->type(CUSTOM_MESSAGE);
+    auto& cm = msg->customMessage();
+    cm.msgType = type;
+    cm.view = seq; // independent instance number, NOT a recovery view
+    cm.vp = 0;     // only view zero is implemented
+    cm.blockHash = digest;
+    cm.data = data;
+    // Direct authenticated channels: identical votes from distinct senders
+    // must not be collapsed by the overlay's content-based flood cache.
+    for (auto const& peer : getAuthenticatedPeers())
+        if (mTetraMembers.count(peer.first))
+            peer.second->sendMessage(msg);
+}
+
+void
+OverlayManagerImpl::tetraProp()
+{
+    if (mApp.getNodeID() != mTetraLeader ||
+        mTetraNextSeq != mTetraExecuted + 1)
+        return;
+    TransactionBatch batch;
+    std::vector<ClientAck> acks;
+    if (!g_clientListenerActive || !tryBuildServerBatch(batch, acks))
+        return;
+    auto data = batch.serialize();
+    auto digest = sha256(data);
+    uint64_t seq = mTetraNextSeq++;
+    g_blockClientAcks[BlockKey{seq, digest}] = std::move(acks);
+    auto& slot = mTetraSlots[seq];
+    slot.protocol.propose(digest);
+    slot.proposed = true;
+    slot.data = data;
+    tetraSend(CUSTOM_TETRA_PROPOSE, seq, digest, data);
+    tetraAdvance(seq); // leader casts vote-1 as well
+}
+
+void
+OverlayManagerImpl::handleTetraMessage(StellarMessage const& msg,
+                                      NodeID const& sender)
+{
+    auto const& cm = msg.customMessage();
+    auto seq = cm.view;
+    // Bounded lookahead permits a faster replica to start the next instance
+    // before this replica has received the last vote of the previous one.
+    if (!mTetraMembers.count(sender) || cm.vp != 0 ||
+        seq <= mTetraExecuted || seq - mTetraExecuted > 64)
+        return;
+    if (cm.msgType == CUSTOM_TETRA_PROPOSE)
+    {
+        if (sender != mTetraLeader || sha256(cm.data) != cm.blockHash)
+            return;
+        try
+        {
+            auto batch = TransactionBatch::deserialize(cm.data);
+            if (batch.transactions.size() != SERVER_BATCH_SIZE ||
+                batch.serialize() != cm.data)
+                return;
+        }
+        catch (std::exception const&)
+        {
+            return;
+        }
+        auto& slot = mTetraSlots[seq];
+        if (!slot.protocol.propose(cm.blockHash))
+            return;
+        slot.proposed = true;
+        slot.data = cm.data;
+    }
+    else
+    {
+        if (!cm.data.empty()) // votes contain only the batch digest
+            return;
+        auto phase = static_cast<unsigned>(cm.msgType - CUSTOM_TETRA_VOTE1 + 1);
+        if (phase < 1 || phase > 4)
+            return;
+        mTetraSlots[seq].protocol.vote(phase, sender, cm.blockHash);
+    }
+    tetraAdvance(seq);
+}
+
+void
+OverlayManagerImpl::tetraAdvance(uint64_t seq)
+{
+    auto& slot = mTetraSlots.at(seq);
+    if (!slot.proposed)
+        return;
+    for (auto phase : slot.protocol.advance(mApp.getNodeID(), mTetraQuorum))
+        tetraSend(static_cast<CustomMessageType>(CUSTOM_TETRA_VOTE1 + phase - 1),
+                  seq, slot.protocol.digest());
+    if (slot.protocol.decide(mTetraQuorum))
+        slot.decided = true;
+
+    // Execution is ordered even if network delivery reorders decisions.
+    while (true)
+    {
+        auto it = mTetraSlots.find(mTetraExecuted + 1);
+        if (it == mTetraSlots.end() || !it->second.decided)
+            break;
+        auto const& ready = it->second;
+        auto batch = TransactionBatch::deserialize(ready.data);
+        for (auto const& txn : batch.transactions)
+        {
+            std::istringstream input(txn.payload);
+            std::string op, key, value;
+            input >> op >> key;
+            if (op == "READ")
+            {
+                auto found = g_kvStore.find(key);
+                (void)found;
+            }
+            else if (op == "UPDATE" || op == "RMW")
+            {
+                input >> value;
+                g_kvStore[key] = value;
+            }
+        }
+        ++mTetraExecuted;
+        CLOG_INFO(Overlay, "[TETRA COMMITTED] seq={} digest={} txns={}",
+                  mTetraExecuted, hexAbbrev(ready.protocol.digest()),
+                  batch.transactions.size());
+        if (mApp.getNodeID() == mTetraLeader)
+            ackClientBatchesForBlock(mTetraExecuted, ready.protocol.digest());
+        mTetraSlots.erase(it);
+    }
+    if (mApp.getNodeID() == mTetraLeader)
+        tetraProp();
+}
+
+void
 OverlayManagerImpl::pbftProp()
 {
 
@@ -2750,6 +2902,12 @@ OverlayManagerImpl::prop()
         return;
     }
 
+
+    if (mApp.getConfig().TETRABFT_MODE)
+    {
+        tetraProp();
+        return;
+    }
 
     if (PBFT_MODE)
     {
@@ -3972,6 +4130,17 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
 
+
+    auto type = stellarMsg.customMessage().msgType;
+    bool tetraMessage = type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
+    if (mApp.getConfig().TETRABFT_MODE)
+    {
+        if (tetraMessage)
+            handleTetraMessage(stellarMsg, peer->getPeerID());
+        return;
+    }
+    if (tetraMessage)
+        return;
 
     // Derive this node's deterministic index from the sorted membership.
     auto computeNodeIndex = [this]() {

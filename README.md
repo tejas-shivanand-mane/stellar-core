@@ -61,3 +61,34 @@ Run the four-node Shabdiz experiment with RUNGCP.ipynb. Stores results in /home/
 ## Post-Processing
 
 Post process the results with PostProcess.ipynb. Uses results stored in /home/user/work/experiments/shabdiz/latest_4node_run to plot throughput and latency vs time plots
+
+## TetraBFT normal path
+
+Implements [Basic TetraBFT, Section 3.2](https://arxiv.org/html/2405.02615v2):
+proposal followed by four voting phases, with n-f quorums. Each batch is an
+independent instance; recovery and pipelined multi-shot TetraBFT are not included.
+
+Add these top-level settings to every replica configuration:
+
+```toml
+TETRABFT_MODE=true
+TETRABFT_LEADER="G...public key of the leader..."
+```
+
+Use the same leader key everywhere and `SEND_CUSTOM_MESSAGE=true` only on the
+leader. Keep PBFT_MODE, ITHS_MODE and ENABLE_SCP_TRACKING disabled. Membership
+is self plus QUORUM_SET validators; every replica must have the same membership
+of at least four nodes. Rebuild all replicas with the default current schema.
+Run the existing shab_client against the leader on port 12000 with aggregate
+concurrency >=100 (the batch size). Check `[TETRA COMMITTED]` logs for matching
+sequence numbers and digests. Reads retain the existing immediate-ACK behavior.
+Write ACKs indicate leader-local execution, not a Byzantine client certificate.
+Use fresh, fully connected deployments; there is no restart/state-transfer
+support, and replicas more than 64 instances behind cannot catch up.
+
+Voting-core tests (not full Stellar integration tests):
+
+```sh
+g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Isrc tests/tetrabft/normal_path.cpp -o /tmp/tetrabft-test
+/tmp/tetrabft-test
+```

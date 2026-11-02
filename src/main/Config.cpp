@@ -41,6 +41,8 @@ bool gIsProductionNetwork = false;
 static const std::unordered_set<std::string> TESTING_ONLY_OPTIONS = {
     "RUN_STANDALONE",
     "SEND_CUSTOM_MESSAGE",
+    "TETRABFT_MODE",
+    "TETRABFT_LEADER",
     "MEMORY_PROF",
     "MANUAL_CLOSE",
     "ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING",
@@ -1168,6 +1170,8 @@ Config::processConfig(std::shared_ptr<cpptoml::table> t)
                  [&]() { METADATA_DEBUG_LEDGERS = readInt<uint32_t>(item); }},
                 {"RUN_STANDALONE", [&]() { RUN_STANDALONE = readBool(item); }},
                 {"SEND_CUSTOM_MESSAGE", [&]() { SEND_CUSTOM_MESSAGE = readBool(item); }},
+                {"TETRABFT_MODE", [&]() { TETRABFT_MODE = readBool(item); }},
+                {"TETRABFT_LEADER", [&]() { TETRABFT_LEADER = readString(item); }},
                 {"MEMORY_PROF", [&]() { MEMORY_PROF = readBool(item); }},
                 {"CATCHUP_COMPLETE",
                  [&]() { CATCHUP_COMPLETE = readBool(item); }},

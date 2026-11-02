@@ -5,6 +5,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "Peer.h"
+#include "overlay/TetraBFTNormal.h"
 #include "PeerAuth.h"
 #include "PeerDoor.h"
 #include "PeerManager.h"
@@ -105,6 +106,24 @@ class OverlayManagerImpl : public OverlayManager
     void tick();
     void prop();
     void pbftProp();
+    struct TetraSlot
+    {
+        TetraBFTNormal<NodeID, Hash> protocol;
+        std::string data;
+        bool proposed = false;
+        bool decided = false;
+    };
+    std::set<NodeID> mTetraMembers;
+    NodeID mTetraLeader;
+    std::map<uint64_t, TetraSlot> mTetraSlots;
+    uint64_t mTetraNextSeq = 1;
+    uint64_t mTetraExecuted = 0;
+    size_t mTetraQuorum = 0;
+    void tetraProp();
+    void tetraAdvance(uint64_t seq);
+    void tetraSend(CustomMessageType type, uint64_t seq, Hash const& digest,
+                   std::string const& data = {});
+    void handleTetraMessage(StellarMessage const& msg, NodeID const& sender);
     void tryExecutePBFT();
 
     void handlePBFTMessage(StellarMessage const& stellarMsg,
