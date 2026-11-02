@@ -6,16 +6,25 @@
 namespace stellar::experiment
 {
 // Build-time experiment settings shared by replicas and shab_client.
-// Rebuild the affected binaries after edits. Runtime leader and normal-path
-// selection remain in each node's stellar-core.cfg (see README.md).
+// Rebuild all replicas after edits. For every custom protocol, the node with
+// SEND_CUSTOM_MESSAGE=true in stellar-core.cfg initiates proposals.
 
-// Legacy protocol selection: all false selects Shabdiz.
+// Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;
 inline constexpr bool PBFT_MODE = false;
 inline constexpr bool ENABLE_SCP_TRACKING = false;
+inline constexpr bool TETRABFT_MODE = false;
+inline constexpr bool SIMPLE_IT_MODE = false;
+inline constexpr bool FORGET_IT_MODE = false;
+
+// Simple-IT variant: optimistic RBC (true) or Bracha RBC (false).
+inline constexpr bool SIMPLE_IT_OPTIMISTIC = true;
 inline constexpr bool NonPrune_MODE = false;
-static_assert(int(ITHS_MODE) + int(PBFT_MODE) + int(ENABLE_SCP_TRACKING) <= 1,
-              "Select only one legacy protocol");
+static_assert(int(ITHS_MODE) + int(PBFT_MODE) + int(ENABLE_SCP_TRACKING) +
+                      int(TETRABFT_MODE) + int(SIMPLE_IT_MODE) +
+                      int(FORGET_IT_MODE) <=
+                  1,
+              "Select only one consensus protocol");
 
 // Shared TCP workload and server batching.
 inline constexpr int CLIENT_PORT = 12000;

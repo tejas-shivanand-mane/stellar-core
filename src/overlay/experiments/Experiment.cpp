@@ -418,7 +418,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 {
 
     auto type = stellarMsg.customMessage().msgType;
-    auto const& cfg = mApp.getConfig();
     bool tetraMessage =
         type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
     bool simpleMessage =
@@ -427,9 +426,9 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         type >= CUSTOM_FORGET_PREPARE && type <= CUSTOM_FORGET_VOTE2;
     if (normalPathEnabled())
     {
-        if ((cfg.TETRABFT_MODE && tetraMessage) ||
-            (cfg.SIMPLE_IT_MODE && simpleMessage) ||
-            (cfg.FORGET_IT_MODE && forgetMessage))
+        if ((TETRABFT_MODE && tetraMessage) ||
+            (SIMPLE_IT_MODE && simpleMessage) ||
+            (FORGET_IT_MODE && forgetMessage))
             handleNormalMessage(stellarMsg, peer->getPeerID());
         return;
     }

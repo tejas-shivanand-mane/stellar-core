@@ -122,7 +122,7 @@ class OverlayManagerImpl : public OverlayManager
         bool decided = false;
     };
     std::set<NodeID> mNormalMembers;
-    NodeID mNormalLeader;
+    std::optional<NodeID> mNormalLeader;
     std::map<uint64_t, NormalSlot> mNormalSlots;
     uint64_t mNormalNextSeq = 1;
     uint64_t mNormalExecuted = 0;

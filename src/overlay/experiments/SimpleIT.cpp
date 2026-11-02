@@ -20,16 +20,16 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
     std::vector<unsigned> outgoing;
     CustomMessageType firstVote;
     bool decided;
-    auto const& cfg = mApp.getConfig();
 
     firstVote = CUSTOM_SIMPLE_ECHO;
     // Consecutive parent is safe once already executed. Serialized proposals
     // deliberately omit Simple-IT's pipeline and disabled-round machinery.
     bool safeParent = seq - 1 <= mNormalExecuted;
     outgoing = slot.simple.advance(mApp.getConfig().NODE_SEED.getPublicKey(),
-                                   mNormalLeader, mNormalMembers.size(),
-                                   cfg.SIMPLE_IT_OPTIMISTIC, safeParent);
-    decided = slot.simple.decide(mNormalQuorum, mNormalLeader, safeParent);
+                                   mNormalLeader.value(), mNormalMembers.size(),
+                                   SIMPLE_IT_OPTIMISTIC, safeParent);
+    decided =
+        slot.simple.decide(mNormalQuorum, mNormalLeader.value(), safeParent);
     for (auto phase : outgoing)
         normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq,
                    slot.digest);

@@ -10,9 +10,9 @@ Research artifact for evaluating Shabdiz and related Byzantine consensus protoco
 | IT-HS | Existing custom consensus implementation | Source switch `ITHS_MODE=true` |
 | PBFT | Existing custom pre-prepare/prepare/commit implementation | Source switch `PBFT_MODE=true` |
 | SCP | Native Stellar consensus with the existing transaction-generation and measurement harness | Source switch `ENABLE_SCP_TRACKING=true` |
-| TetraBFT | Basic TetraBFT normal path: proposal and four voting phases | Configuration `TETRABFT_MODE=true` |
-| Simple-IT | Consecutive-round normal path with Bracha RBC, or optimistic RBC | Configuration `SIMPLE_IT_MODE=true` |
-| Forget-IT | First-view normal path: prepare, vote-1, vote-2 | Configuration `FORGET_IT_MODE=true` |
+| TetraBFT | Basic TetraBFT normal path: proposal and four voting phases | Source switch `TETRABFT_MODE=true` |
+| Simple-IT | Consecutive-round normal path with Bracha RBC, or optimistic RBC | Source switch `SIMPLE_IT_MODE=true` |
+| Forget-IT | First-view normal path: prepare, vote-1, vote-2 | Source switch `FORGET_IT_MODE=true` |
 
 TetraBFT and Forget-IT process each batch as a fresh consensus instance. Simple-IT uses the previous round as its parent and waits for local parent execution before committing the child. These three implementations use a fixed leader and serialize proposals; they do not implement leader replacement, timeouts, restart recovery, state transfer, or the papers' pipelined variants. Simple-IT does not implement disabled rounds or speculative execution. This repository's PBFT implementation is the integrated custom baseline; external PBFT implementations used in separate experiments are not included here.
 
@@ -45,53 +45,33 @@ Build every replica from the same revision, using the default **current** protoc
 
 ## Select a protocol
 
-The build-time settings are in [`src/overlay/experiments/ExperimentConfig.h`](src/overlay/experiments/ExperimentConfig.h). Edit this header and rebuild the affected binaries. The protocol switches are:
+All protocols are selected in [`src/overlay/experiments/ExperimentConfig.h`](src/overlay/experiments/ExperimentConfig.h). Set the switch for the desired protocol to `true`, leave every other protocol switch `false`, and rebuild all replicas from the same settings.
 
-| Run | `ITHS_MODE` | `PBFT_MODE` | `ENABLE_SCP_TRACKING` |
-| --- | --- | --- | --- |
-| Shabdiz | `false` | `false` | `false` |
-| IT-HS | `true` | `false` | `false` |
-| PBFT | `false` | `true` | `false` |
-| SCP | `false` | `false` | `true` |
-| TetraBFT, Simple-IT, or Forget-IT | `false` | `false` | `false` |
+| Run | Switch to enable in `ExperimentConfig.h` |
+| --- | --- |
+| Shabdiz | None; leave all protocol switches `false` |
+| IT-HS | `ITHS_MODE=true` |
+| PBFT | `PBFT_MODE=true` |
+| SCP | `ENABLE_SCP_TRACKING=true` |
+| TetraBFT | `TETRABFT_MODE=true` |
+| Simple-IT | `SIMPLE_IT_MODE=true` |
+| Forget-IT | `FORGET_IT_MODE=true` |
 
-Keep `NonPrune_MODE=false` for the default Shabdiz configuration; enable it only for an explicitly labelled no-pruning experiment. For Shabdiz, IT-HS, PBFT, and SCP, leave `TETRABFT_MODE`, `SIMPLE_IT_MODE`, and `FORGET_IT_MODE` disabled (their defaults).
+The build rejects configurations with more than one protocol enabled. Keep `NonPrune_MODE=false` for the default Shabdiz configuration; enable it only for an explicitly labelled no-pruning experiment.
 
-For the newer protocols, add **one** of the following blocks at the top of every replica's configuration, before any TOML table headers. Replace the placeholder with the selected leader's full `G...` public key, identical on every replica.
+For every custom protocol, use the same leader setup: `SEND_CUSTOM_MESSAGE=true` only on node1 (or your chosen proposer), and `false` on the other replicas. For SCP, this setting selects the load-generating node. No protocol-specific TOML blocks or leader public keys are required. TetraBFT, Simple-IT, and Forget-IT followers learn the authenticated proposer from the first valid proposal for instance 1 and retain that identity throughout the run. As with the existing benchmark setup, exactly one node must initiate proposals.
 
-**TetraBFT**
+`SIMPLE_IT_OPTIMISTIC` is also a build-time setting in `ExperimentConfig.h`. With `true` (the default), optimistic delivery requires `ceil((n+2f-2)/2)` matching ECHOs from **nonleader** replicas, followed by `n-f` consensus COMMITs. The critical path has three message delays. Auxiliary VOTE, ACK, and READY messages are also sent and must be included in communication measurements. With `false`, Simple-IT uses Bracha-style ECHO/READY delivery followed by COMMIT, giving a four-delay normal path. Build every replica with the same variant and report it with each result.
 
-```toml
-TETRABFT_MODE=true
-TETRABFT_LEADER="<leader public key>"
-```
+Forget-IT starts each instance in view 1 with a SAFE guard. A replica sends vote-2 after `n-f` matching vote-1 messages and decides after `n-f` vote-2 messages, with the paper's additional `f+1` matching vote-1 acceptance condition. Its normal path has three message delays.
 
-**Simple-IT**
-
-```toml
-SIMPLE_IT_MODE=true
-SIMPLE_IT_LEADER="<leader public key>"
-SIMPLE_IT_OPTIMISTIC=true
-```
-
-With `SIMPLE_IT_OPTIMISTIC=true` (the default), optimistic delivery requires `ceil((n+2f-2)/2)` matching ECHOs from **nonleader** replicas, followed by `n-f` consensus COMMITs. The resulting critical path has three message delays. Auxiliary VOTE, ACK, and READY messages are also sent; they must be included in communication measurements. With `SIMPLE_IT_OPTIMISTIC=false`, the implementation uses Bracha-style ECHO/READY delivery followed by COMMIT, giving a four-delay normal path. Use identical settings on every replica and report the variant with each result.
-
-**Forget-IT**
-
-```toml
-FORGET_IT_MODE=true
-FORGET_IT_LEADER="<leader public key>"
-```
-
-Every instance starts in view 1 with a SAFE guard. A replica sends vote-2 after `n-f` matching vote-1 messages and decides after `n-f` vote-2 messages, with the paper's additional `f+1` matching vote-1 acceptance condition. The normal path has three message delays.
-
-For every custom-protocol run, set `SEND_CUSTOM_MESSAGE=true` only on the leader and leave it false on all other replicas. For SCP, this setting selects the load-generating node. The newer protocol modes reject conflicting mode settings and an inconsistent local leader setting at startup.
+If upgrading from the earlier runtime-selection version, remove its protocol mode, variant, and leader-key options from `stellar-core.cfg`; these options are no longer parsed.
 
 ## Configure and run a private network
 
 1. Put replica IP addresses, one per line, in `tsm_ips.txt`. Do not include client machines.
 2. Update `STELLAR_CORE`, `BASE_DIR`, and the IP-file path in `gcp_setup_stellar_private.sh` for your installation. Run `bash gcp_setup_stellar_private.sh start` to generate node identities and configurations in the configured output directory.
-3. Add the protocol settings above to the generated configurations. Use node1 as the leader when using the supplied experiment scripts. Its public key is recorded in its generated `node.seed` file.
+3. Set `SEND_CUSTOM_MESSAGE=true` at the top of node1's generated configuration, before any TOML table headers, and leave it false on all other replicas. Use the same compiled protocol settings on every replica.
 4. Run `bash gcp_setup_stellar_private.sh` to initialize the databases. Copy each node's configuration and required directories to its host, preserving or adjusting the configured paths.
 5. Start each replica with `src/stellar-core run --conf /path/to/nodeN/stellar-core.cfg`. Wait for the leader's client-listener readiness log before starting the workload.
 
@@ -121,7 +101,7 @@ Set `ENABLE_SCP_TRACKING=true`, rebuild the replicas, and enable `SEND_CUSTOM_ME
 
 `RunGCP.ipynb` provisions replica/client machines, builds the binaries, generates private-network configurations, runs the client, and collects outputs. Its default experiment uses four replicas. Set the project, service account, image family, zones, usernames, local/remote paths, node-count list, load points, and output location for your environment. Review its VM deletion settings and automatic Git commit/push step before executing it.
 
-For TetraBFT, Simple-IT, and Forget-IT, insert the chosen configuration block into **every** generated replica configuration in the notebook's configuration-generation step, before those files are copied to the machines. The notebook currently inserts only `SEND_CUSTOM_MESSAGE=true` on node1. For source-selected protocols, compile the selected switches on every host before running; do not reuse a binary built for another mode. Use the SCP harness separately from the notebook's custom-client workload.
+For every custom protocol, select its switch in `ExperimentConfig.h` and compile on every host before running. The notebook's existing `SEND_CUSTOM_MESSAGE=true` setting on node1 is sufficient; no additional protocol-specific configuration insertion is needed. Do not reuse a binary built for another mode. Use the SCP harness separately from the notebook's custom-client workload.
 
 Retain the source revision, build configuration, node configurations, client output, replica logs, and deployment/load parameters for each experiment. The new paths log `[TETRA COMMITTED]`, `[SIMPLE-IT COMMITTED]`, or `[FORGET-IT COMMITTED]` with sequence number, batch digest, and transaction count. Compare sequence numbers and digests across replicas before accepting a run.
 
@@ -152,6 +132,6 @@ Retain the source revision, build configuration, node configurations, client out
 | `ExperimentClient.cpp` | TCP request handling, immediate read ACKs, server batching, and write ACKs |
 | `ExperimentConfig.h` | Build-time protocol selection and run/workload parameters |
 
-`ExperimentConfig.h` centralizes the legacy protocol switches, client port, server batch size, history/window limits, forced-COLLECT timing, SCP workload size, and YCSB workload/key distribution. Runtime options for TetraBFT, Simple-IT, and Forget-IT remain in each node's `stellar-core.cfg`, with parsing in `src/main/Config.cpp`. The shared normal-path voting state remains in `src/overlay/NormalPathConsensus.h`.
+`ExperimentConfig.h` centralizes all protocol switches, the Simple-IT variant, client port, server batch size, history/window limits, forced-COLLECT timing, SCP workload size, and YCSB workload/key distribution. Per-node settings, including `SEND_CUSTOM_MESSAGE`, remain in `stellar-core.cfg`, with parsing in `src/main/Config.cpp`. The shared normal-path voting state remains in `src/overlay/NormalPathConsensus.h`.
 
 After pulling a revision that adds or moves source files, run `./autogen.sh`, then your usual `./configure` options and `make`. The build generates its source list from tracked files; `make` alone may otherwise retain the old list.
