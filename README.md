@@ -1,94 +1,137 @@
-## Stellar-Shabdiz:
+# Stellar-Shabdiz
 
-This is the repository for project titled "Common-case latency-optimum Responsive Unauthenticated Byzantine Consensus"
+Research artifact for evaluating Shabdiz and related Byzantine consensus protocols in a common Stellar Core codebase. The custom protocols share the overlay transport, transaction batching, workload generator, and client acknowledgement interface.
 
-## Setup
+## Protocols and scope
 
-On an ubuntu system:
+| Protocol | Implementation | Selection |
+| --- | --- | --- |
+| Shabdiz | Existing custom consensus implementation | Default; all protocol switches below disabled |
+| IT-HS | Existing custom consensus implementation | Source switch `ITHS_MODE=true` |
+| PBFT | Existing custom pre-prepare/prepare/commit implementation | Source switch `PBFT_MODE=true` |
+| SCP | Native Stellar consensus with the existing transaction-generation and measurement harness | Source switch `ENABLE_SCP_TRACKING=true` |
+| TetraBFT | Basic TetraBFT normal path: proposal and four voting phases | Configuration `TETRABFT_MODE=true` |
+| Simple-IT | Consecutive-round normal path with Bracha RBC, or optimistic RBC | Configuration `SIMPLE_IT_MODE=true` |
+| Forget-IT | First-view normal path: prepare, vote-1, vote-2 | Configuration `FORGET_IT_MODE=true` |
+
+TetraBFT and Forget-IT process each batch as a fresh consensus instance. Simple-IT uses the previous round as its parent and waits for local parent execution before committing the child. These three implementations use a fixed leader and serialize proposals; they do not implement leader replacement, timeouts, restart recovery, state transfer, or the papers' pipelined variants. Simple-IT does not implement disabled rounds or speculative execution. This repository's PBFT implementation is the integrated custom baseline; external PBFT implementations used in separate experiments are not included here.
+
+The new paths use `f = floor((n-1)/3)` and `n-f` consensus quorums. For `n=3f+1`, these are the papers' `2f+1` quorums; other network sizes use this conservative benchmark adaptation. Proposals carry full batches and votes carry SHA-256 digests over authenticated Stellar peer channels. Consequently, these are shared-transport benchmark implementations, not implementations of an information-theoretically secure transport or a long-message dispersal protocol.
+
+## Build
+
+Use a Linux development environment with GCC 14 or Clang 18, Rust 1.88.0 (as pinned in `rust-toolchain.toml`), and the Stellar Core build dependencies. On Ubuntu with these compiler packages available:
+
 ```bash
-# --- Update system and install basic tools ---
 sudo apt update
-sudo apt -y upgrade
-sudo apt install -y \
-  git build-essential pkg-config autoconf automake libtool \
-  bison flex libpq-dev libunwind-dev parallel sed perl \
-  wget curl cmake
+sudo apt install -y git build-essential pkg-config autoconf automake libtool \
+  bison flex libpq-dev libunwind-dev libsodium-dev parallel perl \
+  wget curl cmake gcc-14 g++-14 clang-18 libclang-18-dev libclang-rt-18-dev
 
-# --- Install GCC 14 / G++ 14 and set as default ---
-sudo apt install -y gcc-14 g++-14
-sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100
-sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
-sudo update-alternatives --set gcc /usr/bin/gcc-14
-sudo update-alternatives --set g++ /usr/bin/g++-14
-
-# --- Install Clang 18 ---
-sudo apt install -y clang-18 libclang-18-dev libclang-rt-18-dev \
-  libunwind-18 libunwind-dev
-
-# --- Install Rust 1.88 using rustup ---
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
-rustup install 1.88.0
-rustup default 1.88.0
+rustup toolchain install 1.88.0
 
-# --- Verify Rust/Cargo ---
-rustc --version
-cargo --version
-
-# --- Install Stellar-Core dependencies and build ---
-sudo apt install -y libsodium-dev libpq-dev libunwind-dev
-
-git clone https://anonymous.4open.science/r/stellar-core-ED50.git
+git clone --recursive https://github.com/tejas-shivanand-mane/stellar-core.git
 cd stellar-core
-
 ./autogen.sh
-./configure
+CC=gcc-14 CXX=g++-14 ./configure
 make -j"$(nproc)"
+
+g++ -O2 -std=c++17 -pthread -Isrc shab_client.cpp -o shab_client
 ```
 
-### Key Modified Files compared to Stellar-core by Stellar
+Build every replica from the same revision, using the default **current** protocol schema. The custom message types are defined in `src/protocol-curr/xdr/Stellar-overlay.x`; the upstream next-protocol schema does not contain these extensions. Rebuild all replicas after changing source switches or the wire schema.
 
-Stellar-overlay.x, OverlayManagerImpl.cpp ,Peer.cpp, Config.cpp
+## Select a protocol
 
-and their corresponding .h files
+The existing source switches are in `src/overlay/OverlayManagerImpl.cpp`:
 
+| Run | `ITHS_MODE` | `PBFT_MODE` | `ENABLE_SCP_TRACKING` |
+| --- | --- | --- | --- |
+| Shabdiz | `false` | `false` | `false` |
+| IT-HS | `true` | `false` | `false` |
+| PBFT | `false` | `true` | `false` |
+| SCP | `false` | `false` | `true` |
+| TetraBFT, Simple-IT, or Forget-IT | `false` | `false` | `false` |
 
-## Running Experiments
+Keep `NonPrune_MODE=false` for the default Shabdiz configuration; enable it only for an explicitly labelled no-pruning experiment. For Shabdiz, IT-HS, PBFT, and SCP, leave `TETRABFT_MODE`, `SIMPLE_IT_MODE`, and `FORGET_IT_MODE` disabled (their defaults).
 
-Run the four-node Shabdiz experiment with RUNGCP.ipynb. Stores results in /home/user/work/experiments/shabdiz/latest_4node_run
+For the newer protocols, add **one** of the following blocks at the top of every replica's configuration, before any TOML table headers. Replace the placeholder with the selected leader's full `G...` public key, identical on every replica.
 
-
-## Post-Processing
-
-Post process the results with PostProcess.ipynb. Uses results stored in /home/user/work/experiments/shabdiz/latest_4node_run to plot throughput and latency vs time plots
-
-## TetraBFT normal path
-
-Implements [Basic TetraBFT, Section 3.2](https://arxiv.org/html/2405.02615v2):
-proposal followed by four voting phases, with n-f quorums. Each batch is an
-independent instance; recovery and pipelined multi-shot TetraBFT are not included.
-
-Add these top-level settings to every replica configuration:
+**TetraBFT**
 
 ```toml
 TETRABFT_MODE=true
-TETRABFT_LEADER="G...public key of the leader..."
+TETRABFT_LEADER="<leader public key>"
 ```
 
-Use the same leader key everywhere and `SEND_CUSTOM_MESSAGE=true` only on the
-leader. Keep PBFT_MODE, ITHS_MODE and ENABLE_SCP_TRACKING disabled. Membership
-is self plus QUORUM_SET validators; every replica must have the same membership
-of at least four nodes. Rebuild all replicas with the default current schema.
-Run the existing shab_client against the leader on port 12000 with aggregate
-concurrency >=100 (the batch size). Check `[TETRA COMMITTED]` logs for matching
-sequence numbers and digests. Reads retain the existing immediate-ACK behavior.
-Write ACKs indicate leader-local execution, not a Byzantine client certificate.
-Use fresh, fully connected deployments; there is no restart/state-transfer
-support, and replicas more than 64 instances behind cannot catch up.
+**Simple-IT**
 
-Voting-core tests (not full Stellar integration tests):
-
-```sh
-g++ -std=c++17 -Wall -Wextra -Werror -pedantic -Isrc tests/tetrabft/normal_path.cpp -o /tmp/tetrabft-test
-/tmp/tetrabft-test
+```toml
+SIMPLE_IT_MODE=true
+SIMPLE_IT_LEADER="<leader public key>"
+SIMPLE_IT_OPTIMISTIC=true
 ```
+
+With `SIMPLE_IT_OPTIMISTIC=true` (the default), optimistic delivery requires `ceil((n+2f-2)/2)` matching ECHOs from **nonleader** replicas, followed by `n-f` consensus COMMITs. The resulting critical path has three message delays. Auxiliary VOTE, ACK, and READY messages are also sent; they must be included in communication measurements. With `SIMPLE_IT_OPTIMISTIC=false`, the implementation uses Bracha-style ECHO/READY delivery followed by COMMIT, giving a four-delay normal path. Use identical settings on every replica and report the variant with each result.
+
+**Forget-IT**
+
+```toml
+FORGET_IT_MODE=true
+FORGET_IT_LEADER="<leader public key>"
+```
+
+Every instance starts in view 1 with a SAFE guard. A replica sends vote-2 after `n-f` matching vote-1 messages and decides after `n-f` vote-2 messages, with the paper's additional `f+1` matching vote-1 acceptance condition. The normal path has three message delays.
+
+For every custom-protocol run, set `SEND_CUSTOM_MESSAGE=true` only on the leader and leave it false on all other replicas. For SCP, this setting selects the load-generating node. The newer protocol modes reject conflicting mode settings and an inconsistent local leader setting at startup.
+
+## Configure and run a private network
+
+1. Put replica IP addresses, one per line, in `tsm_ips.txt`. Do not include client machines.
+2. Update `STELLAR_CORE`, `BASE_DIR`, and the IP-file path in `gcp_setup_stellar_private.sh` for your installation. Run `bash gcp_setup_stellar_private.sh start` to generate node identities and configurations in the configured output directory.
+3. Add the protocol settings above to the generated configurations. Use node1 as the leader when using the supplied experiment scripts. Its public key is recorded in its generated `node.seed` file.
+4. Run `bash gcp_setup_stellar_private.sh` to initialize the databases. Copy each node's configuration and required directories to its host, preserving or adjusting the configured paths.
+5. Start each replica with `src/stellar-core run --conf /path/to/nodeN/stellar-core.cfg`. Wait for the leader's client-listener readiness log before starting the workload.
+
+The setup script recreates node directories in its `start` step; use a separate output directory for each fresh experiment. Replicas must share the same network passphrase and membership, have sufficient overlay connection capacity, and be fully connected. Preserve the generated `KNOWN_PEERS` convention, which includes all replica endpoints including self: the experiment startup gate expects `KNOWN_PEERS.size()-1` authenticated peers.
+
+For TetraBFT, Simple-IT, and Forget-IT, membership is the union of the local node and validators in its resolved `QUORUM_SET`. This must describe the same set of at least four replicas everywhere. Instances are kept within a bounded window of 64 ahead of local execution; this is not a catch-up mechanism for disconnected or restarted replicas. Simple-IT also retains recent completed instances to finish auxiliary RBC messages.
+
+### Custom-protocol workload
+
+Run the client against the leader's port 12000:
+
+```bash
+./shab_client <leader-ip> 12000 150 100000000 100 360 0 2
+```
+
+Arguments are, in order: leader address, port, maximum in-flight requests **per thread**, total request limit, server batch-size hint, duration in seconds, send interval in microseconds, and number of client threads. The example uses two threads with 150 outstanding requests each for a 360-second run. The server batch size is fixed at 100 in `OverlayManagerImpl.cpp`; the client hint does not change it. Provide enough outstanding writes to fill a batch. An incomplete final batch is not flushed automatically.
+
+Select the operation mix through `currentWorkload` in `src/overlay/CustomYCSBWorkload.h` and rebuild the client. The default `WORKLOAD_W` generates updates only; the header also provides A, B, F, and explicit read-ratio workloads. Record the workload, key distribution, batch size, concurrency, and measurement interval with each run.
+
+READ requests retain the same immediate-ACK behavior across all custom protocols: they bypass consensus and do not return a stored value. Report these separately from committed-write throughput and do not interpret them as linearizable read measurements. Write ACKs for the new paths indicate execution at the leader, not a Byzantine client quorum certificate.
+
+### SCP workload
+
+Set `ENABLE_SCP_TRACKING=true`, rebuild the replicas, and enable `SEND_CUSTOM_MESSAGE` on the load-generating node. This harness creates accounts and submits native Stellar transactions through SCP; it does not use the custom TCP client. Its workload parameters include `NUM_TEST_ACCOUNTS` and `SCP_OPS_PER_TX` in `OverlayManagerImpl.cpp`. Use the private network's native ledger bootstrap and check successful ledger advancement and transaction application before measuring. Report SCP operations and ledger-close measurements with their units; they are not the custom key-value client's ACK measurements.
+
+## Experiment orchestration and results
+
+`RunGCP.ipynb` provisions replica/client machines, builds the binaries, generates private-network configurations, runs the client, and collects outputs. Its default experiment uses four replicas. Set the project, service account, image family, zones, usernames, local/remote paths, node-count list, load points, and output location for your environment. Review its VM deletion settings and automatic Git commit/push step before executing it.
+
+For TetraBFT, Simple-IT, and Forget-IT, insert the chosen configuration block into **every** generated replica configuration in the notebook's configuration-generation step, before those files are copied to the machines. The notebook currently inserts only `SEND_CUSTOM_MESSAGE=true` on node1. For source-selected protocols, compile the selected switches on every host before running; do not reuse a binary built for another mode. Use the SCP harness separately from the notebook's custom-client workload.
+
+Retain the source revision, build configuration, node configurations, client output, replica logs, and deployment/load parameters for each experiment. The new paths log `[TETRA COMMITTED]`, `[SIMPLE-IT COMMITTED]`, or `[FORGET-IT COMMITTED]` with sequence number, batch digest, and transaction count. Compare sequence numbers and digests across replicas before accepting a run.
+
+`PostProcess.ipynb` contains the existing throughput and latency analysis. Point it at the output directory for the selected run and align its parsing and measurement windows with that run's output format. Keep protocol variants and read/write measurements distinct. The notebooks require environment-specific configuration; they are not a one-command reproduction of every paper figure.
+
+## Implementation references
+
+- [Basic TetraBFT, Section 3.2](https://arxiv.org/abs/2405.02615v2).
+- [Simple-IT, normal operation in Figure 2](https://arxiv.org/abs/2606.14404v2).
+- [Optimistic reliable broadcast, Figure 1](https://arxiv.org/abs/2505.02761v4).
+- [Forget-IT, Algorithm 1](https://eprint.iacr.org/2026/355).
+
+The main integration is in `src/overlay/OverlayManagerImpl.cpp`; the new normal-path voting state is in `src/overlay/NormalPathConsensus.h`. Runtime options are defined in `src/main/Config.h` and parsed in `src/main/Config.cpp`.

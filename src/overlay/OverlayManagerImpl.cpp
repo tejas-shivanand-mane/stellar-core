@@ -1682,23 +1682,27 @@ OverlayManagerImpl::OverlayManagerImpl(Application& app)
     , mResolvingPeersRetryCount(0)
     , mScheduledMessages(100000, true)
 {
-    if (mApp.getConfig().TETRABFT_MODE)
+    if (normalPathEnabled())
     {
         auto const& cfg = mApp.getConfig();
-        if (PBFT_MODE || ITHS_MODE || ENABLE_SCP_TRACKING)
-            throw std::invalid_argument("TETRABFT_MODE conflicts with another protocol");
-        mTetraLeader = KeyUtils::fromStrKey<PublicKey>(cfg.TETRABFT_LEADER);
-        mTetraMembers.insert(mApp.getNodeID());
+        int enabled = int(cfg.TETRABFT_MODE) + int(cfg.SIMPLE_IT_MODE) + int(cfg.FORGET_IT_MODE);
+        if (enabled != 1 || PBFT_MODE || ITHS_MODE || ENABLE_SCP_TRACKING)
+            throw std::invalid_argument("Enable only one custom consensus protocol");
+        auto const& leader = cfg.TETRABFT_MODE ? cfg.TETRABFT_LEADER :
+                             cfg.SIMPLE_IT_MODE ? cfg.SIMPLE_IT_LEADER : cfg.FORGET_IT_LEADER;
+        mNormalLeader = KeyUtils::fromStrKey<PublicKey>(leader);
+        mNormalMembers.insert(mApp.getNodeID());
         LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
-            mTetraMembers.insert(id);
+            mNormalMembers.insert(id);
             return true;
         });
-        if (mTetraMembers.size() < 4 || !mTetraMembers.count(mTetraLeader) ||
-            cfg.SEND_CUSTOM_MESSAGE != (mApp.getNodeID() == mTetraLeader))
-            throw std::invalid_argument("TetraBFT needs >=4 fixed members and SEND_CUSTOM_MESSAGE only on its configured leader");
-        mTetraQuorum = mTetraMembers.size() - (mTetraMembers.size() - 1) / 3;
-        CLOG_INFO(Overlay, "[TETRA CONFIG] members={} quorum={} normal_path_only=true",
-                  mTetraMembers.size(), mTetraQuorum);
+        if (mNormalMembers.size() < 4 || !mNormalMembers.count(mNormalLeader) ||
+            cfg.SEND_CUSTOM_MESSAGE != (mApp.getNodeID() == mNormalLeader))
+            throw std::invalid_argument("Normal-path protocols need >=4 fixed members and SEND_CUSTOM_MESSAGE only on their configured leader");
+        mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
+        CLOG_INFO(Overlay, "[{} CONFIG] members={} quorum={} simple_optimistic={} normal_path_only=true",
+                  normalPathName(), mNormalMembers.size(), mNormalQuorum,
+                  cfg.SIMPLE_IT_MODE && cfg.SIMPLE_IT_OPTIMISTIC);
     }
     mPeerSources[PeerType::INBOUND] = std::make_unique<RandomPeerSource>(
         mPeerManager, RandomPeerSource::nextAttemptCutoff(PeerType::INBOUND));
@@ -2081,7 +2085,7 @@ OverlayManagerImpl::tick()
         mApp.getConfig().SEND_CUSTOM_MESSAGE &&
         g_clientListenerActive)
     {
-        if (PBFT_MODE || mApp.getConfig().TETRABFT_MODE)
+        if (PBFT_MODE || normalPathEnabled())
         {
             prop();
         }
@@ -2632,8 +2636,38 @@ tryBuildServerBatch(TransactionBatch& batch,
 }
 
 
+bool
+OverlayManagerImpl::normalPathEnabled() const
+{
+    auto const& cfg = mApp.getConfig();
+    return cfg.TETRABFT_MODE || cfg.SIMPLE_IT_MODE || cfg.FORGET_IT_MODE;
+}
+
+char const*
+OverlayManagerImpl::normalPathName() const
+{
+    auto const& cfg = mApp.getConfig();
+    return cfg.TETRABFT_MODE ? "TETRA" : cfg.SIMPLE_IT_MODE ? "SIMPLE-IT" : "FORGET-IT";
+}
+
+CustomMessageType
+OverlayManagerImpl::normalProposalType() const
+{
+    auto const& cfg = mApp.getConfig();
+    return cfg.TETRABFT_MODE ? CUSTOM_TETRA_PROPOSE :
+           cfg.SIMPLE_IT_MODE ? CUSTOM_SIMPLE_PROPOSE : CUSTOM_FORGET_PREPARE;
+}
+
+uint64_t
+OverlayManagerImpl::normalMetadata(uint64_t seq) const
+{
+    auto const& cfg = mApp.getConfig();
+    // Simple-IT parent round; Forget-IT fresh instance's view 1; Tetra view 0.
+    return cfg.SIMPLE_IT_MODE ? seq - 1 : cfg.FORGET_IT_MODE ? 1 : 0;
+}
+
 void
-OverlayManagerImpl::tetraSend(CustomMessageType type, uint64_t seq,
+OverlayManagerImpl::normalSend(CustomMessageType type, uint64_t seq,
                              Hash const& digest, std::string const& data)
 {
     auto msg = std::make_shared<StellarMessage>();
@@ -2641,21 +2675,23 @@ OverlayManagerImpl::tetraSend(CustomMessageType type, uint64_t seq,
     auto& cm = msg->customMessage();
     cm.msgType = type;
     cm.view = seq; // independent instance number, NOT a recovery view
-    cm.vp = 0;     // only view zero is implemented
+    cm.vp = normalMetadata(seq);
+    // Forget-IT's first-view guard is SAFE, explicitly encoded on vote-2.
+    cm.dependencyVp = type == CUSTOM_FORGET_VOTE2 ? 1 : 0;
     cm.blockHash = digest;
     cm.data = data;
     // Direct authenticated channels: identical votes from distinct senders
     // must not be collapsed by the overlay's content-based flood cache.
     for (auto const& peer : getAuthenticatedPeers())
-        if (mTetraMembers.count(peer.first))
+        if (mNormalMembers.count(peer.first))
             peer.second->sendMessage(msg);
 }
 
 void
-OverlayManagerImpl::tetraProp()
+OverlayManagerImpl::normalProp()
 {
-    if (mApp.getNodeID() != mTetraLeader ||
-        mTetraNextSeq != mTetraExecuted + 1)
+    if (mApp.getNodeID() != mNormalLeader ||
+        mNormalNextSeq != mNormalExecuted + 1)
         return;
     TransactionBatch batch;
     std::vector<ClientAck> acks;
@@ -2663,30 +2699,41 @@ OverlayManagerImpl::tetraProp()
         return;
     auto data = batch.serialize();
     auto digest = sha256(data);
-    uint64_t seq = mTetraNextSeq++;
+    uint64_t seq = mNormalNextSeq++;
     g_blockClientAcks[BlockKey{seq, digest}] = std::move(acks);
-    auto& slot = mTetraSlots[seq];
-    slot.protocol.propose(digest);
+    auto& slot = mNormalSlots[seq];
+    slot.digest = digest;
+    if (mApp.getConfig().TETRABFT_MODE)
+        slot.tetra.propose(digest);
+    else if (mApp.getConfig().SIMPLE_IT_MODE)
+        slot.simple.propose(digest);
+    else
+        slot.forget.propose(digest);
     slot.proposed = true;
     slot.data = data;
-    tetraSend(CUSTOM_TETRA_PROPOSE, seq, digest, data);
-    tetraAdvance(seq); // leader casts vote-1 as well
+    normalSend(normalProposalType(), seq, digest, data);
+    normalAdvance(seq); // leader casts vote-1 as well
 }
 
 void
-OverlayManagerImpl::handleTetraMessage(StellarMessage const& msg,
+OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
                                       NodeID const& sender)
 {
     auto const& cm = msg.customMessage();
     auto seq = cm.view;
     // Bounded lookahead permits a faster replica to start the next instance
     // before this replica has received the last vote of the previous one.
-    if (!mTetraMembers.count(sender) || cm.vp != 0 ||
-        seq <= mTetraExecuted || seq - mTetraExecuted > 64)
+    auto const& cfg = mApp.getConfig();
+    // Simple-IT continues the RBC's auxiliary messages briefly after execution.
+    bool retainedSimple = cfg.SIMPLE_IT_MODE && seq <= mNormalExecuted &&
+                          mNormalSlots.count(seq);
+    if (!mNormalMembers.count(sender) || seq == 0 || cm.vp != normalMetadata(seq) ||
+        (!retainedSimple && seq <= mNormalExecuted) ||
+        (seq > mNormalExecuted && seq - mNormalExecuted > 64))
         return;
-    if (cm.msgType == CUSTOM_TETRA_PROPOSE)
+    if (cm.msgType == normalProposalType())
     {
-        if (sender != mTetraLeader || sha256(cm.data) != cm.blockHash)
+        if (sender != mNormalLeader || sha256(cm.data) != cm.blockHash)
             return;
         try
         {
@@ -2699,9 +2746,13 @@ OverlayManagerImpl::handleTetraMessage(StellarMessage const& msg,
         {
             return;
         }
-        auto& slot = mTetraSlots[seq];
-        if (!slot.protocol.propose(cm.blockHash))
+        auto& slot = mNormalSlots[seq];
+        bool accepted = cfg.TETRABFT_MODE ? slot.tetra.propose(cm.blockHash) :
+                        cfg.SIMPLE_IT_MODE ? slot.simple.propose(cm.blockHash) :
+                                             slot.forget.propose(cm.blockHash);
+        if (!accepted)
             return;
+        slot.digest = cm.blockHash;
         slot.proposed = true;
         slot.data = cm.data;
     }
@@ -2709,31 +2760,69 @@ OverlayManagerImpl::handleTetraMessage(StellarMessage const& msg,
     {
         if (!cm.data.empty()) // votes contain only the batch digest
             return;
-        auto phase = static_cast<unsigned>(cm.msgType - CUSTOM_TETRA_VOTE1 + 1);
-        if (phase < 1 || phase > 4)
-            return;
-        mTetraSlots[seq].protocol.vote(phase, sender, cm.blockHash);
+        if (cfg.TETRABFT_MODE)
+            mNormalSlots[seq].tetra.vote(cm.msgType - CUSTOM_TETRA_VOTE1 + 1, sender, cm.blockHash);
+        else if (cfg.SIMPLE_IT_MODE)
+        {
+            if (!cfg.SIMPLE_IT_OPTIMISTIC &&
+                (cm.msgType == CUSTOM_SIMPLE_VOTE || cm.msgType == CUSTOM_SIMPLE_ACK))
+                return;
+            mNormalSlots[seq].simple.vote(cm.msgType - CUSTOM_SIMPLE_ECHO + 1, sender, cm.blockHash);
+        }
+        else
+        {
+            if (cm.msgType == CUSTOM_FORGET_VOTE2 && cm.dependencyVp != 1)
+                return; // only SAFE-guard first-view messages supported
+            mNormalSlots[seq].forget.vote(cm.msgType - CUSTOM_FORGET_VOTE1 + 1, sender, cm.blockHash);
+        }
     }
-    tetraAdvance(seq);
+    normalAdvance(seq);
 }
 
 void
-OverlayManagerImpl::tetraAdvance(uint64_t seq)
+OverlayManagerImpl::normalAdvance(uint64_t seq)
 {
-    auto& slot = mTetraSlots.at(seq);
+    auto& slot = mNormalSlots.at(seq);
     if (!slot.proposed)
         return;
-    for (auto phase : slot.protocol.advance(mApp.getNodeID(), mTetraQuorum))
-        tetraSend(static_cast<CustomMessageType>(CUSTOM_TETRA_VOTE1 + phase - 1),
-                  seq, slot.protocol.digest());
-    if (slot.protocol.decide(mTetraQuorum))
+    auto const& cfg = mApp.getConfig();
+    std::vector<unsigned> outgoing;
+    CustomMessageType firstVote;
+    bool decided = false;
+    if (cfg.TETRABFT_MODE)
+    {
+        firstVote = CUSTOM_TETRA_VOTE1;
+        outgoing = slot.tetra.advance(mApp.getNodeID(), mNormalQuorum);
+        decided = slot.tetra.decide(mNormalQuorum);
+    }
+    else if (cfg.FORGET_IT_MODE)
+    {
+        firstVote = CUSTOM_FORGET_VOTE1;
+        outgoing = slot.forget.advance(mApp.getNodeID(), mNormalQuorum);
+        size_t f = (mNormalMembers.size() - 1) / 3;
+        decided = slot.forget.decide(mNormalQuorum, f + 1);
+    }
+    else
+    {
+        firstVote = CUSTOM_SIMPLE_ECHO;
+        // Consecutive parent is safe once already executed. Serialized proposals
+        // deliberately omit Simple-IT's pipeline and disabled-round machinery.
+        bool safeParent = seq - 1 <= mNormalExecuted;
+        outgoing = slot.simple.advance(mApp.getNodeID(), mNormalLeader,
+                                       mNormalMembers.size(), cfg.SIMPLE_IT_OPTIMISTIC,
+                                       safeParent);
+        decided = slot.simple.decide(mNormalQuorum, mNormalLeader, safeParent);
+    }
+    for (auto phase : outgoing)
+        normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq, slot.digest);
+    if (decided)
         slot.decided = true;
 
     // Execution is ordered even if network delivery reorders decisions.
     while (true)
     {
-        auto it = mTetraSlots.find(mTetraExecuted + 1);
-        if (it == mTetraSlots.end() || !it->second.decided)
+        auto it = mNormalSlots.find(mNormalExecuted + 1);
+        if (it == mNormalSlots.end() || !it->second.decided)
             break;
         auto const& ready = it->second;
         auto batch = TransactionBatch::deserialize(ready.data);
@@ -2753,16 +2842,27 @@ OverlayManagerImpl::tetraAdvance(uint64_t seq)
                 g_kvStore[key] = value;
             }
         }
-        ++mTetraExecuted;
-        CLOG_INFO(Overlay, "[TETRA COMMITTED] seq={} digest={} txns={}",
-                  mTetraExecuted, hexAbbrev(ready.protocol.digest()),
+        ++mNormalExecuted;
+        CLOG_INFO(Overlay, "[{} COMMITTED] seq={} digest={} txns={}",
+                  normalPathName(), mNormalExecuted, hexAbbrev(ready.digest),
                   batch.transactions.size());
-        if (mApp.getNodeID() == mTetraLeader)
-            ackClientBatchesForBlock(mTetraExecuted, ready.protocol.digest());
-        mTetraSlots.erase(it);
+        if (mApp.getNodeID() == mNormalLeader)
+            ackClientBatchesForBlock(mNormalExecuted, ready.digest);
+        if (!cfg.SIMPLE_IT_MODE)
+            mNormalSlots.erase(it);
     }
-    if (mApp.getNodeID() == mTetraLeader)
-        tetraProp();
+    if (cfg.SIMPLE_IT_MODE)
+    {
+        // Bounded retention lets slow RBC messages finish without re-execution.
+        while (!mNormalSlots.empty() && mNormalExecuted > 64 &&
+               mNormalSlots.begin()->first < mNormalExecuted - 64)
+            mNormalSlots.erase(mNormalSlots.begin());
+        auto next = mNormalSlots.find(mNormalExecuted + 1);
+        if (next != mNormalSlots.end() && next->second.proposed && seq != next->first)
+            normalAdvance(next->first); // reconsider a now-safe parent
+    }
+    if (mApp.getNodeID() == mNormalLeader)
+        normalProp();
 }
 
 void
@@ -2903,9 +3003,9 @@ OverlayManagerImpl::prop()
     }
 
 
-    if (mApp.getConfig().TETRABFT_MODE)
+    if (normalPathEnabled())
     {
-        tetraProp();
+        normalProp();
         return;
     }
 
@@ -4132,14 +4232,18 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 
 
     auto type = stellarMsg.customMessage().msgType;
+    auto const& cfg = mApp.getConfig();
     bool tetraMessage = type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
-    if (mApp.getConfig().TETRABFT_MODE)
+    bool simpleMessage = type >= CUSTOM_SIMPLE_PROPOSE && type <= CUSTOM_SIMPLE_COMMIT;
+    bool forgetMessage = type >= CUSTOM_FORGET_PREPARE && type <= CUSTOM_FORGET_VOTE2;
+    if (normalPathEnabled())
     {
-        if (tetraMessage)
-            handleTetraMessage(stellarMsg, peer->getPeerID());
+        if ((cfg.TETRABFT_MODE && tetraMessage) || (cfg.SIMPLE_IT_MODE && simpleMessage) ||
+            (cfg.FORGET_IT_MODE && forgetMessage))
+            handleNormalMessage(stellarMsg, peer->getPeerID());
         return;
     }
-    if (tetraMessage)
+    if (tetraMessage || simpleMessage || forgetMessage)
         return;
 
     // Derive this node's deterministic index from the sorted membership.

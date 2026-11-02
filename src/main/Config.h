@@ -188,6 +188,11 @@ class Config : public std::enable_shared_from_this<Config>
     bool SEND_CUSTOM_MESSAGE;
     // Experimental Basic TetraBFT normal path, disabled by default.
     bool TETRABFT_MODE = false;
+    bool SIMPLE_IT_MODE = false;
+    bool SIMPLE_IT_OPTIMISTIC = true;
+    std::string SIMPLE_IT_LEADER;
+    bool FORGET_IT_MODE = false;
+    std::string FORGET_IT_LEADER;
     std::string TETRABFT_LEADER; // same G... public key on every replica
     bool MEMORY_PROF;
 

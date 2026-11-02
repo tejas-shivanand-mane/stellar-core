@@ -5,7 +5,7 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "Peer.h"
-#include "overlay/TetraBFTNormal.h"
+#include "overlay/NormalPathConsensus.h"
 #include "PeerAuth.h"
 #include "PeerDoor.h"
 #include "PeerManager.h"
@@ -106,24 +106,31 @@ class OverlayManagerImpl : public OverlayManager
     void tick();
     void prop();
     void pbftProp();
-    struct TetraSlot
+    struct NormalSlot
     {
-        TetraBFTNormal<NodeID, Hash> protocol;
+        TetraBFTNormal<NodeID, Hash> tetra;
+        ForgetITNormal<NodeID, Hash> forget;
+        SimpleITNormal<NodeID, Hash> simple;
+        Hash digest;
         std::string data;
         bool proposed = false;
         bool decided = false;
     };
-    std::set<NodeID> mTetraMembers;
-    NodeID mTetraLeader;
-    std::map<uint64_t, TetraSlot> mTetraSlots;
-    uint64_t mTetraNextSeq = 1;
-    uint64_t mTetraExecuted = 0;
-    size_t mTetraQuorum = 0;
-    void tetraProp();
-    void tetraAdvance(uint64_t seq);
-    void tetraSend(CustomMessageType type, uint64_t seq, Hash const& digest,
+    std::set<NodeID> mNormalMembers;
+    NodeID mNormalLeader;
+    std::map<uint64_t, NormalSlot> mNormalSlots;
+    uint64_t mNormalNextSeq = 1;
+    uint64_t mNormalExecuted = 0;
+    size_t mNormalQuorum = 0;
+    bool normalPathEnabled() const;
+    char const* normalPathName() const;
+    CustomMessageType normalProposalType() const;
+    uint64_t normalMetadata(uint64_t seq) const;
+    void normalProp();
+    void normalAdvance(uint64_t seq);
+    void normalSend(CustomMessageType type, uint64_t seq, Hash const& digest,
                    std::string const& data = {});
-    void handleTetraMessage(StellarMessage const& msg, NodeID const& sender);
+    void handleNormalMessage(StellarMessage const& msg, NodeID const& sender);
     void tryExecutePBFT();
 
     void handlePBFTMessage(StellarMessage const& stellarMsg,
