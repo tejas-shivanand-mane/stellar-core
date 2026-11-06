@@ -13,6 +13,7 @@
 #include <memory>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <endian.h>
 #include <unistd.h>
 
@@ -48,7 +49,7 @@ serializeRequest(uint64_t requestId, uint64_t txnId, int workerId)
 
     {
         std::lock_guard<std::mutex> lock(g_workloadMutex);
-        txn.payload = generateYCSBOp();
+        txn.payload = stellar::experiment::generateYCSBOp();
     }
 
     txn.timestamp = ts;
@@ -337,6 +338,16 @@ struct ClientWorker
         if (fd < 0)
         {
             perror("socket");
+            return false;
+        }
+
+        int noDelay = 1;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY,
+                       &noDelay, sizeof(noDelay)) < 0)
+        {
+            perror("setsockopt TCP_NODELAY");
+            close(fd);
+            fd = -1;
             return false;
         }
 

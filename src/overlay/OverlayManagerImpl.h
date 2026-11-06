@@ -5,6 +5,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "Peer.h"
+#include "overlay/NormalPathConsensus.h"
+#include "overlay/experiments/ExperimentConfig.h"
 #include "PeerAuth.h"
 #include "PeerDoor.h"
 #include "PeerManager.h"
@@ -36,9 +38,7 @@ Maintain the set of peers we are connected to
 namespace stellar
 {
 
-
     void submitNextBatchOfTransactions(Application& app);
-
 
 class OverlayManagerImpl : public OverlayManager
 {
@@ -79,15 +79,6 @@ class OverlayManagerImpl : public OverlayManager
         void shutdown();
     };
 
-
-
-
-
-
-
-
-
-
     std::shared_ptr<int> mLiveInboundPeersCounter;
 
     PeersList& getPeersList(Peer* peer);
@@ -103,8 +94,48 @@ class OverlayManagerImpl : public OverlayManager
     RandomEvictionCache<uint64_t, bool> mMessageCache;
 
     void tick();
+    void tickExperiment();
+    void tickSCPBenchmark();
     void prop();
+    void legacyProp(bool ithsMode);
+    void shabdizProp();
+    void ithsProp();
+    void shabdizCollect();
+    void acceptShabdizLocalProposal(CustomMessage const& cm);
+    void acceptITHSLocalProposal(CustomMessage const& cm);
+    void deliverBufferedForCurrentView();
+    void handleShabdizMessage(StellarMessage const& msg, Peer::pointer peer);
+    void handleITHSMessage(StellarMessage const& msg, Peer::pointer peer);
+    void initializeNormalPath();
+    bool advanceTetraBFT(uint64_t seq);
+    bool advanceForgetIT(uint64_t seq);
+    bool advanceSimpleIT(uint64_t seq);
     void pbftProp();
+    struct NormalSlot
+    {
+        TetraBFTNormal<NodeID, Hash> tetra;
+        ForgetITNormal<NodeID, Hash> forget;
+        SimpleITNormal<NodeID, Hash> simple;
+        Hash digest;
+        std::string data;
+        bool proposed = false;
+        bool decided = false;
+    };
+    std::set<NodeID> mNormalMembers;
+    std::optional<NodeID> mNormalLeader;
+    std::map<uint64_t, NormalSlot> mNormalSlots;
+    uint64_t mNormalNextSeq = 1;
+    uint64_t mNormalExecuted = 0;
+    size_t mNormalQuorum = 0;
+    bool normalPathEnabled() const;
+    char const* normalPathName() const;
+    CustomMessageType normalProposalType() const;
+    uint64_t normalMetadata(uint64_t seq) const;
+    void normalProp();
+    void normalAdvance(uint64_t seq);
+    void normalSend(CustomMessageType type, uint64_t seq, Hash const& digest,
+                   std::string const& data = {});
+    void handleNormalMessage(StellarMessage const& msg, NodeID const& sender);
     void tryExecutePBFT();
 
     void handlePBFTMessage(StellarMessage const& stellarMsg,
@@ -134,9 +165,6 @@ class OverlayManagerImpl : public OverlayManager
     OverlayManagerImpl(Application& app);
     ~OverlayManagerImpl();
 
-
-
-
     void clearLedgersBelow(uint32_t ledgerSeq, uint32_t lclSeq) override;
     bool recvFloodedMsgID(Peer::pointer peer, Hash const& msgID) override;
     void sendPrepare( uint64_t view, Hash const& blockHash, std::string const& data) override;
@@ -152,9 +180,7 @@ class OverlayManagerImpl : public OverlayManager
     void sendITHSLock( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendITHSCommit( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
-
-    void startClientListener(int port = 12000);
-
+    void startClientListener(int port = experiment::CLIENT_PORT);
 
     void recvCustomMessage(StellarMessage const& stellarMsg,
                            std::shared_ptr<Peer> peer) override;
