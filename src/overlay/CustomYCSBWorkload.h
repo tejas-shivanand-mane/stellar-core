@@ -1,13 +1,36 @@
 #pragma once
 
-#include "overlay/experiments/ExperimentConfig.h"
 #include <cmath>
 #include <cstdlib>
 #include <string>
 #include <unordered_map>
 
-namespace stellar::experiment
+enum YCSBWorkload
 {
+    WORKLOAD_A,
+    WORKLOAD_B,
+    WORKLOAD_F,
+    WORKLOAD_W,
+
+    // New explicit read-ratio workloads
+    WORKLOAD_R0,
+    WORKLOAD_R10,
+    WORKLOAD_R20,
+    WORKLOAD_R25,
+    WORKLOAD_R40,
+    WORKLOAD_R50,
+    WORKLOAD_R60,
+    WORKLOAD_R75,
+    WORKLOAD_R80,
+    WORKLOAD_R100
+};
+
+static double zipfian_alpha = 0.99;
+static uint64_t zipfian_n = 1000000;
+
+// Change this for each experiment.
+static YCSBWorkload currentWorkload = WORKLOAD_W;
+
 static uint64_t
 zipfianNext()
 {
@@ -115,4 +138,3 @@ generateYCSBOp()
 
     return "READ " + key;
 }
-} // namespace stellar::experiment

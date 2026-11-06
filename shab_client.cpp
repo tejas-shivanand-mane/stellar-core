@@ -48,7 +48,7 @@ serializeRequest(uint64_t requestId, uint64_t txnId, int workerId)
 
     {
         std::lock_guard<std::mutex> lock(g_workloadMutex);
-        txn.payload = stellar::experiment::generateYCSBOp();
+        txn.payload = generateYCSBOp();
     }
 
     txn.timestamp = ts;
