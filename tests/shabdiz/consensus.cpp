@@ -337,12 +337,14 @@ slowValidationBoundaries()
 }
 
 void
-network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
+network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
+        bool routedWork = false)
 {
     struct Delivery
     {
         int from, to;
         Message m;
+        bool work = false;
     };
     std::vector<int> members;
     for (int i = 0; i < n; ++i)
@@ -351,6 +353,8 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
     std::vector<std::unique_ptr<Engine>> engines(n);
     std::vector<std::vector<Block>> executed(n);
     std::vector<Delivery> pending;
+    std::vector<std::set<uint64_t>> availableWork(n);
+    uint64_t forwardedView = 0;
     std::mt19937 rng(seed);
     const uint64_t limit = 8;
     for (int i = absent; i < n; ++i)
@@ -365,7 +369,8 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
             },
             [&, i](auto const& b) { stores[i][b.hash] = b; }, digest,
             [&, i](auto const&) -> std::optional<std::string> {
-                if (engines[i]->committed().view >= limit)
+                if (engines[i]->committed().view >= limit ||
+                    (routedWork && !availableWork[i].count(engines[i]->view())))
                     return {};
                 return "data" + std::to_string(engines[i]->view());
             },
@@ -374,6 +379,22 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
             engines[i]->forceSlowViews(100);
     }
     auto drain = [&](int id) {
+        // Only the ingress (last member) owns requests. Supply work to the
+        // current leader, not every replica. Retry routing after view changes,
+        // including when the old leader is one of the absent members.
+        if (routedWork && id == n - 1 && forwardedView != engines[id]->view())
+        {
+            forwardedView = engines[id]->view();
+            int leader = engines[id]->leader(forwardedView);
+            if (leader == id)
+            {
+                availableWork[id].insert(forwardedView);
+                engines[id]->workAvailable();
+            }
+            else if (leader >= absent)
+                pending.push_back(
+                    {id, leader, msg(Kind::Prepare, forwardedView), true});
+        }
         auto blocks = engines[id]->takeExecuted();
         executed[id].insert(executed[id].end(), blocks.begin(), blocks.end());
         for (auto const& o : engines[id]->takeOutgoing())
@@ -396,6 +417,13 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
             auto d = std::move(pending[index]);
             pending[index] = std::move(pending.back());
             pending.pop_back();
+            if (d.work)
+            {
+                availableWork[d.to].insert(d.m.view);
+                engines[d.to]->workAvailable();
+                drain(d.to);
+                continue;
+            }
             // One late replica misses old phase votes but can catch up via
             // reports.
             if (loseOldVotes && d.to == n - 1 && d.m.view <= 2 &&
@@ -424,6 +452,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes)
             std::cerr << "stalled n=" << n << " absent=" << absent
                       << " seed=" << seed << " slow=" << forceSlow
                       << " lose=" << loseOldVotes << " node=" << i
+                      << " routed=" << routedWork
                       << " view=" << engines[i]->view()
                       << " prepared=" << engines[i]->prepared().view
                       << " committed=" << engines[i]->committed().view << "\n";
@@ -460,6 +489,17 @@ main()
                 }
     network(48, 0, 1, false, false);
     network(48, 15, 2, true, false);
+    schedules += 2;
+    for (int n : {4, 7, 8, 16})
+        for (unsigned seed = 0; seed < 4; ++seed)
+            for (bool slow : {false, true})
+                for (int absent : {0, (n - 1) / 3})
+                {
+                    network(n, absent, seed, slow, seed % 2 == 0, true);
+                    ++schedules;
+                }
+    network(48, 0, 1, false, false, true);
+    network(48, 15, 2, true, false, true);
     schedules += 2;
     std::cout << "Shabdiz rules and " << schedules
               << " randomized network schedules passed\n";

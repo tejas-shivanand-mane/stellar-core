@@ -7,6 +7,8 @@
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/OverlayManagerImpl.h"
+#include "overlay/ShabdizArchive.h"
+#include "overlay/ShabdizBatch.h"
 #include "overlay/ShabdizConsensus.h"
 #include "overlay/experiments/ExperimentState.h"
 #include "scp/LocalNode.h"
@@ -15,10 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <limits>
-#include <sstream>
 #include <unistd.h>
 
 namespace stellar
@@ -38,39 +37,6 @@ blockDigest(uint64_t view, Hash const& parent, std::string const& data)
     // Domain-separated, canonical commitment to ALL block fields.
     return sha256(xdr::xdr_to_opaque(xdr::xstring<>("shabdiz-block-v1"), view,
                                      parent, xdr::xstring<90000>(data)));
-}
-
-bool
-validBatch(std::string const& data)
-{
-    if (data.empty() || data.size() > 90000)
-        return false;
-    try
-    {
-        auto batch = TransactionBatch::deserialize(data);
-        if (batch.transactions.size() != SERVER_BATCH_SIZE ||
-            batch.serialize() != data)
-            return false;
-        for (auto const& txn : batch.transactions)
-        {
-            std::istringstream in(txn.payload);
-            std::string op, key, value, extra;
-            if (!(in >> op >> key))
-                return false;
-            if (op != "READ")
-            {
-                if ((op != "UPDATE" && op != "RMW") || !(in >> value))
-                    return false;
-            }
-            if (in >> extra)
-                return false;
-        }
-        return true;
-    }
-    catch (std::exception const&)
-    {
-        return false;
-    }
 }
 
 ShabdizPacket
@@ -134,35 +100,53 @@ struct ShabdizRuntime
     std::unique_ptr<PaperShabdiz> engine;
     // Files are an archive of blocks, not retained consensus votes. Only a
     // bounded working cache is in memory; ancestry remains fetchable after GC.
-    std::filesystem::path archive;
+    std::unique_ptr<ShabdizArchive> archive;
+    std::map<Hash, ShabdizBatch> parsed;
+    std::deque<Hash> parsedOrder;
     std::map<Hash, PaperShabdiz::Block> cache;
     std::deque<Hash> cacheOrder;
     std::map<Hash, std::string> work;
     std::deque<Hash> workOrder;
     std::map<Hash, std::vector<ClientAck>> localAcks;
+    std::map<Hash, std::set<NodeID>> forwardedTo;
     Hash applied{};
     bool started = false, timerArmed = false, forced = false, pumping = false;
-    uint64_t generation = 0;
+    uint64_t generation = 0, forwardedView = 0;
+    uint64_t fastProposals = 0, slowProposals = 0, collects = 0, wishes = 0;
+    bool newWork = false, retryWork = false;
     Clock::time_point deadline, retry, startedAt;
 
+    ShabdizBatch const*
+    batch(std::string const& data, Hash const& id)
+    {
+        auto it = parsed.find(id);
+        if (it != parsed.end())
+            return &it->second;
+        auto result = parseShabdizBatch(data, SERVER_BATCH_SIZE);
+        if (!result)
+            return nullptr;
+        it = parsed.emplace(id, std::move(*result)).first;
+        parsedOrder.push_back(id);
+        while (parsed.size() > BLOCK_CACHE_SIZE)
+        {
+            parsed.erase(parsedOrder.front());
+            parsedOrder.pop_front();
+        }
+        return &it->second;
+    }
     void
     remember(PaperShabdiz::Block const& b)
     {
-        auto path = archive / binToHex(b.hash);
-        if (!std::filesystem::exists(path))
-        {
-            PaperShabdiz::Message m;
-            m.kind = PaperShabdiz::Kind::BlockData;
-            m.value = {b.view, b.hash};
-            m.block = b;
-            auto bytes = xdr::xdr_to_opaque(encode(m));
-            std::ofstream out(path, std::ios::binary);
-            out.write(reinterpret_cast<char const*>(bytes.data()),
-                      bytes.size());
-            out.close();
-            if (!out)
-                throw std::runtime_error("Cannot archive Shabdiz block");
-        }
+        if (cache.count(b.hash))
+            return;
+        PaperShabdiz::Message m;
+        m.kind = PaperShabdiz::Kind::BlockData;
+        m.value = {b.view, b.hash};
+        m.block = b;
+        auto bytes = xdr::xdr_to_opaque(encode(m));
+        archive->put("b-" + binToHex(b.hash),
+                     std::string(reinterpret_cast<char const*>(bytes.data()),
+                                 bytes.size()));
         cacheBlock(b);
     }
     void
@@ -182,13 +166,10 @@ struct ShabdizRuntime
         auto it = cache.find(h);
         if (it != cache.end())
             return it->second;
-        auto path = archive / binToHex(h);
-        if (!std::filesystem::exists(path))
+        auto stored = archive->get("b-" + binToHex(h));
+        if (!stored)
             return {};
-        std::ifstream in(path, std::ios::binary);
-        if (!in)
-            throw std::runtime_error("Cannot read Shabdiz block archive");
-        std::vector<char> bytes((std::istreambuf_iterator<char>(in)), {});
+        std::vector<char> bytes(stored->begin(), stored->end());
         ShabdizPacket p;
         xdr::xdr_from_opaque(bytes, p);
         auto m = decode(p);
@@ -198,15 +179,15 @@ struct ShabdizRuntime
         cacheBlock(*m.block);
         return m.block;
     }
-    std::filesystem::path
-    executedPath(Hash const& h) const
+    bool
+    executed(Hash const& h)
     {
-        return archive / ("executed-" + binToHex(h));
+        return archive->contains("e-" + binToHex(h));
     }
     bool
     addWork(Hash const& id, std::string const& data)
     {
-        if (std::filesystem::exists(executedPath(id)))
+        if (executed(id))
             return false;
         if (work.emplace(id, data).second)
         {
@@ -264,21 +245,24 @@ OverlayManagerImpl::initializePaperShabdiz()
     // Each experiment starts with genesis. This archive supports chain fetch,
     // not crash/restart recovery of the consensus state.
     auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
-    r->archive =
+    auto archivePath =
         std::filesystem::path(cfg.BUCKET_DIR_PATH) /
         ("shabdiz-" + std::to_string(getpid()) + "-" + std::to_string(stamp));
-    std::filesystem::create_directories(r->archive);
+    r->archive = std::make_unique<ShabdizArchive>(archivePath);
     auto raw = r.get();
     r->engine = std::make_unique<PaperShabdiz>(
         r->self, std::vector<NodeID>(r->members.begin(), r->members.end()),
         Hash{}, [raw](Hash const& h) { return raw->read(h); },
         [raw](PaperShabdiz::Block const& b) { raw->remember(b); }, blockDigest,
-        [raw](Hash const& h) { return raw->nextData(h); }, validBatch,
+        [raw](Hash const& h) { return raw->nextData(h); },
+        [raw](std::string const& data) {
+            return raw->batch(data, sha256(data)) != nullptr;
+        },
         NonPrune_MODE);
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin "
               "prepared_pipeline=true archive={}",
-              r->members.size(), r->engine->quorum(), r->archive.string());
+              r->members.size(), r->engine->quorum(), archivePath.string());
     mPaperShabdiz = std::move(r);
     mPaperShabdizTimer = std::make_unique<VirtualTimer>(mApp);
 }
@@ -289,6 +273,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
     auto& r = *mPaperShabdiz;
     if (r.pumping || !r.started)
         return;
+    r.archive->check();
     r.pumping = true;
     auto reset = gsl::finally([&r]() { r.pumping = false; });
     for (;;)
@@ -300,26 +285,16 @@ OverlayManagerImpl::pumpPaperShabdiz()
         {
             auto id = sha256(b.data);
             size_t appliedTxns = 0;
-            if (!std::filesystem::exists(r.executedPath(id)))
+            if (!r.executed(id))
             {
-                auto batch = TransactionBatch::deserialize(b.data);
-                for (auto const& txn : batch.transactions)
-                {
-                    std::istringstream in(txn.payload);
-                    std::string op, key, value;
-                    in >> op >> key;
-                    if (op == "UPDATE" || op == "RMW")
-                    {
-                        in >> value;
-                        g_kvStore[key] = value;
-                    }
-                }
-                appliedTxns = batch.transactions.size();
-                std::ofstream marker(r.executedPath(id));
-                marker << b.view << '\n';
-                marker.close();
-                if (!marker)
-                    throw std::runtime_error("Cannot mark Shabdiz execution");
+                auto batch = r.batch(b.data, id);
+                if (!batch)
+                    throw std::runtime_error("Invalid committed Shabdiz batch");
+                for (auto const& op : *batch)
+                    if (op.write)
+                        g_kvStore[op.key] = op.value;
+                appliedTxns = batch->size();
+                r.archive->put("e-" + binToHex(id), {});
                 auto acks = r.localAcks.find(id);
                 if (acks != r.localAcks.end())
                 {
@@ -330,6 +305,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
                 }
             }
             r.work.erase(id);
+            r.forwardedTo.erase(id);
             r.applied = b.hash;
             CLOG_INFO(
                 Overlay,
@@ -344,15 +320,49 @@ OverlayManagerImpl::pumpPaperShabdiz()
             r.workOrder.end());
         r.engine->workAvailable();
     }
+    auto peers = getAuthenticatedPeers();
     for (auto const& out : r.engine->takeOutgoing())
     {
+        r.fastProposals += out.message.kind == PaperShabdiz::Kind::FastProposal;
+        r.slowProposals += out.message.kind == PaperShabdiz::Kind::SlowProposal;
+        r.collects += out.message.kind == PaperShabdiz::Kind::Collect;
+        r.wishes += out.message.kind == PaperShabdiz::Kind::Wish;
         auto msg = wireMessage(encode(out.message));
         // No flood-cache coalescing: votes from distinct authenticated senders
         // must remain distinct, even when their bytes are identical.
-        for (auto const& peer : getAuthenticatedPeers())
+        for (auto const& peer : peers)
             if (r.members.count(peer.first) &&
                 (!out.to || *out.to == peer.first))
                 peer.second->sendMessage(msg);
+    }
+    // Client ingress is transport, not an extra all-to-all consensus phase.
+    // Forward only to leader(v), and retry at view changes or the retry tick.
+    // The leader's paper proposal supplies the batch to all other replicas.
+    if (r.newWork || r.forwardedView != r.engine->view())
+    {
+        r.newWork = false;
+        r.forwardedView = r.engine->view();
+        auto leader = r.engine->leader(r.engine->view());
+        auto peer = peers.find(leader);
+        if (!(leader == r.self) && peer != peers.end())
+            for (auto const& ack : r.localAcks)
+            {
+                auto it = r.work.find(ack.first);
+                if (it == r.work.end())
+                    continue;
+                auto& sent = r.forwardedTo[ack.first];
+                if (!r.retryWork && sent.count(leader))
+                    continue;
+                ShabdizPacket p{};
+                p.wireVersion = WIRE_VERSION;
+                p.kind = WORK_BATCH;
+                p.blockHash = ack.first;
+                p.data = it->second;
+                p.origin = r.self;
+                peer->second->sendMessage(wireMessage(p));
+                sent.insert(leader);
+            }
+        r.retryWork = false;
     }
     if (r.generation != r.engine->timerGeneration())
     {
@@ -406,7 +416,8 @@ OverlayManagerImpl::tickPaperShabdiz()
                   "Shabdiz started; fixed quorum connected, view module armed");
     }
     // SEND_CUSTOM_MESSAGE remains the client ingress selector, not leader(v).
-    // Disseminate each full batch so every rotating leader has requested work.
+    // Queue full batches locally; pump forwards them only to the current
+    // leader.
     if (mApp.getConfig().SEND_CUSTOM_MESSAGE && g_clientListenerActive)
     {
         TransactionBatch batch;
@@ -414,22 +425,13 @@ OverlayManagerImpl::tickPaperShabdiz()
         while (tryBuildServerBatch(batch, acks))
         {
             auto data = batch.serialize();
-            if (!validBatch(data))
-                throw std::runtime_error("Invalid local Shabdiz batch");
             auto id = sha256(data);
+            if (!r.batch(data, id))
+                throw std::runtime_error("Invalid local Shabdiz batch");
             r.addWork(id, data);
             auto& local = r.localAcks[id];
             local.insert(local.end(), acks.begin(), acks.end());
-            ShabdizPacket p{};
-            p.wireVersion = WIRE_VERSION;
-            p.kind = WORK_BATCH;
-            p.blockHash = id;
-            p.data = data;
-            p.origin = r.self;
-            auto msg = wireMessage(p);
-            for (auto const& peer : getAuthenticatedPeers())
-                if (r.members.count(peer.first))
-                    peer.second->sendMessage(msg);
+            r.newWork = true;
         }
     }
     if (!r.forced && Clock::now() - r.startedAt >=
@@ -458,22 +460,14 @@ OverlayManagerImpl::tickPaperShabdiz()
                   "elements: {}",
                   getRSS_MB(), r.engine->prepareHistorySize());
         r.engine->retransmit();
-        for (auto const& ack : r.localAcks)
-        {
-            auto it = r.work.find(ack.first);
-            if (it == r.work.end())
-                continue;
-            ShabdizPacket p{};
-            p.wireVersion = WIRE_VERSION;
-            p.kind = WORK_BATCH;
-            p.blockHash = ack.first;
-            p.data = it->second;
-            p.origin = r.self;
-            auto msg = wireMessage(p);
-            for (auto const& peer : getAuthenticatedPeers())
-                if (r.members.count(peer.first))
-                    peer.second->sendMessage(msg);
-        }
+        r.newWork = true;
+        r.retryWork = true;
+        CLOG_INFO(Overlay,
+                  "[SHABDIZ STATE] view={} prepared={} committed={} fast={} "
+                  "slow={} collects={} wishes={}",
+                  r.engine->view(), r.engine->prepared().view,
+                  r.engine->committed().view, r.fastProposals, r.slowProposals,
+                  r.collects, r.wishes);
         pumpPaperShabdiz();
     }
 }
@@ -502,8 +496,8 @@ OverlayManagerImpl::receivePaperShabdiz(CustomMessage const& cm,
     if (p.kind == WORK_BATCH)
     {
         if (!(p.origin == sender) || p.hasBlock || !p.dependencies.empty() ||
-            !p.selected.empty() || !validBatch(p.data) ||
-            sha256(p.data) != p.blockHash)
+            !p.selected.empty() || sha256(p.data) != p.blockHash ||
+            !r.batch(p.data, p.blockHash))
             return;
         r.addWork(p.blockHash, p.data);
         r.engine->workAvailable();
