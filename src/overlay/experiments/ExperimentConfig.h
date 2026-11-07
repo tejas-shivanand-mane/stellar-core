@@ -6,8 +6,9 @@
 namespace stellar::experiment
 {
 // Build-time experiment settings shared by replicas and shab_client.
-// Rebuild all replicas after edits. For every custom protocol, the node with
-// SEND_CUSTOM_MESSAGE=true in stellar-core.cfg initiates proposals.
+// Rebuild all replicas after edits. SEND_CUSTOM_MESSAGE=true selects client
+// ingress. Shabdiz rotates leaders; the other custom protocols use this node
+// to initiate proposals.
 
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;
@@ -36,6 +37,10 @@ inline constexpr uint64_t PBFT_HISTORY = 1000;
 inline constexpr uint64_t NORMAL_PATH_WINDOW = 64;
 inline constexpr uint64_t MAX_COLLECT_ATTEMPTS = 300;
 inline constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
+
+// Updated Shabdiz only: T_w is independent of network delay and grows with w.
+inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_MS = 2000;
+inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_STEP_MS = 1;
 
 // Native SCP workload generator (not SCP consensus parameters).
 inline constexpr int NUM_TEST_ACCOUNTS = 100;

@@ -1353,6 +1353,8 @@ OverlayManagerImpl::shutdown()
     // Stop ticking and resolving peers
     mTimer.cancel();
     mPeerIPTimer.cancel();
+    if (mPaperShabdizTimer)
+        mPaperShabdizTimer->cancel();
 }
 
 bool

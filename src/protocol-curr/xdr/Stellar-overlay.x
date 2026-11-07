@@ -86,7 +86,25 @@ enum CustomMessageType
     CUSTOM_SIMPLE_COMMIT = 27,
     CUSTOM_FORGET_PREPARE = 28,
     CUSTOM_FORGET_VOTE1 = 29,
-    CUSTOM_FORGET_VOTE2 = 30
+    CUSTOM_FORGET_VOTE2 = 30,
+    CUSTOM_SHABDIZ_PAPER = 31
+};
+
+// Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.
+// Existing protocols retain their original message layouts and enum values.
+struct ShabdizPacket
+{
+    uint32 wireVersion;
+    uint32 kind;
+    uint64 view;
+    uint64 blockView;
+    Hash blockHash;
+    NodeID origin;
+    NodeID dependencies<1>;
+    NodeID selected<256>;
+    bool hasBlock;
+    Hash parentHash;
+    string data<90000>;
 };
 
 struct CustomMessage

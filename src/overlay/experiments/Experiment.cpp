@@ -326,6 +326,11 @@ makeProposalMessage(bool ithsMode, uint64_t view, Hash const& blockHash,
 void
 OverlayManagerImpl::tickExperiment()
 {
+    if (paperShabdizEnabled())
+    {
+        tickPaperShabdiz();
+        return;
+    }
     if (shabdiz_start == 0)
     {
         size_t authenticatedPeers = getAuthenticatedPeersCount();
@@ -376,6 +381,11 @@ OverlayManagerImpl::tickExperiment()
 void
 OverlayManagerImpl::prop()
 {
+    if (paperShabdizEnabled())
+    {
+        tickPaperShabdiz();
+        return;
+    }
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
     std::string shortID = KeyUtils::toShortString(selfID);
 
@@ -418,6 +428,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 {
 
     auto type = stellarMsg.customMessage().msgType;
+    if (paperShabdizEnabled())
+    {
+        if (type == CUSTOM_SHABDIZ_PAPER)
+            receivePaperShabdiz(stellarMsg.customMessage(), peer->getPeerID());
+        return;
+    }
+    if (type == CUSTOM_SHABDIZ_PAPER)
+        return;
     bool tetraMessage =
         type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
     bool simpleMessage =

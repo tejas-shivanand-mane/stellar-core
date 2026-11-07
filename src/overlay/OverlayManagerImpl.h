@@ -37,6 +37,7 @@ Maintain the set of peers we are connected to
 */
 namespace stellar
 {
+struct ShabdizRuntime;
 
     void submitNextBatchOfTransactions(Application& app);
 
@@ -105,6 +106,13 @@ class OverlayManagerImpl : public OverlayManager
     void acceptITHSLocalProposal(CustomMessage const& cm);
     void deliverBufferedForCurrentView();
     void handleShabdizMessage(StellarMessage const& msg, Peer::pointer peer);
+    bool paperShabdizEnabled() const;
+    void initializePaperShabdiz();
+    void tickPaperShabdiz();
+    void pumpPaperShabdiz();
+    void receivePaperShabdiz(CustomMessage const& msg, NodeID const& sender);
+    std::shared_ptr<ShabdizRuntime> mPaperShabdiz;
+    std::unique_ptr<VirtualTimer> mPaperShabdizTimer;
     void handleITHSMessage(StellarMessage const& msg, Peer::pointer peer);
     void initializeNormalPath();
     bool advanceTetraBFT(uint64_t seq);
