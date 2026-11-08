@@ -87,9 +87,7 @@ enum CustomMessageType
     CUSTOM_FORGET_PREPARE = 28,
     CUSTOM_FORGET_VOTE1 = 29,
     CUSTOM_FORGET_VOTE2 = 30,
-    CUSTOM_SHABDIZ_PAPER = 31,
-    // Client ingress forwards one batch to the scheduled baseline leader.
-    CUSTOM_EXPERIMENT_WORK = 32
+    CUSTOM_SHABDIZ_PAPER = 31
 };
 
 // Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.

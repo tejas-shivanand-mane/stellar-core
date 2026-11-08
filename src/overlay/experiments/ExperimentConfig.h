@@ -7,11 +7,14 @@ namespace stellar::experiment
 {
 // Build-time experiment settings shared by replicas and shab_client.
 // Rebuild all replicas after edits. SEND_CUSTOM_MESSAGE=true selects client
-// ingress. All custom protocols rotate leaders in sorted NodeID order.
-// Baselines rotate between independent batch instances (not recovery views).
-// PBFT keeps its PRE-PREPARE/PREPARE/COMMIT path; this is a rotating-primary
-// benchmark variant, not Spinning or an implementation of PBFT view change.
-// Native SCP retains its own nomination rules.
+// ingress. Shabdiz rotates leaders; the other custom protocols use this node
+// to initiate proposals.
+
+// Conformance status: PBFT/IT-HS/TetraBFT/Simple-IT/Forget-IT adapters are
+// incomplete normal-path benchmarks, NOT complete implementations of the cited
+// protocols. Removing the generic per-batch rotation patch does not fix missing
+// view change, recovery, native multi-shot transitions, or pipelining. These
+// gaps must be implemented and fault-tested before a full-protocol comparison.
 
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;

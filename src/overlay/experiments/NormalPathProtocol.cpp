@@ -18,9 +18,14 @@ using namespace experiment;
 void
 OverlayManagerImpl::initializeNormalPath()
 {
-    if (normalPathEnabled() || PBFT_MODE || ITHS_MODE)
+    if (normalPathEnabled())
     {
         auto const& cfg = mApp.getConfig();
+        // Match the existing custom protocols: SEND_CUSTOM_MESSAGE selects
+        // the proposer. Followers learn and pin its authenticated identity from
+        // the first valid proposal; no separate leader key is configured.
+        if (cfg.SEND_CUSTOM_MESSAGE)
+            mNormalLeader = cfg.NODE_SEED.getPublicKey();
         mNormalMembers.insert(mApp.getConfig().NODE_SEED.getPublicKey());
         LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
             mNormalMembers.insert(id);
@@ -29,22 +34,13 @@ OverlayManagerImpl::initializeNormalPath()
         if (mNormalMembers.size() < 4)
             throw std::invalid_argument(
                 "Normal-path protocols need at least four fixed members");
-        mExperimentLeaders.assign(mNormalMembers.begin(), mNormalMembers.end());
-        N = mNormalMembers.size();
-        f = (N - 1) / 3;
-        CLOG_INFO(Overlay,
-                  "[ROTATION CONFIG] members={} policy=round_robin "
-                  "first_leader={} ingress={}",
-                  N, KeyUtils::toShortString(experimentLeader(1)),
-                  cfg.SEND_CUSTOM_MESSAGE);
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
-        if (normalPathEnabled())
-            CLOG_INFO(Overlay,
-                      "[{} CONFIG] members={} quorum={} simple_optimistic={} "
-                      "normal_path_only=true payload=digest_votes "
-                      "simple_commit=round_only",
-                      normalPathName(), mNormalMembers.size(), mNormalQuorum,
-                      SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC);
+        CLOG_INFO(Overlay,
+                  "[{} CONFIG] members={} quorum={} simple_optimistic={} "
+                  "normal_path_only=true payload=digest_votes "
+                  "simple_commit=round_only",
+                  normalPathName(), mNormalMembers.size(), mNormalQuorum,
+                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC);
     }
 }
 
@@ -99,13 +95,17 @@ OverlayManagerImpl::normalSend(CustomMessageType type, uint64_t seq,
 void
 OverlayManagerImpl::normalProp()
 {
-    if (mNormalNextSeq != mNormalExecuted + 1)
+    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE ||
+        mNormalNextSeq != mNormalExecuted + 1)
         return;
-    std::string data;
-    if (!takeExperimentBatch(mNormalNextSeq, data))
+    TransactionBatch batch;
+    std::vector<ClientAck> acks;
+    if (!g_clientListenerActive || !tryBuildServerBatch(batch, acks))
         return;
+    auto data = batch.serialize();
     auto digest = sha256(data);
     uint64_t seq = mNormalNextSeq++;
+    g_blockClientAcks[BlockKey{seq, digest}] = std::move(acks);
     auto& slot = mNormalSlots[seq];
     slot.digest = digest;
     if (TETRABFT_MODE)
@@ -138,8 +138,8 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         return;
     if (cm.msgType == normalProposalType())
     {
-        if (!(sender == experimentLeader(seq)) ||
-            sha256(cm.data) != cm.blockHash)
+        if ((mNormalLeader && !(sender == *mNormalLeader)) ||
+            (!mNormalLeader && seq != 1) || sha256(cm.data) != cm.blockHash)
             return;
         try
         {
@@ -158,6 +158,9 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
                                          : slot.forget.propose(cm.blockHash);
         if (!accepted)
             return;
+        // Bind only after membership, metadata, digest and payload validation.
+        if (!mNormalLeader)
+            mNormalLeader = sender;
         slot.digest = cm.blockHash;
         slot.proposed = true;
         slot.data = cm.data;
@@ -239,8 +242,8 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
         CLOG_INFO(Overlay, "[{} COMMITTED] seq={} digest={} txns={}",
                   normalPathName(), mNormalExecuted, hexAbbrev(ready.digest),
                   batch.transactions.size());
-        mNormalNextSeq = mNormalExecuted + 1;
-        finishExperimentBatch(mNormalExecuted, ready.digest);
+        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+            ackClientBatchesForBlock(mNormalExecuted, ready.digest);
         if (!SIMPLE_IT_MODE)
             mNormalSlots.erase(it);
     }
@@ -256,7 +259,8 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
             seq != next->first)
             normalAdvance(next->first); // reconsider a now-safe parent
     }
-    normalProp();
+    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
+        normalProp();
 }
 
 } // namespace stellar

@@ -323,107 +323,9 @@ makeProposalMessage(bool ithsMode, uint64_t view, Hash const& blockHash,
     return msg;
 }
 
-// Slot numbers start at one; rotation is independent of failure/recovery views.
-NodeID const&
-OverlayManagerImpl::experimentLeader(uint64_t slot) const
-{
-    releaseAssert(slot > 0 && !mExperimentLeaders.empty());
-    return mExperimentLeaders[(slot - 1) % mExperimentLeaders.size()];
-}
-
-bool
-OverlayManagerImpl::takeExperimentBatch(uint64_t slot, std::string& data)
-{
-    auto const& cfg = mApp.getConfig();
-    auto const& leader = experimentLeader(slot);
-    auto self = cfg.NODE_SEED.getPublicKey();
-    auto it = mExperimentWork.find(slot);
-    if (it == mExperimentWork.end() && cfg.SEND_CUSTOM_MESSAGE &&
-        g_clientListenerActive)
-    {
-        TransactionBatch batch;
-        std::vector<ClientAck> acks;
-        if (!tryBuildServerBatch(batch, acks))
-            return false;
-        auto data = batch.serialize();
-        g_blockClientAcks[BlockKey{slot, sha256(data)}] = std::move(acks);
-        it = mExperimentWork.emplace(slot, ExperimentWork{std::move(data)})
-                 .first;
-    }
-    if (it == mExperimentWork.end())
-        return false;
-    if (self == leader)
-    {
-        data = it->second.data;
-        CLOG_DEBUG(Overlay, "[ROTATION PROPOSE] slot={} leader={}", slot,
-                   KeyUtils::toShortString(self));
-        return true;
-    }
-    // Forward only to the current slot's leader. Keep the batch and ACKs at
-    // ingress until local execution; retry after reconnect without
-    // re-dequeueing.
-    auto now = std::chrono::steady_clock::now();
-    if (now - it->second.forwarded < std::chrono::seconds(1))
-        return false;
-    auto peers = getAuthenticatedPeers();
-    auto peer = peers.find(leader);
-    if (peer != peers.end())
-    {
-        auto msg = std::make_shared<StellarMessage>();
-        msg->type(CUSTOM_MESSAGE);
-        auto& cm = msg->customMessage();
-        cm.msgType = CUSTOM_EXPERIMENT_WORK;
-        cm.view = slot;
-        cm.data = it->second.data;
-        cm.blockHash = sha256(cm.data);
-        peer->second->sendMessage(msg);
-        it->second.forwarded = now;
-    }
-    return false;
-}
-
-void
-OverlayManagerImpl::receiveExperimentWork(CustomMessage const& cm,
-                                          NodeID const& sender)
-{
-    auto slot = cm.view;
-    if (!mNormalMembers.count(sender) || slot == 0 ||
-        slot <= mExperimentExecuted ||
-        slot - mExperimentExecuted > NORMAL_PATH_WINDOW ||
-        !(experimentLeader(slot) ==
-          mApp.getConfig().NODE_SEED.getPublicKey()) ||
-        mExperimentWork.count(slot) || sha256(cm.data) != cm.blockHash)
-        return;
-    try
-    {
-        auto batch = TransactionBatch::deserialize(cm.data);
-        if (batch.transactions.size() != SERVER_BATCH_SIZE ||
-            batch.serialize() != cm.data)
-            return;
-    }
-    catch (std::exception const&)
-    {
-        return;
-    }
-    mExperimentWork.emplace(slot, ExperimentWork{std::string(cm.data)});
-    prop();
-}
-
-void
-OverlayManagerImpl::finishExperimentBatch(uint64_t slot,
-                                          Hash const& batchDigest)
-{
-    mExperimentExecuted = slot;
-    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        ackClientBatchesForBlock(slot, batchDigest);
-    mExperimentWork.erase(slot);
-}
-
 void
 OverlayManagerImpl::tickExperiment()
 {
-    if (ENABLE_SCP_TRACKING)
-        return;
     if (paperShabdizEnabled())
     {
         tickPaperShabdiz();
@@ -459,9 +361,11 @@ OverlayManagerImpl::tickExperiment()
         }
     }
 
-    // Every replica may become leader. Batch acquisition waits for client
-    // ingress or forwarded work, so followers never synthesize empty work.
-    if (shabdiz_start == 1)
+    // Retry proposal only after all peers are connected and listener is active.
+    // This prevents the startup race where prop() runs before the client queue
+    // has enough requests.
+    if (shabdiz_start == 1 && mApp.getConfig().SEND_CUSTOM_MESSAGE &&
+        g_clientListenerActive)
     {
         if (PBFT_MODE || normalPathEnabled())
         {
@@ -477,8 +381,6 @@ OverlayManagerImpl::tickExperiment()
 void
 OverlayManagerImpl::prop()
 {
-    if (ENABLE_SCP_TRACKING)
-        return;
     if (paperShabdizEnabled())
     {
         tickPaperShabdiz();
@@ -494,6 +396,13 @@ OverlayManagerImpl::prop()
                "currentView={}, clientRequestQueue={}",
                shortID, txn_count, latestCommittedView, currentView,
                clientQueueSize);
+
+    // Non-leader/custom-disabled nodes do not drive Shabdiz / IT-HS proposals.
+    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    {
+        txn_count++;
+        return;
+    }
 
     if (normalPathEnabled())
     {
@@ -527,13 +436,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     }
     if (type == CUSTOM_SHABDIZ_PAPER)
         return;
-    if (type == CUSTOM_EXPERIMENT_WORK)
-    {
-        if (PBFT_MODE || ITHS_MODE || normalPathEnabled())
-            receiveExperimentWork(stellarMsg.customMessage(),
-                                  peer->getPeerID());
-        return;
-    }
     bool tetraMessage =
         type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
     bool simpleMessage =
@@ -652,17 +554,10 @@ OverlayManagerImpl::legacyProp(bool ithsMode)
         }
 
         TransactionBatch batch;
-        std::string serializedBatch;
         bool fromExternalClient = false;
         std::vector<ClientAck> clientAcks;
 
-        if (ithsMode)
-        {
-            if (!takeExperimentBatch(currentView, serializedBatch))
-                return;
-            batch = TransactionBatch::deserialize(serializedBatch);
-        }
-        else if (g_clientListenerActive)
+        if (g_clientListenerActive)
         {
             if (!tryBuildServerBatch(batch, clientAcks))
             {
@@ -720,8 +615,7 @@ OverlayManagerImpl::legacyProp(bool ithsMode)
             acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
         }
 
-        if (!ithsMode)
-            serializedBatch = batch.serialize();
+        std::string serializedBatch = batch.serialize();
         CLOG_DEBUG(Overlay,
                    "[BATCH SIZE] path=fast txns={} serialized_batch_bytes={} "
                    "bytes_per_txn={}",
@@ -732,7 +626,7 @@ OverlayManagerImpl::legacyProp(bool ithsMode)
 
         auto msg = makeProposalMessage(ithsMode, currentView, blockHash,
                                        latestCommittedView,
-                                       latestCommittedBlock, serializedBatch);
+                                       latestCommittedBlock, batch.serialize());
 
         CLOG_INFO(
             Overlay,
