@@ -37,7 +37,7 @@ OverlayManagerImpl::initializeNormalPath()
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
         CLOG_INFO(Overlay,
                   "[{} CONFIG] members={} quorum={} simple_optimistic={} "
-                  "normal_path_only=true payload=full_value "
+                  "normal_path_only=true payload=digest_votes "
                   "simple_commit=round_only",
                   normalPathName(), mNormalMembers.size(), mNormalQuorum,
                   SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC);
@@ -109,11 +109,11 @@ OverlayManagerImpl::normalProp()
     auto& slot = mNormalSlots[seq];
     slot.digest = digest;
     if (TETRABFT_MODE)
-        slot.tetra.propose(data);
+        slot.tetra.propose(digest);
     else if (SIMPLE_IT_MODE)
-        slot.simple.propose(data);
+        slot.simple.propose(digest);
     else
-        slot.forget.propose(data);
+        slot.forget.propose(digest);
     slot.proposed = true;
     slot.data = data;
     normalSend(normalProposalType(), seq, digest, data);
@@ -153,9 +153,9 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
             return;
         }
         auto& slot = mNormalSlots[seq];
-        bool accepted = TETRABFT_MODE    ? slot.tetra.propose(cm.data)
-                        : SIMPLE_IT_MODE ? slot.simple.propose(cm.data)
-                                         : slot.forget.propose(cm.data);
+        bool accepted = TETRABFT_MODE    ? slot.tetra.propose(cm.blockHash)
+                        : SIMPLE_IT_MODE ? slot.simple.propose(cm.blockHash)
+                                         : slot.forget.propose(cm.blockHash);
         if (!accepted)
             return;
         // Bind only after membership, metadata, digest and payload validation.
@@ -168,18 +168,18 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
     else
     {
         bool roundCommit = SIMPLE_IT_MODE && cm.msgType == CUSTOM_SIMPLE_COMMIT;
-        // Basic value-carrying algorithms: a digest-only vote is not a value.
-        // COMMIT in Simple-IT is the exception: RBC uniquely binds the round.
+        // Votes refer to the validated proposal by digest; do not retransmit
+        // its batch. Simple-IT COMMIT refers only to the round.
         if (roundCommit)
         {
             if (!cm.data.empty() || cm.blockHash != Hash{})
                 return;
         }
-        else if (cm.data.empty() || sha256(cm.data) != cm.blockHash)
+        else if (!cm.data.empty())
             return;
         if (TETRABFT_MODE)
             mNormalSlots[seq].tetra.vote(cm.msgType - CUSTOM_TETRA_VOTE1 + 1,
-                                         sender, cm.data);
+                                         sender, cm.blockHash);
         else if (SIMPLE_IT_MODE)
         {
             if (!SIMPLE_IT_OPTIMISTIC && (cm.msgType == CUSTOM_SIMPLE_VOTE ||
@@ -189,14 +189,14 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
                 mNormalSlots[seq].simple.commit(sender);
             else
                 mNormalSlots[seq].simple.vote(cm.msgType - CUSTOM_SIMPLE_ECHO + 1,
-                                              sender, cm.data);
+                                              sender, cm.blockHash);
         }
         else
         {
             if (cm.msgType == CUSTOM_FORGET_VOTE2 && cm.dependencyVp != 1)
                 return; // only SAFE-guard first-view messages supported
             mNormalSlots[seq].forget.vote(cm.msgType - CUSTOM_FORGET_VOTE1 + 1,
-                                          sender, cm.data);
+                                          sender, cm.blockHash);
         }
     }
     normalAdvance(seq);

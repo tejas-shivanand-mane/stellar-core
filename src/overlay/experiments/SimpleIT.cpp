@@ -34,12 +34,12 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
     {
         auto type = static_cast<CustomMessageType>(firstVote + phase - 1);
         // Simple-IT section 3.2 / Figure 2: COMMIT identifies only the round.
-        // Basic Opt-RBC (2505.02761v4 Figure 1) carries m in ECHO/VOTE/ACK/
-        // READY. We use the full batch as m, not the erasure-coded variant.
+        // RBC votes identify the proposal by digest. Execution still waits
+        // for the validated full proposal and local RBC delivery.
         if (type == CUSTOM_SIMPLE_COMMIT)
             normalSend(type, seq, Hash{});
         else
-            normalSend(type, seq, slot.digest, slot.data);
+            normalSend(type, seq, slot.digest);
     }
     return decided;
 }

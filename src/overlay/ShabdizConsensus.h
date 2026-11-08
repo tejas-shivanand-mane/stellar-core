@@ -124,6 +124,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
     ValidateData mValidate;
     bool mRunning = false, mStarted = false, mReportsDirty = false;
     bool mKeepPrepareHistory = false;
+    bool mFastPathOnly = false;
     size_t mForceSlow = 0;
 
     bool
@@ -339,6 +340,12 @@ template <typename Node, typename Hash> class ShabdizConsensus
         if (!member(sender) || m.dependencies.size() > 1 ||
             (!m.dependencies.empty() && !member(m.dependencies.front())))
             return;
+        // An explicitly selected benchmark ablation, not a recovery-capable
+        // protocol. Block fetching remains available for delayed proposal data.
+        if (mFastPathOnly && m.kind != Kind::FastProposal &&
+            m.kind != Kind::Prepare && m.kind != Kind::Commit &&
+            m.kind != Kind::GetBlock && m.kind != Kind::BlockData)
+            return;
         if (m.kind == Kind::GetBlock)
         {
             auto b = mRead(m.value.hash);
@@ -542,6 +549,8 @@ template <typename Node, typename Hash> class ShabdizConsensus
                         (v <= 1 || mCommitted.view >= v - 2) && !s.forceSlow;
             if (!fast)
             {
+                if (mFastPathOnly)
+                    return false; // wait; never replace a failed fast path
                 s.collectSent = true;
                 changed = true;
                 emit(message(Kind::Collect, v));
@@ -617,8 +626,11 @@ template <typename Node, typename Hash> class ShabdizConsensus
         for (auto it = chain.rbegin(); it != chain.rend(); ++it)
             mExecuted.push_back(*it);
         mCommitted = target;
-        emit(message(Kind::Committed, 0, mCommitted));
-        mReportsDirty = true;
+        if (!mFastPathOnly)
+        {
+            emit(message(Kind::Committed, 0, mCommitted));
+            mReportsDirty = true;
+        }
         return true;
     }
     bool
@@ -700,11 +712,13 @@ template <typename Node, typename Hash> class ShabdizConsensus
                 {
                     if (!view.first)
                         continue; // genesis is already prepared
-                    changed |= collectionRules(view.first, view.second);
+                    if (!mFastPathOnly)
+                        changed |= collectionRules(view.first, view.second);
                     changed |= proposalRules(view.first, view.second);
                     changed |= votingRules(view.first, view.second);
                 }
-                changed |= catchUp();
+                if (!mFastPathOnly)
+                    changed |= catchUp();
                 if (mPrepared.view == mView &&
                     (mView == 0 || mCommitted.view >= mView - 1))
                 {
@@ -727,7 +741,8 @@ template <typename Node, typename Hash> class ShabdizConsensus
     ShabdizConsensus(Node self, std::vector<Node> members, Hash genesis,
                      ReadBlock read, WriteBlock write, Digest digest,
                      TakeData takeData, ValidateData validate,
-                     bool keepPrepareHistory = false)
+                     bool keepPrepareHistory = false,
+                     bool fastPathOnly = false)
         : mSelf(self)
         , mMembers(std::move(members))
         , mGenesis(genesis)
@@ -739,6 +754,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
         , mTakeData(std::move(takeData))
         , mValidate(std::move(validate))
         , mKeepPrepareHistory(keepPrepareHistory)
+        , mFastPathOnly(fastPathOnly)
     {
         std::sort(mMembers.begin(), mMembers.end());
         if (mMembers.size() < 4 ||
@@ -752,8 +768,9 @@ template <typename Node, typename Hash> class ShabdizConsensus
         // absent.
         mQuorum = mMembers.size() - mF;
         mPS.insert(mPrepared);
-        for (auto const& n : mMembers)
-            mReports[n] = mCommitted;
+        if (!mFastPathOnly)
+            for (auto const& n : mMembers)
+                mReports[n] = mCommitted;
         mViews[0].prepareSent = genesis;
     }
     Node const&
@@ -784,6 +801,8 @@ template <typename Node, typename Hash> class ShabdizConsensus
     void
     timeout()
     {
+        if (mFastPathOnly)
+            return;
         if (mConfirmed == std::numeric_limits<View>::max())
             return;
         mHighestWish = std::max(mHighestWish, mConfirmed + 1);
@@ -795,7 +814,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
     void
     retransmit()
     {
-        if (mCommitted.view)
+        if (!mFastPathOnly && mCommitted.view)
             emit(message(Kind::Committed, 0, mCommitted));
         for (auto const& h : mMissing)
             emit(message(Kind::GetBlock, 0, Pair{0, h}));
@@ -804,7 +823,8 @@ template <typename Node, typename Hash> class ShabdizConsensus
     void
     forceSlowViews(size_t count)
     {
-        mForceSlow = count;
+        if (!mFastPathOnly)
+            mForceSlow = count;
     }
     std::vector<Outgoing>
     takeOutgoing()

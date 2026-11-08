@@ -42,6 +42,12 @@ inline constexpr int FORCE_COLLECT_AFTER_SEC = 3000;
 inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_MS = 2000;
 inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_STEP_MS = 1;
 
+// Benchmark ablation only. Disable collection, WISH/view-timeout recovery and
+// COMMITTED-report catch-up. Preserve fast-path voting, normal view progress,
+// data fetching and archival storage. A faulty leader can stall this mode.
+// Keep false when evaluating the complete protocol. Rebuild every replica.
+inline constexpr bool SHABDIZ_FAST_PATH_ONLY = false;
+
 // Native SCP workload generator (not SCP consensus parameters).
 inline constexpr int NUM_TEST_ACCOUNTS = 100;
 inline constexpr int SCP_NATIVE_ROUNDS = 1;

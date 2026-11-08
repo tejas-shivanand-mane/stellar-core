@@ -53,7 +53,7 @@ struct Fixture
 {
     std::map<std::string, Block> blocks;
     Engine e;
-    Fixture(int self = 3)
+    Fixture(int self = 3, bool fastPathOnly = false)
         : e(
               self, {0, 1, 2, 3}, "g",
               [&](auto const& h) -> std::optional<Block> {
@@ -64,7 +64,7 @@ struct Fixture
               },
               [&](Block const& b) { blocks[b.hash] = b; }, digest,
               [](auto const&) -> std::optional<std::string> { return {}; },
-              [](auto const& s) { return !s.empty(); })
+              [](auto const& s) { return !s.empty(); }, false, fastPathOnly)
     {
         e.start();
         e.takeOutgoing();
@@ -338,7 +338,7 @@ slowValidationBoundaries()
 
 void
 network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
-        bool routedWork = false)
+        bool routedWork = false, bool fastPathOnly = false)
 {
     struct Delivery
     {
@@ -374,7 +374,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
                     return {};
                 return "data" + std::to_string(engines[i]->view());
             },
-            [](auto const& d) { return !d.empty(); });
+            [](auto const& d) { return !d.empty(); }, false, fastPathOnly);
         if (forceSlow)
             engines[i]->forceSlowViews(100);
     }
@@ -398,9 +398,17 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         auto blocks = engines[id]->takeExecuted();
         executed[id].insert(executed[id].end(), blocks.begin(), blocks.end());
         for (auto const& o : engines[id]->takeOutgoing())
+        {
+            if (fastPathOnly)
+                assert(o.message.kind == Kind::FastProposal ||
+                       o.message.kind == Kind::Prepare ||
+                       o.message.kind == Kind::Commit ||
+                       o.message.kind == Kind::GetBlock ||
+                       o.message.kind == Kind::BlockData);
             for (int j = absent; j < n; ++j)
                 if (j != id && (!o.to || *o.to == j))
                     pending.push_back({id, j, o.message});
+        }
     };
     for (int i = absent; i < n; ++i)
     {
@@ -469,9 +477,50 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     }
 }
 
+void
+fastPathOnlyBoundaries()
+{
+    Fixture f(3, true);
+    // An absent leader stalls. Timeouts and recovery messages cannot silently
+    // activate recovery or manufacture normal-path progress.
+    f.e.forceSlowViews(20);
+    f.e.timeout();
+    f.e.retransmit();
+    for (int n : {0, 1, 2})
+    {
+        f.e.receive(n, msg(Kind::Wish, 5));
+        f.e.receive(n, msg(Kind::Committed, 0, {5, "missing"}));
+    }
+    assert(f.e.view() == 1 && f.e.committed().view == 0);
+    assert(f.e.takeOutgoing().empty());
+    auto b = makeBlock(1);
+    f.e.receive(0, proposal(b, true, {0, 1, 2}));
+    assert(f.e.takeOutgoing().empty());
+    assert(f.e.takeExecuted().empty());
+
+    // The same fast proposal validation and commit quorum still apply.
+    auto bad = b;
+    bad.data += "tampered";
+    f.e.receive(0, proposal(bad));
+    assert(f.e.takeOutgoing().empty());
+    f.e.receive(0, proposal(b));
+    f.vote(Kind::Prepare, b, {0, 1}); // plus own PREPARE
+    f.vote(Kind::Commit, b, {0});    // plus own COMMIT: below quorum
+    assert(f.e.takeExecuted().empty());
+    f.vote(Kind::Commit, b, {1});
+    assert(f.e.committed().hash == b.hash);
+    assert(f.e.takeExecuted().size() == 1);
+    auto outgoing = f.e.takeOutgoing();
+    assert(count(outgoing, Kind::Committed) == 0);
+    assert(count(outgoing, Kind::Collect) == 0);
+    f.e.retransmit();
+    assert(f.e.takeOutgoing().empty());
+}
+
 int
 main()
 {
+    fastPathOnlyBoundaries();
     fastPipeline();
     closeAndPrune();
     dependencies();
@@ -501,6 +550,14 @@ main()
     network(48, 0, 1, false, false, true);
     network(48, 15, 2, true, false, true);
     schedules += 2;
+    for (int n : {4, 7, 8, 16, 48})
+        for (unsigned seed = 0; seed < 4; ++seed)
+            for (bool routed : {false, true})
+            {
+                // Even a forced-collection request is inert in fast-only mode.
+                network(n, 0, seed, true, false, routed, true);
+                ++schedules;
+            }
     std::cout << "Shabdiz rules and " << schedules
               << " randomized network schedules passed\n";
 }

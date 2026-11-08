@@ -258,11 +258,12 @@ OverlayManagerImpl::initializePaperShabdiz()
         [raw](std::string const& data) {
             return raw->batch(data, sha256(data)) != nullptr;
         },
-        NonPrune_MODE);
+        NonPrune_MODE, SHABDIZ_FAST_PATH_ONLY);
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin "
-              "prepared_pipeline=true archive={}",
-              r->members.size(), r->engine->quorum(), archivePath.string());
+              "prepared_pipeline=true fast_path_only={} archive={}",
+              r->members.size(), r->engine->quorum(), SHABDIZ_FAST_PATH_ONLY,
+              archivePath.string());
     mPaperShabdiz = std::move(r);
     mPaperShabdizTimer = std::make_unique<VirtualTimer>(mApp);
 }
@@ -364,7 +365,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
             }
         r.retryWork = false;
     }
-    if (r.generation != r.engine->timerGeneration())
+    if (!SHABDIZ_FAST_PATH_ONLY && r.generation != r.engine->timerGeneration())
     {
         r.generation = r.engine->timerGeneration();
         auto w = r.engine->confirmedView();
@@ -413,7 +414,8 @@ OverlayManagerImpl::tickPaperShabdiz()
             startClientListener(CLIENT_PORT);
         r.engine->start();
         CLOG_INFO(Overlay,
-                  "Shabdiz started; fixed quorum connected, view module armed");
+                  "Shabdiz started; fixed quorum connected, fast_path_only={}",
+                  SHABDIZ_FAST_PATH_ONLY);
     }
     // SEND_CUSTOM_MESSAGE remains the client ingress selector, not leader(v).
     // Queue full batches locally; pump forwards them only to the current
@@ -434,7 +436,7 @@ OverlayManagerImpl::tickPaperShabdiz()
             r.newWork = true;
         }
     }
-    if (!r.forced && Clock::now() - r.startedAt >=
+    if (!SHABDIZ_FAST_PATH_ONLY && !r.forced && Clock::now() - r.startedAt >=
                          std::chrono::seconds(FORCE_COLLECT_AFTER_SEC))
     {
         r.forced = true;
@@ -442,7 +444,7 @@ OverlayManagerImpl::tickPaperShabdiz()
     }
     r.engine->workAvailable();
     pumpPaperShabdiz();
-    if (Clock::now() >= r.deadline)
+    if (!SHABDIZ_FAST_PATH_ONLY && Clock::now() >= r.deadline)
     {
         r.engine->timeout();
         // Once expired, resend the highest wish until confirmation/request

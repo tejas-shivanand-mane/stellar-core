@@ -26,11 +26,10 @@ OverlayManagerImpl::advanceForgetIT(uint64_t seq)
                                    mNormalQuorum);
     size_t f = (mNormalMembers.size() - 1) / 3;
     decided = slot.forget.decide(mNormalQuorum, f + 1);
-    // Forget-IT Algorithm 1: vote-1 and vote-2 carry the value;
-    // the first-view vote-2 guard remains SAFE.
+    // Vote on the batch digest; the first-view vote-2 guard remains SAFE.
     for (auto phase : outgoing)
         normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq,
-                   slot.digest, slot.data);
+                   slot.digest);
     return decided;
 }
 
