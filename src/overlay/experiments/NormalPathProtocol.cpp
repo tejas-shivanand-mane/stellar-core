@@ -21,7 +21,7 @@ OverlayManagerImpl::initializeNormalPath()
     if (normalPathEnabled())
     {
         auto const& cfg = mApp.getConfig();
-        // Forget-IT remains an independent first-view benchmark. TetraBFT
+        // Forget-IT runs independent instances with native view changes. TetraBFT
         // and Simple-IT use their native per-slot/per-round leader schedules.
         if (FORGET_IT_MODE && cfg.SEND_CUSTOM_MESSAGE)
             mNormalLeader = cfg.NODE_SEED.getPublicKey();
@@ -30,6 +30,9 @@ OverlayManagerImpl::initializeNormalPath()
             mNormalMembers.insert(id);
             return true;
         });
+        if (FORGET_IT_MODE && (mNormalMembers.size() - 1) % 3 != 0)
+            throw std::invalid_argument("Forget-IT Algorithm 1 requires n=3f+1 "
+                                        "(e.g. 4, 7, 16, 49 replicas)");
         if (mNormalMembers.size() < 4)
             throw std::invalid_argument(
                 "Normal-path protocols need at least four fixed members");
@@ -37,10 +40,11 @@ OverlayManagerImpl::initializeNormalPath()
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
         CLOG_INFO(Overlay,
                   "[{} CONFIG] members={} quorum={} simple_optimistic={} "
-                  "normal_path_only=true payload=digest_votes "
-                  "simple_commit=round_only rotation={} native_pipeline={}",
+                  "native_view_change={} payload={} "
+                  "simple_commit=round_only rotation=true native_pipeline={}",
                   normalPathName(), mNormalMembers.size(), mNormalQuorum,
-                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC, !FORGET_IT_MODE,
+                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC, FORGET_IT_MODE,
+                  FORGET_IT_MODE ? "full_values" : "digest_votes",
                   !FORGET_IT_MODE);
     }
 }
@@ -218,6 +222,9 @@ OverlayManagerImpl::normalProp()
         data = batch.serialize();
         g_blockClientAcks[BlockKey{seq, sha256(data)}] = std::move(acks);
         ++mNormalNextSeq;
+        startForgetIT(seq, data);
+        normalAdvance(seq);
+        return;
     }
     else if (!normalTakeWork(seq, data))
         return;
@@ -232,8 +239,6 @@ OverlayManagerImpl::normalProp()
         mNormalLastReal = std::max(mNormalLastReal, seq);
     if (SIMPLE_IT_MODE)
         slot.simple.propose(digest);
-    else if (FORGET_IT_MODE)
-        slot.forget.propose(digest);
     slot.proposed = true;
     slot.data = data;
     normalSend(normalProposalType(), seq, digest, data);
@@ -244,6 +249,9 @@ void
 OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
                                         NodeID const& sender)
 {
+    if (FORGET_IT_MODE)
+        return; // Native Forget-IT packets have a separate decoder and view
+                // state.
     auto const& cm = msg.customMessage();
     auto seq = cm.view;
     // Bounded lookahead permits a faster replica to start the next instance
@@ -280,8 +288,7 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         auto& slot = mNormalSlots[seq];
         bool accepted = TETRABFT_MODE
                             ? (!slot.proposed || slot.digest == cm.blockHash)
-                        : SIMPLE_IT_MODE ? slot.simple.propose(cm.blockHash)
-                                         : slot.forget.propose(cm.blockHash);
+                            : slot.simple.propose(cm.blockHash);
         if (!accepted)
             return;
         // Bind only after membership, metadata, digest and payload validation.
@@ -322,13 +329,6 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
             else
                 mNormalSlots[seq].simple.vote(cm.msgType - CUSTOM_SIMPLE_ECHO + 1,
                                               sender, cm.blockHash);
-        }
-        else
-        {
-            if (cm.msgType == CUSTOM_FORGET_VOTE2 && cm.dependencyVp != 1)
-                return; // only SAFE-guard first-view messages supported
-            mNormalSlots[seq].forget.vote(cm.msgType - CUSTOM_FORGET_VOTE1 + 1,
-                                          sender, cm.blockHash);
         }
     }
     normalAdvance(seq);
@@ -402,12 +402,9 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
         if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
             ackClientBatchesForBlock(mNormalExecuted, sha256(ready.data));
         mNormalWork.erase(mNormalExecuted);
-        if (FORGET_IT_MODE)
-            mNormalSlots.erase(it);
     }
-    if (!FORGET_IT_MODE)
     {
-        // Bounded retention lets slow RBC messages finish without re-execution.
+        // Bounded benchmark retention lets late messages finish without re-execution.
         while (!mNormalSlots.empty() && mNormalExecuted > NORMAL_PATH_WINDOW &&
                mNormalSlots.begin()->first <
                    mNormalExecuted - NORMAL_PATH_WINDOW)

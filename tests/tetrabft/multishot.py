@@ -24,6 +24,8 @@ PRE = r'''
 #include "util/XDROperators.h"
 #include "overlay/CustomProtocolTypes.h"
 #include "overlay/NormalPathConsensus.h"
+#include "overlay/ForgetITConsensus.h"
+#include "xdrpp/marshal.h"
 #include <openssl/sha.h>
 #include <algorithm>
 #include <cassert>
@@ -44,10 +46,12 @@ NodeID node(int n){NodeID id;id.ed25519()[31]=n;return id;}
 struct Delivery {int sender, receiver;StellarMessage message;};
 std::vector<Delivery> events;
 int active=-1;
+uint64_t fakeForgetNow=0;
 std::set<std::pair<uint64_t,int>> proposals;
 std::map<uint64_t,int> acked;
 void emit(int receiver,StellarMessage const& m){
  auto t=m.customMessage().msgType;
+ if(t==CUSTOM_FORGET_NATIVE){ForgetITPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==1)proposals.emplace(m.customMessage().view,active);}
  if(t==CUSTOM_TETRA_PROPOSE || t==CUSTOM_SIMPLE_PROPOSE || t==CUSTOM_FORGET_PREPARE)
   proposals.emplace(m.customMessage().view,active);
  events.push_back({active,receiver,m});
@@ -60,6 +64,7 @@ struct Peer {using pointer=std::shared_ptr<Peer>;NodeID id;void sendMessage(std:
 namespace experiment {
 bool TETRABFT_MODE=false,SIMPLE_IT_MODE=false,FORGET_IT_MODE=false,SIMPLE_IT_OPTIMISTIC=true;
 constexpr size_t NORMAL_PATH_WINDOW=64,SERVER_BATCH_SIZE=2;
+constexpr uint64_t FORGET_IT_DELTA_MS=100;
 struct ClientAck {uint64_t batchId;int clientFd;};
 struct BlockKey {uint64_t seq;Hash hash;bool operator<(BlockKey const& b)const{return std::tie(seq,hash)<std::tie(b.seq,b.hash);}};
 bool g_clientListenerActive=false;
@@ -90,7 +95,7 @@ struct Network {
  std::vector<Replica> replicas;
  explicit Network(int mode,int count):n(count),ingress(n-1),replicas(n){
   TETRABFT_MODE=mode==0;SIMPLE_IT_MODE=mode==1||mode==2;FORGET_IT_MODE=mode==3;SIMPLE_IT_OPTIMISTIC=mode==1;
-  events.clear();proposals.clear();acked.clear();
+  events.clear();proposals.clear();acked.clear();fakeForgetNow=0;
   for(int id=0;id<n;++id){auto& r=replicas[id];auto& cfg=r.overlay.mApp.cfg;
    cfg.NODE_SEED.id=node(id);cfg.SEND_CUSTOM_MESSAGE=id==ingress;r.listener=id==ingress;
    for(int j=0;j<n;++j){cfg.QUORUM_SET.insert(node(j));if(j!=id){auto p=std::make_shared<Peer>();p->id=node(j);r.overlay.peers[node(j)]=p;}}
@@ -98,13 +103,13 @@ struct Network {
   }
  }
  template<class F>void invoke(int id,F action){active=id;replicas[id].swap();action(replicas[id].overlay);replicas[id].swap();active=-1;}
- void deliver(Delivery const& d){invoke(d.receiver,[&](auto& o){if(d.message.customMessage().msgType==CUSTOM_EXPERIMENT_WORK)o.normalReceiveWork(d.message.customMessage(),node(d.sender));else o.handleNormalMessage(d.message,node(d.sender));});}
+ void deliver(Delivery const& d){invoke(d.receiver,[&](auto& o){if(d.message.customMessage().msgType==CUSTOM_EXPERIMENT_WORK)o.normalReceiveWork(d.message.customMessage(),node(d.sender));else if(d.message.customMessage().msgType==CUSTOM_FORGET_NATIVE)o.handleForgetITMessage(d.message.customMessage(),node(d.sender));else o.handleNormalMessage(d.message,node(d.sender));});}
  void enqueue(int count,int first=1){for(int i=first;i<first+count;++i)replicas[ingress].queue.push_back(batch(i));invoke(ingress,[](auto&o){o.normalProp();});}
  void drain(unsigned seed,bool holdFirstCommit=false){std::mt19937 rng(seed);size_t count=0;
   while(!events.empty()){
    assert(++count<2000000);size_t k=rng()%events.size();
-   // The unchanged Forget-IT adapter learns its fixed leader from instance 1;
-   // preserve TCP's per-sender/receiver FIFO for that regression. Native paths
+   // The Forget-IT benchmark learns its initial leader from instance 1;
+   // preserve TCP's per-sender/receiver FIFO for that regression. Other paths
    // additionally tolerate arbitrary reordering across the entire queue.
    if(FORGET_IT_MODE)for(size_t j=0;j<k;++j)if(events[j].sender==events[k].sender && events[j].receiver==events[k].receiver){k=j;break;}
    auto d=events[k];events.erase(events.begin()+k);
@@ -163,10 +168,35 @@ void rejectMalformed(){
   });assert(events.empty());
  }
 }
+void forgetWireValues(){
+ Network net(3,4);auto a=batch(1),b=batch(2);
+ a.transactions[0].payload="UPDATE x "+std::string(60000,'a');
+ b.transactions[0].payload="UPDATE x "+std::string(60000,'b');
+ auto av=a.serialize(),bv=b.serialize();
+ net.invoke(3,[&](auto&o){using C=ForgetITConsensus<NodeID>;o.sendForgetIT(1,{C::Vote2,2,C::Value::value(av),C::Value::value(bv)});});
+ assert(!events.empty());auto const& cm=events.front().message.customMessage();assert(cm.data.size()>100000);
+ ForgetITPacket p;std::vector<char> bytes(cm.data.begin(),cm.data.end());xdr::xdr_from_opaque(bytes,p);
+ assert(p.value==av && p.guard==bv && p.view==2 && p.kind==3);
+ net.invoke(0,[&](auto&o){CustomMessage broken;broken.msgType=CUSTOM_FORGET_NATIVE;broken.view=1;broken.data="bad";o.handleForgetITMessage(broken,node(3));assert(o.mNormalSlots.empty());});
+}
+void forgetNativeRotation(){
+ Network net(3,4);net.enqueue(1);
+ size_t steps=0;
+ while(!events.empty()){
+  assert(++steps<10000);auto d=events.front();events.erase(events.begin());
+  ForgetITPacket p;std::vector<char> b(d.message.customMessage().data.begin(),d.message.customMessage().data.end());xdr::xdr_from_opaque(b,p);
+  if(p.kind!=ForgetITConsensus<NodeID>::Vote1)net.deliver(d);
+ }
+ for(auto const&r:net.replicas)assert(r.overlay.mNormalExecuted==0);
+ fakeForgetNow=300;for(int id=0;id<4;++id)net.invoke(id,[](auto&o){o.tickForgetIT();});net.drain(81);
+ fakeForgetNow=400;for(int id=0;id<4;++id)net.invoke(id,[](auto&o){o.tickForgetIT();});net.drain(82);
+ for(auto const&r:net.replicas){assert(r.overlay.mNormalExecuted==1);assert(r.overlay.mNormalSlots.at(1).forget->state().view==2);assert(r.kv.at("x")=="1");}
+ assert(acked[1]==1);assert(proposals.count({1,3}) && proposals.count({1,0}));
+}
 int main(){
- transitions();rejectMalformed();
- for(int mode=0;mode<4;++mode){sequentialClients(mode);for(int n:{4,7,8})for(unsigned seed=0;seed<10;++seed)network(mode,n,seed,2*n+3);network(mode,4,99,140);}
- std::cout<<"124 adapter simulations passed; native TetraBFT/Simple-IT rotation and overlap, Forget-IT fixed-leader regression, duplicate/reordered delivery, bounded retention, single outstanding batch, empty-chain drain, exactly-once ACKs, malformed proposals.\n";
+ transitions();rejectMalformed();forgetNativeRotation();forgetWireValues();
+ for(int mode=0;mode<4;++mode){sequentialClients(mode);for(int n:{4,7,8}){if(mode==3 && n==8)continue;for(unsigned seed=0;seed<10;++seed)network(mode,n,seed,2*n+3);}network(mode,4,99,140);}
+ std::cout<<"114 adapter simulations passed; native TetraBFT/Simple-IT rotation and overlap, Forget-IT healthy path and native view-change wire test, full lock/guard payloads, duplicate/reordered delivery, bounded retention, single outstanding batch, empty-chain drain, exactly-once ACKs, malformed proposals.\n";
 }
 '''
 
@@ -180,6 +210,11 @@ def main():
                     header.index('    void tryExecutePBFT();')]
     body = '\n'.join(strip(f'src/overlay/experiments/{name}.cpp') for name in
                      ('NormalPathProtocol', 'TetraBFT', 'SimpleIT', 'ForgetIT'))
+    # Substitute only the clock, leaving the production state machine and wire
+    # decoder/encoder intact for deterministic timeout tests.
+    clock_start = body.index('uint64_t\nforgetNow()')
+    clock_end = body.index('bool\nvalidForgetValue', clock_start)
+    body = body[:clock_start] + 'uint64_t forgetNow(){return fakeForgetNow;}\n' + body[clock_end:]
     source = PRE + fields + '\n};\n}\n' + body + POST
     with tempfile.TemporaryDirectory(prefix='stellar-multishot-') as tmp:
         cpp, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
@@ -188,7 +223,7 @@ def main():
                  '-fno-omit-frame-pointer'] if args.sanitize else ['-O2']
         subprocess.run(['g++', '-std=c++17', *flags, '-I.', '-Isrc',
                         '-Isrc/protocol-curr', '-Ilib/xdrpp', str(cpp),
-                        '-lcrypto', '-o', str(exe)], cwd=ROOT, check=True)
+                        'lib/xdrpp/xdrpp/marshal.cc', '-lcrypto', '-o', str(exe)], cwd=ROOT, check=True)
         subprocess.run([str(exe)], check=True,
                        env={**os.environ, 'ASAN_OPTIONS': 'detect_leaks=0'})
 

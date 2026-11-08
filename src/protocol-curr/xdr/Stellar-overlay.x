@@ -89,7 +89,8 @@ enum CustomMessageType
     CUSTOM_FORGET_VOTE2 = 30,
     CUSTOM_SHABDIZ_PAPER = 31,
     // Benchmark ingress supplies work to native multi-shot leaders.
-    CUSTOM_EXPERIMENT_WORK = 32
+    CUSTOM_EXPERIMENT_WORK = 32,
+    CUSTOM_FORGET_NATIVE = 33
 };
 
 // Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.
@@ -109,12 +110,25 @@ struct ShabdizPacket
     string data<90000>;
 };
 
+// Forget-IT Algorithm 1: distinct bottom/SAFE/value tags. Full values preserve
+// the paper's information-theoretic equality tests, including lock and guard.
+struct ForgetITPacket
+{
+    uint32 wireVersion;
+    uint32 kind;
+    uint64 view;
+    uint32 valueKind;
+    string value<90000>;
+    uint32 guardKind;
+    string guard<90000>;
+};
+
 struct CustomMessage
 {
     CustomMessageType msgType;
     uint64 view;       // current view 
     Hash blockHash;    // identifies the block
-    string data<100000>;  // payload
+    string data<200000>;  // accommodates Forget-IT lock plus guard values
     uint64 vp;    // used in SEND/ECHO/READY for vp
     Hash bp; // used in SEND/ECHO/READY for bp
     NodeID origin;     // process p′ that originally sent SEND

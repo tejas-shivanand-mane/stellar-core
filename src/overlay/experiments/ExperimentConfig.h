@@ -8,16 +8,21 @@ namespace stellar::experiment
 // Build-time experiment settings shared by replicas and shab_client.
 // Rebuild all replicas after edits. SEND_CUSTOM_MESSAGE=true selects client
 // ingress. Shabdiz, native multi-shot TetraBFT and Simple-IT rotate leaders.
-// PBFT, IT-HS (blog Part One) and Forget-IT retain their fixed normal-path leader.
+// Forget-IT rotates within an instance through Algorithm 1's view changes;
+// each fresh benchmark instance still begins with the client-ingress leader.
+// PBFT and IT-HS (blog Part One) retain their fixed normal-path leader.
 //
 // Scope: fault-free benchmarks. TetraBFT implements section 6.1's chained
 // multi-shot path; Simple-IT implements Figure 2's non-speculative S/S_opt
 // round progression and RBC/commit overlap. Their view change, timeouts,
 // recovery/disabled rounds are NOT implemented. Simple-IT uses the existing
 // full-value proposal/digest-vote RBC, without erasure coding or speculation.
-// PBFT/IT-HS/Forget-IT still lack their full view-change/recovery components;
-// IT-HS/Forget-IT still run independent first-view instances. Do not report
-// these adapters as complete fault-tolerant implementations of the papers.
+// Forget-IT implements the native view state machine, using reliable TCP.
+// Runtime crash/restart persistence is not wired; bounded benchmark instance
+// retention and client ingress are outside the one-shot paper algorithm.
+// PBFT/IT-HS still lack their full view-change/recovery components. Do not
+// report these adapters as complete fault-tolerant implementations of the
+// papers.
 
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;
@@ -39,6 +44,11 @@ static_assert(int(ITHS_MODE) + int(PBFT_MODE) + int(ENABLE_SCP_TRACKING) +
 // Shared TCP workload and server batching.
 inline constexpr int CLIENT_PORT = 12000;
 inline constexpr std::size_t SERVER_BATCH_SIZE = 100;
+
+// Forget-IT's known delay bound Delta: vote-2 timeout at 3 Delta, view change
+// at 4 Delta, as in Algorithm 1. n=3f+1 is required for this protocol.
+inline constexpr uint64_t FORGET_IT_DELTA_MS = 1000;
+static_assert(FORGET_IT_DELTA_MS > 0 && FORGET_IT_DELTA_MS <= UINT64_MAX / 4);
 
 // Retention and the existing Shabdiz forced-COLLECT experiment.
 inline constexpr uint64_t MAX_VIEW_HISTORY = 1000;

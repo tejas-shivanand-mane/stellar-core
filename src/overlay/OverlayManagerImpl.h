@@ -5,18 +5,19 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "Peer.h"
-#include "overlay/NormalPathConsensus.h"
-#include "overlay/experiments/ExperimentConfig.h"
 #include "PeerAuth.h"
 #include "PeerDoor.h"
 #include "PeerManager.h"
 #include "herder/TxSetFrame.h"
 #include "ledger/LedgerTxn.h"
 #include "overlay/Floodgate.h"
+#include "overlay/ForgetITConsensus.h"
+#include "overlay/NormalPathConsensus.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/OverlayMetrics.h"
 #include "overlay/SurveyManager.h"
 #include "overlay/TxDemandsManager.h"
+#include "overlay/experiments/ExperimentConfig.h"
 #include "util/Timer.h"
 
 #include "medida/metrics_registry.h"
@@ -117,9 +118,15 @@ class OverlayManagerImpl : public OverlayManager
     void initializeNormalPath();
     bool advanceTetraBFT(uint64_t seq);
     bool advanceForgetIT(uint64_t seq);
+    void tickForgetIT();
+    void handleForgetITMessage(CustomMessage const& cm, NodeID const& sender);
+    void startForgetIT(uint64_t seq, std::string const& data);
+    void sendForgetIT(uint64_t seq,
+                      ForgetITConsensus<NodeID>::Message const& msg);
     bool advanceSimpleIT(uint64_t seq);
     void pbftProp();
-    // Proposals supply and validate the batch; votes identify it by digest.
+    // TetraBFT/Simple-IT proposals supply the batch; their votes use digests.
+    // Native Forget-IT carries complete values, including lock and guard.
     // Never execute an instance before its proposal data is available.
     struct NormalSlot
     {
@@ -128,7 +135,9 @@ class OverlayManagerImpl : public OverlayManager
         Hash parent{};
         bool tetraVoted = false;
         bool tetraNotarized = false;
-        ForgetITNormal<NodeID, Hash> forget;
+        std::unique_ptr<ForgetITConsensus<NodeID>> forget;
+        std::vector<std::pair<NodeID, ForgetITConsensus<NodeID>::Message>>
+            forgetEarly;
         SimpleITNormal<NodeID, Hash> simple;
         Hash digest;
         std::string data;

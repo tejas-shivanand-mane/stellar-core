@@ -331,6 +331,8 @@ OverlayManagerImpl::tickExperiment()
         tickPaperShabdiz();
         return;
     }
+    if (FORGET_IT_MODE)
+        tickForgetIT();
     if (shabdiz_start == 0)
     {
         size_t authenticatedPeers = getAuthenticatedPeersCount();
@@ -443,6 +445,13 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     }
     if (type == CUSTOM_SHABDIZ_PAPER)
         return;
+    if (type == CUSTOM_FORGET_NATIVE)
+    {
+        if (FORGET_IT_MODE)
+            handleForgetITMessage(stellarMsg.customMessage(),
+                                  peer->getPeerID());
+        return;
+    }
     if (type == CUSTOM_EXPERIMENT_WORK)
     {
         if (TETRABFT_MODE || SIMPLE_IT_MODE)
