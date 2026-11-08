@@ -2,352 +2,243 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "crypto/SHA.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/OverlayManagerImpl.h"
 #include "overlay/experiments/ExperimentState.h"
-#include "util/GlobalChecks.h"
 #include "util/Logging.h"
+#include "xdrpp/marshal.h"
 
 namespace stellar
 {
 using namespace experiment;
-
-// IT-HS blog version, not the OPODIS paper:
-// https://decentralizedthoughts.github.io/2021-09-20-information-theoretic-hotstuff-it-hs-part-one/
-// ECHO, ACCEPT, LOCK and COMMIT carry b. Here b includes the batch data;
-// preserve these value-carrying messages rather than applying PBFT's digests.
-
-void
-OverlayManagerImpl::sendITHSEcho(uint64_t view, Hash const& blockHash,
-                                 std::string const& data)
+namespace
 {
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-    msg->customMessage().msgType = CUSTOM_ITHS_ECHO;
-    msg->customMessage().view = view;
-    msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data = data;
-    broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ECHO block {} view {}",
-               hexAbbrev(blockHash), view);
+using Blog = ITHSBlogConsensus<NodeID>;
+uint64_t
+ithsBlogNow()
+{
+    // Part One assumes synchronized clocks. A per-process steady-clock epoch
+    // would silently give different view boundaries on different machines.
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
-
-void
-OverlayManagerImpl::sendITHSAccept(uint64_t view, Hash const& blockHash,
-                                   std::string const& data)
+bool
+validITHSInput(std::string const& data)
 {
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-    msg->customMessage().msgType = CUSTOM_ITHS_ACCEPT;
-    msg->customMessage().view = view;
-    msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data = data;
-    broadcastMessage(msg);
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast ACCEPT block {} view {}",
-               hexAbbrev(blockHash), view);
-}
-
-void
-OverlayManagerImpl::sendITHSLock(uint64_t view, Hash const& blockHash,
-                                 std::string const& data)
-{
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-    msg->customMessage().msgType = CUSTOM_ITHS_LOCK;
-    msg->customMessage().view = view;
-    msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data = data;
-    broadcastMessage(msg);
-}
-
-void
-OverlayManagerImpl::sendITHSCommit(uint64_t view, Hash const& blockHash,
-                                   std::string const& data)
-{
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-    msg->customMessage().msgType = CUSTOM_ITHS_COMMIT;
-    msg->customMessage().view = view;
-    msg->customMessage().blockHash = blockHash;
-    msg->customMessage().data = data;
-
-    broadcastMessage(msg);
-
-    CLOG_DEBUG(Overlay, "[IT-HS] Broadcast COMMIT block {} view {}",
-               hexAbbrev(blockHash), view);
-}
-
-void
-OverlayManagerImpl::ithsProp()
-{
-    legacyProp(true);
-}
-
-void
-OverlayManagerImpl::acceptITHSLocalProposal(CustomMessage const& cm)
-{
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-    auto const& blockHash = cm.blockHash;
-    auto& st = g_txn[BlockKey{cm.view, cm.blockHash}];
-
-    bool firstEchoThisView = !g_ithsEchoSentForView.count(cm.view);
-    // No view-change implementation: treat parent/lock metadata as the safety
-    // check.
-    bool safeForLocalLock = (cm.vp >= g_ithsLockView);
-
-    if (firstEchoThisView && safeForLocalLock)
+    try
     {
-        g_ithsEchoSentForView[cm.view] = cm.blockHash;
+        auto batch = TransactionBatch::deserialize(data);
+        return data.size() <= 90000 &&
+               batch.transactions.size() == SERVER_BATCH_SIZE &&
+               batch.serialize() == data;
+    }
+    catch (std::exception const&)
+    {
+        return false;
+    }
+}
+}
 
-        st.ithsEchoSent = true;
-        st.ithsEchoVoters.insert(selfID);
+void
+OverlayManagerImpl::sendITHSBlog(uint64_t seq, ITHSBlogPacket const& packet,
+                                 std::optional<NodeID> const& recipient)
+{
+    auto bytes = xdr::xdr_to_opaque(packet);
+    auto out = std::make_shared<StellarMessage>();
+    out->type(CUSTOM_MESSAGE);
+    auto& cm = out->customMessage();
+    cm.msgType = CUSTOM_ITHS_BLOG;
+    cm.view = seq; // instance, not the blog's protocol view
+    cm.data.assign(bytes.begin(), bytes.end());
+    for (auto const& peer : getAuthenticatedPeers())
+        if (mNormalMembers.count(peer.first) &&
+            (!recipient || peer.first == *recipient))
+            peer.second->sendMessage(out);
+}
 
-        sendITHSEcho(cm.view, cm.blockHash, cm.data);
+void
+OverlayManagerImpl::startITHSBlog(uint64_t seq, std::string const& data,
+                                  uint64_t epoch)
+{
+    auto& slot = mNormalSlots[seq];
+    if (slot.iths)
+        return;
+    if (!mNormalLeader || data.size() > 90000)
+        throw std::invalid_argument(
+            "IT-HS blog requires an ingress leader and batch <=90000 bytes");
+    bool ingressStart = epoch == 0;
+    if (ingressStart)
+        epoch = ithsBlogNow();
+    auto leaders = mNormalLeaders;
+    std::rotate(leaders.begin(),
+                std::find(leaders.begin(), leaders.end(), *mNormalLeader),
+                leaders.end());
+    slot.ithsInput = data;
+    slot.iths = std::make_unique<Blog>(
+        mApp.getConfig().NODE_SEED.getPublicKey(), std::move(leaders), data,
+        epoch, ithsBlogNow(), ITHS_BLOG_DELTA_MS);
+    slot.proposed = true;
+    mITHSBlogActive.insert(seq);
+    if (ingressStart)
+    {
+        // Workload initialization, not a consensus vote: distribute the input
+        // and one common epoch. Initial input delivery plus SUGGEST fits the
+        // 2-Delta proposal wait after GST; later views use shared boundaries.
+        ITHSBlogPacket start;
+        start.wireVersion = 1;
+        start.kind = 0;
+        start.epochMs = epoch;
+        start.value = data;
+        sendITHSBlog(seq, start);
+    }
+    auto pending = std::move(slot.ithsEarly);
+    slot.ithsEarly.clear();
+    for (auto const& p : pending)
+        if (p.second.epochMs == epoch)
+            slot.iths->receive(p.first,
+                               {p.second.kind, p.second.view, p.second.lockView,
+                                p.second.value},
+                               ithsBlogNow());
+}
 
-        CLOG_DEBUG(Overlay,
-                   "[IT-HS SELF-LOCAL SEND ECHO] block={} view={} "
-                   "proposalLockView={} localLockView={}",
-                   hexAbbrev(blockHash), currentView, cm.vp, g_ithsLockView);
+void
+OverlayManagerImpl::handleITHSBlogMessage(CustomMessage const& cm,
+                                          NodeID const& sender)
+{
+    auto seq = cm.view;
+    if (!mNormalMembers.count(sender) || !seq ||
+        (seq > mNormalExecuted && seq - mNormalExecuted > NORMAL_PATH_WINDOW) ||
+        (seq <= mNormalExecuted && !mNormalSlots.count(seq)))
+        return;
+    ITHSBlogPacket packet;
+    try
+    {
+        std::vector<char> bytes(cm.data.begin(), cm.data.end());
+        xdr::xdr_from_opaque(bytes, packet);
+        if (packet.wireVersion != 1 || packet.kind > Blog::Commit ||
+            !packet.epochMs)
+            return;
+        auto it = mNormalSlots.find(seq);
+        if ((it == mNormalSlots.end() || !it->second.iths ||
+             it->second.ithsInput != packet.value) &&
+            !validITHSInput(packet.value))
+            return;
+    }
+    catch (std::exception const&)
+    {
+        return;
+    }
+    if (packet.kind == 0)
+    {
+        if (packet.view || packet.lockView || (!mNormalLeader && seq != 1) ||
+            (mNormalLeader && !(sender == *mNormalLeader)))
+            return;
+        if (!mNormalLeader)
+            mNormalLeader = sender;
+        startITHSBlog(seq, packet.value, packet.epochMs);
     }
     else
     {
-        CLOG_DEBUG(Overlay,
-                   "[IT-HS SELF-LOCAL NO ECHO] block={} view={} "
-                   "ithsEchoSent={} latestCommittedView={}",
-                   hexAbbrev(blockHash), currentView, st.ithsEchoSent,
-                   latestCommittedView);
+        auto& slot = mNormalSlots[seq];
+        if (!slot.iths)
+        {
+            auto same = [&](auto const& p) {
+                return p.first == sender && p.second == packet;
+            };
+            if (std::find_if(slot.ithsEarly.begin(), slot.ithsEarly.end(),
+                             same) == slot.ithsEarly.end())
+                slot.ithsEarly.emplace_back(sender, packet);
+            return;
+        }
+        if (slot.iths->epoch() != packet.epochMs)
+            return;
+        slot.iths->receive(
+            sender, {packet.kind, packet.view, packet.lockView, packet.value},
+            ithsBlogNow());
     }
+    normalAdvance(seq);
 }
-void
-OverlayManagerImpl::handleITHSMessage(StellarMessage const& stellarMsg,
-                                      Peer::pointer peer)
+
+bool
+OverlayManagerImpl::advanceITHSBlog(uint64_t seq)
 {
-    auto const& cm = stellarMsg.customMessage();
-    NodeID sender = peer->getPeerID();
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-    BlockKey key{cm.view, cm.blockHash};
-    auto& st = g_txn[key];
-    switch (cm.msgType)
+    auto& slot = mNormalSlots.at(seq);
+    if (!slot.iths)
+        return false;
+    for (auto const& out : slot.iths->takeOutgoing())
     {
-    case CUSTOM_ITHS_PROPOSE:
-        if (cm.view == currentView)
-        {
-            CLOG_DEBUG(Overlay, "[IT-HS] Received PROPOSE block {} view {}",
-                       hexAbbrev(cm.blockHash), cm.view);
-
-            bool firstEchoThisView = !g_ithsEchoSentForView.count(cm.view);
-
-            // No view-change implementation: proposal's lock/parent view must
-            // be at least the local IT-HS lock view.
-            bool safeForLocalLock = (cm.vp >= g_ithsLockView);
-
-            if (firstEchoThisView && safeForLocalLock)
-            {
-                g_ithsEchoSentForView[cm.view] = cm.blockHash;
-
-                st.ithsEchoSent = true;
-                st.ithsEchoVoters.insert(selfID);
-                sendITHSEcho(cm.view, cm.blockHash, cm.data);
-            }
-            else
-            {
-                CLOG_DEBUG(
-                    Overlay,
-                    "[IT-HS] Reject/skip PROPOSE block {} view {} "
-                    "firstEchoThisView={} proposalLockView={} localLockView={}",
-                    hexAbbrev(cm.blockHash), cm.view, firstEchoThisView, cm.vp,
-                    g_ithsLockView);
-            }
-        }
-        break;
-
-    // ================================================================
-    case CUSTOM_ITHS_ECHO:
-        if (cm.view == currentView)
-        {
-            st.ithsEchoVoters.insert(sender);
-
-            CLOG_DEBUG(
-                Overlay, "[IT-HS] Received ECHO block {} view {} echoes={}",
-                hexAbbrev(cm.blockHash), cm.view, st.ithsEchoVoters.size());
-
-            // IT-HS ECHO quorum: n - f.
-            if (st.ithsEchoVoters.size() >= N - f &&
-                !g_ithsAcceptSentForView.count(cm.view))
-            {
-                g_ithsAcceptSentForView[cm.view] = cm.blockHash;
-
-                st.ithsAcceptSent = true;
-                st.ithsAcceptVoters.insert(selfID);
-
-                sendITHSAccept(cm.view, cm.blockHash, cm.data);
-
-                CLOG_DEBUG(Overlay, "[IT-HS] Sent ACCEPT block {} view {}",
-                           hexAbbrev(cm.blockHash), cm.view);
-            }
-        }
-        break;
-
-    // ================================================================
-    case CUSTOM_ITHS_ACCEPT:
+        ITHSBlogPacket packet;
+        packet.wireVersion = 1;
+        packet.kind = out.message.kind;
+        packet.epochMs = slot.iths->epoch();
+        packet.view = out.message.view;
+        packet.lockView = out.message.lockView;
+        packet.value = out.message.value;
+        sendITHSBlog(seq, packet, out.recipient);
+    }
+    bool decided = !slot.decided && slot.iths->decision().has_value();
+    if (decided)
     {
-        st.ithsAcceptVoters.insert(sender);
-
-        CLOG_DEBUG(
-            Overlay, "[IT-HS] Received ACCEPT block {} view {} accepts={}",
-            hexAbbrev(cm.blockHash), cm.view, st.ithsAcceptVoters.size());
-
-        // Relay ACCEPT after f + 1 votes, including for prior views.
-        //
-        if (st.ithsAcceptVoters.size() >= f + 1 &&
-            !g_ithsAcceptSentForView.count(cm.view))
-        {
-            g_ithsAcceptSentForView[cm.view] = cm.blockHash;
-
-            st.ithsAcceptSent = true;
-            st.ithsAcceptVoters.insert(selfID);
-
-            sendITHSAccept(cm.view, cm.blockHash, cm.data);
-
-            CLOG_DEBUG(Overlay, "[IT-HS] Boosted ACCEPT block {} view {}",
-                       hexAbbrev(cm.blockHash), cm.view);
-        }
-
-        // Main lock rule: n-f ACCEPT -> set lock and send LOCK.
-        // Only do lock update for the current view.
-        if (cm.view == currentView && st.ithsAcceptVoters.size() >= N - f &&
-            !g_ithsLockSentForView.count(cm.view))
-        {
-            g_ithsLockView = cm.view;
-            g_ithsLockBlock = cm.blockHash;
-
-            g_ithsLockSentForView[cm.view] = cm.blockHash;
-
-            st.ithsLockSent = true;
-            st.ithsLockVoters.insert(selfID);
-
-            sendITHSLock(cm.view, cm.blockHash, cm.data);
-
-            CLOG_DEBUG(Overlay, "[IT-HS] Set lock=({},{}) and sent LOCK",
-                       cm.view, hexAbbrev(cm.blockHash));
-        }
-
-        break;
+        slot.data = *slot.iths->decision();
+        slot.digest = sha256(slot.data);
+        mITHSBlogActive.erase(seq);
     }
-
-        // ================================================================
-
-    case CUSTOM_ITHS_LOCK:
-    {
-        if (cm.view == currentView)
-        {
-            st.ithsLockVoters.insert(sender);
-
-            CLOG_DEBUG(
-                Overlay, "[IT-HS] Received LOCK block {} view {} locks={}",
-                hexAbbrev(cm.blockHash), cm.view, st.ithsLockVoters.size());
-
-            // Relay COMMIT after an n - f LOCK quorum
-            // local commit occurs on a COMMIT quorum
-            if (st.ithsLockVoters.size() >= N - f &&
-                !g_ithsCommitSentForView.count(cm.view))
-            {
-                g_ithsCommitSentForView[cm.view] = cm.blockHash;
-
-                st.ithsCommitSent = true;
-                st.ithsCommitVoters.insert(selfID);
-
-                sendITHSCommit(cm.view, cm.blockHash, cm.data);
-
-                CLOG_DEBUG(
-                    Overlay,
-                    "[IT-HS] Sent COMMIT after LOCK quorum block {} view {}",
-                    hexAbbrev(cm.blockHash), cm.view);
-            }
-        }
-
-        break;
-    }
-    // ================================================================
-    case CUSTOM_ITHS_COMMIT:
-    {
-        st.ithsCommitVoters.insert(sender);
-
-        CLOG_DEBUG(
-            Overlay, "[IT-HS] Received COMMIT block {} view {} commits={}",
-            hexAbbrev(cm.blockHash), cm.view, st.ithsCommitVoters.size());
-
-        // Relay COMMIT after f + 1 votes, including for prior views.
-        //
-        if (st.ithsCommitVoters.size() >= f + 1 &&
-            !g_ithsCommitSentForView.count(cm.view))
-        {
-            g_ithsCommitSentForView[cm.view] = cm.blockHash;
-
-            st.ithsCommitSent = true;
-            st.ithsCommitVoters.insert(selfID);
-
-            sendITHSCommit(cm.view, cm.blockHash, cm.data);
-
-            CLOG_DEBUG(Overlay, "[IT-HS] Boosted COMMIT block {} view {}",
-                       hexAbbrev(cm.blockHash), cm.view);
-        }
-
-        // Apply the batch and advance currentView after an n - f COMMIT quorum.
-        //
-        if (cm.view == currentView && st.ithsCommitVoters.size() >= N - f &&
-            st.committedView < cm.view)
-        {
-            st.committedView = cm.view;
-            st.committedBlock = cm.blockHash;
-            latestCommittedView = cm.view;
-            latestCommittedBlock = cm.blockHash;
-
-            TransactionBatch batch = TransactionBatch::deserialize(cm.data);
-            for (auto const& txn : batch.transactions)
-            {
-                std::istringstream ss(txn.payload);
-                std::string op, key, value;
-                ss >> op >> key;
-
-                if (op == "READ")
-                {
-                    auto it = g_kvStore.find(key);
-                    (void)it;
-                }
-                else if (op == "UPDATE" || op == "RMW")
-                {
-                    ss >> value;
-                    g_kvStore[key] = value;
-                }
-            }
-
-            CLOG_INFO(Overlay,
-                      "[IT-HS COMMITTED] block={} view={} txns={} nextView={}",
-                      hexAbbrev(cm.blockHash), cm.view,
-                      batch.transactions.size(), cm.view + 1);
-
-            ackClientBatchesForBlock(cm.view, cm.blockHash);
-
-            currentView = cm.view + 1;
-            lastCollectSentView = UINT64_MAX;
-
-            BlockKey nextKey{currentView, Hash()};
-            g_txn[nextKey].proposalSentForView = false;
-
-            cleanupOldTxnStates();
-            deliverBufferedForCurrentView();
-
-            if (latestCommittedView == currentView - 1)
-            {
-                prop();
-            }
-        }
-
-        break;
-    }
-    }
+    armITHSBlogTimer();
+    return decided;
 }
 
-} // namespace stellar
+void
+OverlayManagerImpl::armITHSBlogTimer()
+{
+    if (mShuttingDown)
+        return;
+    auto now = ithsBlogNow();
+    std::optional<uint64_t> deadline;
+    for (auto seq : mITHSBlogActive)
+    {
+        auto next = mNormalSlots.at(seq).iths->nextDeadline(now);
+        if (next && (!deadline || *next < *deadline))
+            deadline = next;
+    }
+    if (deadline == mITHSBlogDeadline)
+        return;
+    if (!mITHSBlogTimer)
+        mITHSBlogTimer = std::make_unique<VirtualTimer>(mApp);
+    mITHSBlogTimer->cancel();
+    mITHSBlogDeadline = deadline;
+    if (!deadline)
+        return;
+    mITHSBlogTimer->expires_from_now(
+        std::chrono::milliseconds(*deadline > now ? *deadline - now : 1));
+    mITHSBlogTimer->async_wait(
+        [this]() {
+            mITHSBlogDeadline.reset();
+            tickITHSBlog();
+        },
+        VirtualTimer::onFailureNoop);
+}
+
+void
+OverlayManagerImpl::tickITHSBlog()
+{
+    if (mShuttingDown)
+        return;
+    auto now = ithsBlogNow();
+    std::vector<uint64_t> active(mITHSBlogActive.begin(),
+                                 mITHSBlogActive.end());
+    for (auto seq : active)
+    {
+        auto& core = *mNormalSlots.at(seq).iths;
+        auto before = core.view();
+        core.tick(now);
+        if (core.view() != before)
+            CLOG_INFO(Overlay, "[IT-HS-BLOG VIEW] instance={} view={}", seq,
+                      core.view());
+        normalAdvance(seq);
+    }
+    armITHSBlogTimer();
+}
+}

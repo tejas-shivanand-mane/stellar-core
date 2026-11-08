@@ -100,11 +100,6 @@ class OverlayManager
     virtual void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash)=0;
     virtual void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash)=0;
 
-    virtual void sendITHSEcho( uint64_t view, Hash const& blockHash, std::string const& data)=0;
-    virtual void sendITHSAccept( uint64_t view, Hash const& blockHash, std::string const& data)=0;
-    virtual void sendITHSLock( uint64_t view, Hash const& blockHash, std::string const& data)=0;
-    virtual void sendITHSCommit( uint64_t view, Hash const& blockHash, std::string const& data)=0;
-
     virtual void recvCustomMessage(StellarMessage const& msg, Peer::pointer peer)=0;
 
     // Process incoming transaction, pass it down to the transaction queue

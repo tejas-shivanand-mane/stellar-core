@@ -10,7 +10,8 @@ namespace stellar::experiment
 // ingress. Shabdiz, native multi-shot TetraBFT and Simple-IT rotate leaders.
 // Forget-IT rotates within an instance through Algorithm 1's view changes;
 // each fresh benchmark instance still begins with the client-ingress leader.
-// PBFT and IT-HS (blog Part One) retain their fixed normal-path leader.
+// IT-HS Part One also rotates across its clock-scheduled views, with full
+// SUGGEST/lock validation and background boosting. PBFT keeps its primary.
 //
 // Scope: fault-free benchmarks. TetraBFT implements section 6.1's chained
 // multi-shot path; Simple-IT implements Figure 2's non-speculative S/S_opt
@@ -20,7 +21,9 @@ namespace stellar::experiment
 // Forget-IT implements the native view state machine, using reliable TCP.
 // Runtime crash/restart persistence is not wired; bounded benchmark instance
 // retention and client ingress are outside the one-shot paper algorithm.
-// PBFT/IT-HS still lack their full view-change/recovery components. Do not
+// IT-HS requires synchronized clocks and reliable channels as in Part One;
+// it retains evidence across views, without the OPODIS storage optimization.
+// PBFT still lacks its view-change/recovery components. Do not
 // report these adapters as complete fault-tolerant implementations of the
 // papers.
 
@@ -44,6 +47,12 @@ static_assert(int(ITHS_MODE) + int(PBFT_MODE) + int(ENABLE_SCP_TRACKING) +
 // Shared TCP workload and server batching.
 inline constexpr int CLIENT_PORT = 12000;
 inline constexpr std::size_t SERVER_BATCH_SIZE = 100;
+
+// IT-HS Part One: synchronized wall clocks, 2 Delta proposal wait, and views
+// every 10 Delta from each instance's shared epoch. This is an actual wait
+// even with no failures. Tune Delta to bound network/processing delays.
+inline constexpr uint64_t ITHS_BLOG_DELTA_MS = 1000;
+static_assert(ITHS_BLOG_DELTA_MS > 0 && ITHS_BLOG_DELTA_MS <= UINT64_MAX / 10);
 
 // Forget-IT's known delay bound Delta: vote-2 timeout at 3 Delta, view change
 // at 4 Delta, as in Algorithm 1. n=3f+1 is required for this protocol.

@@ -333,6 +333,8 @@ OverlayManagerImpl::tickExperiment()
     }
     if (FORGET_IT_MODE)
         tickForgetIT();
+    if (ITHS_MODE)
+        tickITHSBlog();
     if (shabdiz_start == 0)
     {
         size_t authenticatedPeers = getAuthenticatedPeersCount();
@@ -425,10 +427,7 @@ OverlayManagerImpl::prop()
         return;
     }
 
-    if (ITHS_MODE)
-        ithsProp();
-    else
-        shabdizProp();
+    shabdizProp();
 }
 
 void
@@ -444,6 +443,16 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         return;
     }
     if (type == CUSTOM_SHABDIZ_PAPER)
+        return;
+    if (type == CUSTOM_ITHS_BLOG)
+    {
+        if (ITHS_MODE)
+            handleITHSBlogMessage(stellarMsg.customMessage(),
+                                  peer->getPeerID());
+        return;
+    }
+    // Retired IT-HS layout conflated instance and view; never mix the formats.
+    if (type >= CUSTOM_ITHS_PROPOSE && type <= CUSTOM_ITHS_COMMIT)
         return;
     if (type == CUSTOM_FORGET_NATIVE)
     {
@@ -516,10 +525,7 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
         return;
     }
 
-    if (cm.msgType >= CUSTOM_ITHS_PROPOSE && cm.msgType <= CUSTOM_ITHS_COMMIT)
-        handleITHSMessage(stellarMsg, peer);
-    else
-        handleShabdizMessage(stellarMsg, peer);
+    handleShabdizMessage(stellarMsg, peer);
 }
 
 void
@@ -549,6 +555,7 @@ OverlayManagerImpl::deliverBufferedForCurrentView()
 void
 OverlayManagerImpl::legacyProp(bool ithsMode)
 {
+    releaseAssert(!ithsMode); // IT-HS uses its separate blog state machine.
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
     std::string shortID = KeyUtils::toShortString(selfID);
     updateForcedCollectState();
@@ -672,10 +679,7 @@ OverlayManagerImpl::legacyProp(bool ithsMode)
         //
         auto const& cm = msg->customMessage();
 
-        if (ithsMode)
-            acceptITHSLocalProposal(cm);
-        else
-            acceptShabdizLocalProposal(cm);
+        acceptShabdizLocalProposal(cm);
 
         return;
     }

@@ -21,9 +21,9 @@ OverlayManagerImpl::initializeNormalPath()
     if (normalPathEnabled())
     {
         auto const& cfg = mApp.getConfig();
-        // Forget-IT runs independent instances with native view changes. TetraBFT
-        // and Simple-IT use their native per-slot/per-round leader schedules.
-        if (FORGET_IT_MODE && cfg.SEND_CUSTOM_MESSAGE)
+        // Forget-IT / IT-HS run independent instances with native view changes.
+        // TetraBFT and Simple-IT have native multi-shot leader schedules.
+        if ((FORGET_IT_MODE || ITHS_MODE) && cfg.SEND_CUSTOM_MESSAGE)
             mNormalLeader = cfg.NODE_SEED.getPublicKey();
         mNormalMembers.insert(mApp.getConfig().NODE_SEED.getPublicKey());
         LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
@@ -38,27 +38,37 @@ OverlayManagerImpl::initializeNormalPath()
                 "Normal-path protocols need at least four fixed members");
         mNormalLeaders.assign(mNormalMembers.begin(), mNormalMembers.end());
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
-        CLOG_INFO(Overlay,
-                  "[{} CONFIG] members={} quorum={} simple_optimistic={} "
-                  "native_view_change={} payload={} "
-                  "simple_commit=round_only rotation=true native_pipeline={}",
-                  normalPathName(), mNormalMembers.size(), mNormalQuorum,
-                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC, FORGET_IT_MODE,
-                  FORGET_IT_MODE ? "full_values" : "digest_votes",
-                  !FORGET_IT_MODE);
+        if (ITHS_MODE)
+            CLOG_INFO(
+                Overlay,
+                "[IT-HS-BLOG CONFIG] delta_ms={} clocks=synchronized_wall "
+                "lock_evidence=accept initial_lock=view_zero_input",
+                ITHS_BLOG_DELTA_MS);
+        CLOG_INFO(
+            Overlay,
+            "[{} CONFIG] members={} quorum={} simple_optimistic={} "
+            "native_view_change={} payload={} "
+            "simple_commit=round_only rotation=true native_pipeline={}",
+            normalPathName(), mNormalMembers.size(), mNormalQuorum,
+            SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC, FORGET_IT_MODE || ITHS_MODE,
+            (FORGET_IT_MODE || ITHS_MODE) ? "full_values" : "digest_votes",
+            !(FORGET_IT_MODE || ITHS_MODE));
     }
 }
 
 bool
 OverlayManagerImpl::normalPathEnabled() const
 {
-    return TETRABFT_MODE || SIMPLE_IT_MODE || FORGET_IT_MODE;
+    return TETRABFT_MODE || SIMPLE_IT_MODE || FORGET_IT_MODE || ITHS_MODE;
 }
 
 char const*
 OverlayManagerImpl::normalPathName() const
 {
-    return TETRABFT_MODE ? "TETRA" : SIMPLE_IT_MODE ? "SIMPLE-IT" : "FORGET-IT";
+    return ITHS_MODE        ? "IT-HS-BLOG"
+           : TETRABFT_MODE  ? "TETRA"
+           : SIMPLE_IT_MODE ? "SIMPLE-IT"
+                            : "FORGET-IT";
 }
 
 CustomMessageType
@@ -206,12 +216,13 @@ OverlayManagerImpl::normalReceiveWork(CustomMessage const& cm,
 void
 OverlayManagerImpl::normalProp()
 {
-    uint64_t seq = FORGET_IT_MODE ? mNormalNextSeq : mNormalReady + 1;
+    uint64_t seq =
+        (FORGET_IT_MODE || ITHS_MODE) ? mNormalNextSeq : mNormalReady + 1;
     auto existing = mNormalSlots.find(seq);
     if (existing != mNormalSlots.end() && existing->second.proposed)
         return;
     std::string data;
-    if (FORGET_IT_MODE)
+    if (FORGET_IT_MODE || ITHS_MODE)
     {
         if (!mApp.getConfig().SEND_CUSTOM_MESSAGE || seq != mNormalExecuted + 1)
             return;
@@ -222,7 +233,11 @@ OverlayManagerImpl::normalProp()
         data = batch.serialize();
         g_blockClientAcks[BlockKey{seq, sha256(data)}] = std::move(acks);
         ++mNormalNextSeq;
-        startForgetIT(seq, data);
+        if (ITHS_MODE)
+            startITHSBlog(seq, data,
+                          0); // ingress creates and distributes a common epoch
+        else
+            startForgetIT(seq, data);
         normalAdvance(seq);
         return;
     }
@@ -249,8 +264,8 @@ void
 OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
                                         NodeID const& sender)
 {
-    if (FORGET_IT_MODE)
-        return; // Native Forget-IT packets have a separate decoder and view
+    if (FORGET_IT_MODE || ITHS_MODE)
+        return; // Native one-shot packets have a separate decoder and view
                 // state.
     auto const& cm = msg.customMessage();
     auto seq = cm.view;
@@ -345,12 +360,13 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
         auto round = current->first;
         auto oldReady = mNormalReady;
         auto oldNotarized = mNormalNotarized;
-        bool decided = TETRABFT_MODE    ? advanceTetraBFT(round)
+        bool decided = ITHS_MODE        ? advanceITHSBlog(round)
+                       : TETRABFT_MODE  ? advanceTetraBFT(round)
                        : FORGET_IT_MODE ? advanceForgetIT(round)
                                         : advanceSimpleIT(round);
         if (decided)
         {
-            if (FORGET_IT_MODE)
+            if (FORGET_IT_MODE || ITHS_MODE)
                 current->second.decided = true;
             else
             {
@@ -362,7 +378,7 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
                     it->second.decided = true;
             }
         }
-        if (FORGET_IT_MODE ||
+        if (FORGET_IT_MODE || ITHS_MODE ||
             (TETRABFT_MODE && oldNotarized == mNormalNotarized) ||
             (SIMPLE_IT_MODE && oldReady == mNormalReady))
             break;

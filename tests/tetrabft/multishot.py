@@ -25,6 +25,8 @@ PRE = r'''
 #include "overlay/CustomProtocolTypes.h"
 #include "overlay/NormalPathConsensus.h"
 #include "overlay/ForgetITConsensus.h"
+#include "overlay/ITHSBlogConsensus.h"
+#include <functional>
 #include "xdrpp/marshal.h"
 #include <openssl/sha.h>
 #include <algorithm>
@@ -47,10 +49,12 @@ struct Delivery {int sender, receiver;StellarMessage message;};
 std::vector<Delivery> events;
 int active=-1;
 uint64_t fakeForgetNow=0;
+uint64_t fakeITHSNow=1000;
 std::set<std::pair<uint64_t,int>> proposals;
 std::map<uint64_t,int> acked;
 void emit(int receiver,StellarMessage const& m){
  auto t=m.customMessage().msgType;
+ if(t==CUSTOM_ITHS_BLOG){ITHSBlogPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==2)proposals.emplace(m.customMessage().view,active);if(p.kind==6)assert(p.view==0);}
  if(t==CUSTOM_FORGET_NATIVE){ForgetITPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==1)proposals.emplace(m.customMessage().view,active);}
  if(t==CUSTOM_TETRA_PROPOSE || t==CUSTOM_SIMPLE_PROPOSE || t==CUSTOM_FORGET_PREPARE)
   proposals.emplace(m.customMessage().view,active);
@@ -59,12 +63,18 @@ void emit(int receiver,StellarMessage const& m){
 struct Secret {NodeID id;NodeID getPublicKey()const{return id;}};
 struct Config {Secret NODE_SEED;bool SEND_CUSTOM_MESSAGE=false;std::set<NodeID> QUORUM_SET;};
 struct Application {Config cfg;Config const& getConfig()const{return cfg;}};
+struct VirtualTimer {std::function<void()> fn;std::chrono::milliseconds delay{};
+ explicit VirtualTimer(Application&){} void cancel(){fn={};}
+ void expires_from_now(std::chrono::milliseconds d){delay=d;}
+ template<class F>void async_wait(F f,void(*)()){fn=f;}
+ static void onFailureNoop(){}
+};
 struct LocalNode{template<class F>static void forAllNodes(std::set<NodeID> const&s,F fn){for(auto const& n:s)fn(n);}};
 struct Peer {using pointer=std::shared_ptr<Peer>;NodeID id;void sendMessage(std::shared_ptr<StellarMessage> m){emit(id.ed25519()[31],*m);}};
 namespace experiment {
-bool TETRABFT_MODE=false,SIMPLE_IT_MODE=false,FORGET_IT_MODE=false,SIMPLE_IT_OPTIMISTIC=true;
+bool TETRABFT_MODE=false,SIMPLE_IT_MODE=false,FORGET_IT_MODE=false,SIMPLE_IT_OPTIMISTIC=true,ITHS_MODE=false;
 constexpr size_t NORMAL_PATH_WINDOW=64,SERVER_BATCH_SIZE=2;
-constexpr uint64_t FORGET_IT_DELTA_MS=100;
+constexpr uint64_t FORGET_IT_DELTA_MS=100,ITHS_BLOG_DELTA_MS=10;
 struct ClientAck {uint64_t batchId;int clientFd;};
 struct BlockKey {uint64_t seq;Hash hash;bool operator<(BlockKey const& b)const{return std::tie(seq,hash)<std::tie(b.seq,b.hash);}};
 bool g_clientListenerActive=false;
@@ -75,7 +85,7 @@ bool tryBuildServerBatch(TransactionBatch& b,std::vector<ClientAck>& a){if(input
 void ackClientBatchesForBlock(uint64_t slot,Hash const& h){auto it=g_blockClientAcks.find({slot,h});if(it!=g_blockClientAcks.end()){for(auto a:it->second)++acked[a.batchId];g_blockClientAcks.erase(it);}}
 }
 class OverlayManagerImpl {public:
-Application mApp;std::map<NodeID,Peer::pointer> peers;
+Application mApp;std::map<NodeID,Peer::pointer> peers;bool mShuttingDown=false;
 auto const& getAuthenticatedPeers()const{return peers;}
 '''
 
@@ -94,8 +104,8 @@ struct Network {
  int n, ingress;
  std::vector<Replica> replicas;
  explicit Network(int mode,int count):n(count),ingress(n-1),replicas(n){
-  TETRABFT_MODE=mode==0;SIMPLE_IT_MODE=mode==1||mode==2;FORGET_IT_MODE=mode==3;SIMPLE_IT_OPTIMISTIC=mode==1;
-  events.clear();proposals.clear();acked.clear();fakeForgetNow=0;
+  TETRABFT_MODE=mode==0;SIMPLE_IT_MODE=mode==1||mode==2;FORGET_IT_MODE=mode==3;SIMPLE_IT_OPTIMISTIC=mode==1;ITHS_MODE=mode==4;
+  events.clear();proposals.clear();acked.clear();fakeForgetNow=0;fakeITHSNow=1000;
   for(int id=0;id<n;++id){auto& r=replicas[id];auto& cfg=r.overlay.mApp.cfg;
    cfg.NODE_SEED.id=node(id);cfg.SEND_CUSTOM_MESSAGE=id==ingress;r.listener=id==ingress;
    for(int j=0;j<n;++j){cfg.QUORUM_SET.insert(node(j));if(j!=id){auto p=std::make_shared<Peer>();p->id=node(j);r.overlay.peers[node(j)]=p;}}
@@ -103,18 +113,25 @@ struct Network {
   }
  }
  template<class F>void invoke(int id,F action){active=id;replicas[id].swap();action(replicas[id].overlay);replicas[id].swap();active=-1;}
- void deliver(Delivery const& d){invoke(d.receiver,[&](auto& o){if(d.message.customMessage().msgType==CUSTOM_EXPERIMENT_WORK)o.normalReceiveWork(d.message.customMessage(),node(d.sender));else if(d.message.customMessage().msgType==CUSTOM_FORGET_NATIVE)o.handleForgetITMessage(d.message.customMessage(),node(d.sender));else o.handleNormalMessage(d.message,node(d.sender));});}
+ void deliver(Delivery const& d){invoke(d.receiver,[&](auto& o){if(d.message.customMessage().msgType==CUSTOM_EXPERIMENT_WORK)o.normalReceiveWork(d.message.customMessage(),node(d.sender));else if(d.message.customMessage().msgType==CUSTOM_FORGET_NATIVE)o.handleForgetITMessage(d.message.customMessage(),node(d.sender));else if(d.message.customMessage().msgType==CUSTOM_ITHS_BLOG)o.handleITHSBlogMessage(d.message.customMessage(),node(d.sender));else o.handleNormalMessage(d.message,node(d.sender));});}
  void enqueue(int count,int first=1){for(int i=first;i<first+count;++i)replicas[ingress].queue.push_back(batch(i));invoke(ingress,[](auto&o){o.normalProp();});}
- void drain(unsigned seed,bool holdFirstCommit=false){std::mt19937 rng(seed);size_t count=0;
+ void fireTimers(){for(int id=0;id<n;++id){auto& o=replicas[id].overlay;if(o.mITHSBlogDeadline&&*o.mITHSBlogDeadline<=fakeITHSNow){assert(o.mITHSBlogTimer&&o.mITHSBlogTimer->fn);auto fn=o.mITHSBlogTimer->fn;o.mITHSBlogTimer->fn={};invoke(id,[&](auto&){fn();});}}}
+ void drain(unsigned seed,bool holdFirstCommit=false,bool driveTimers=true){std::mt19937 rng(seed);size_t count=0;
+  for(;;){
   while(!events.empty()){
    assert(++count<2000000);size_t k=rng()%events.size();
    // The Forget-IT benchmark learns its initial leader from instance 1;
    // preserve TCP's per-sender/receiver FIFO for that regression. Other paths
    // additionally tolerate arbitrary reordering across the entire queue.
-   if(FORGET_IT_MODE)for(size_t j=0;j<k;++j)if(events[j].sender==events[k].sender && events[j].receiver==events[k].receiver){k=j;break;}
+   if(FORGET_IT_MODE||ITHS_MODE)for(size_t j=0;j<k;++j)if(events[j].sender==events[k].sender && events[j].receiver==events[k].receiver){k=j;break;}
    auto d=events[k];events.erase(events.begin()+k);
    if(holdFirstCommit && d.message.customMessage().msgType==CUSTOM_SIMPLE_COMMIT && d.message.customMessage().view==1)continue;
    deliver(d);if(rng()%7==0)deliver(d); // delayed and duplicate deliveries
+  }
+  if(!ITHS_MODE||!driveTimers)break;
+  std::optional<uint64_t> next;
+  for(auto const&r:replicas)if(r.overlay.mITHSBlogDeadline&&(!next||*r.overlay.mITHSBlogDeadline<*next))next=r.overlay.mITHSBlogDeadline;
+  if(!next)break;assert(++count<2000000);fakeITHSNow=*next;fireTimers();
   }
  }
  void check(int batches){
@@ -123,7 +140,7 @@ struct Network {
    assert(r.kv.at("x")==std::to_string(batches));assert(r.acks.empty());
   }
   assert(acked.size()==size_t(batches));for(auto [id,count]:acked)assert(count==1);
-  for(auto [slot,id]:proposals)assert(id==(FORGET_IT_MODE?ingress:int((slot-1)%n)));
+  for(auto [slot,id]:proposals)assert(id==((FORGET_IT_MODE||ITHS_MODE)?ingress:int((slot-1)%n)));
  }
 };
 void network(int mode,int n,unsigned seed,int batches){
@@ -168,6 +185,27 @@ void rejectMalformed(){
   });assert(events.empty());
  }
 }
+void ithsNativeRotation(){
+ Network net(4,4);net.enqueue(1);net.drain(1,false,false);
+ assert(proposals.empty());assert(net.replicas[3].overlay.mITHSBlogDeadline==1020);
+ fakeITHSNow=1019;net.fireTimers();assert(events.empty());
+ fakeITHSNow=1020;net.fireTimers();
+ // First leader fails to deliver its view-1 proposal; START/input has arrived.
+ while(!events.empty()){
+  auto d=events.front();events.erase(events.begin());ITHSBlogPacket p;
+  std::vector<char>b(d.message.customMessage().data.begin(),d.message.customMessage().data.end());xdr::xdr_from_opaque(b,p);
+  if(!(p.kind==2&&p.view==1))net.deliver(d);
+ }
+ assert(acked.empty());for(auto const&r:net.replicas)assert(r.overlay.mNormalExecuted==0);
+ fakeITHSNow=1100;net.fireTimers();net.drain(2,false,false);
+ for(auto const&r:net.replicas){assert(r.overlay.mNormalSlots.at(1).iths->view()==2);assert(r.overlay.mNormalSlots.at(1).iths->leader(2)==node(0));}
+ fakeITHSNow=1119;net.fireTimers();assert(acked.empty());
+ fakeITHSNow=1120;net.fireTimers();net.drain(3,false,false);
+ assert(acked[1]==1);assert(proposals.count({1,3})&&proposals.count({1,0}));
+ for(auto const&r:net.replicas){assert(r.overlay.mNormalExecuted==1);assert(!r.overlay.mITHSBlogDeadline);assert(r.kv.at("x")=="1");}
+ // A malformed or mismatched epoch cannot mutate this instance.
+ net.invoke(0,[&](auto&o){CustomMessage bad;bad.msgType=CUSTOM_ITHS_BLOG;bad.view=2;bad.data="bad";o.handleITHSBlogMessage(bad,node(3));assert(!o.mNormalSlots.count(2));});
+}
 void forgetWireValues(){
  Network net(3,4);auto a=batch(1),b=batch(2);
  a.transactions[0].payload="UPDATE x "+std::string(60000,'a');
@@ -194,9 +232,9 @@ void forgetNativeRotation(){
  assert(acked[1]==1);assert(proposals.count({1,3}) && proposals.count({1,0}));
 }
 int main(){
- transitions();rejectMalformed();forgetNativeRotation();forgetWireValues();
- for(int mode=0;mode<4;++mode){sequentialClients(mode);for(int n:{4,7,8}){if(mode==3 && n==8)continue;for(unsigned seed=0;seed<10;++seed)network(mode,n,seed,2*n+3);}network(mode,4,99,140);}
- std::cout<<"114 adapter simulations passed; native TetraBFT/Simple-IT rotation and overlap, Forget-IT healthy path and native view-change wire test, full lock/guard payloads, duplicate/reordered delivery, bounded retention, single outstanding batch, empty-chain drain, exactly-once ACKs, malformed proposals.\n";
+ transitions();rejectMalformed();forgetNativeRotation();forgetWireValues();ithsNativeRotation();
+ for(int mode=0;mode<5;++mode){sequentialClients(mode);for(int n:{4,7,8}){if(mode==3 && n==8)continue;for(unsigned seed=0;seed<10;++seed)network(mode,n,seed,2*n+3);}network(mode,4,99,140);}
+ std::cout<<"145 adapter simulations passed; native TetraBFT/Simple-IT rotation and overlap, Forget-IT/IT-HS native view-change wire and timer tests, full lock/guard payloads, duplicate/reordered delivery, bounded retention, single outstanding batch, empty-chain drain, exactly-once ACKs, malformed proposals.\n";
 }
 '''
 
@@ -209,12 +247,15 @@ def main():
     fields = header[header.index('    void initializeNormalPath();'):
                     header.index('    void tryExecutePBFT();')]
     body = '\n'.join(strip(f'src/overlay/experiments/{name}.cpp') for name in
-                     ('NormalPathProtocol', 'TetraBFT', 'SimpleIT', 'ForgetIT'))
+                     ('NormalPathProtocol', 'TetraBFT', 'SimpleIT', 'ForgetIT', 'ITHS'))
     # Substitute only the clock, leaving the production state machine and wire
     # decoder/encoder intact for deterministic timeout tests.
     clock_start = body.index('uint64_t\nforgetNow()')
     clock_end = body.index('bool\nvalidForgetValue', clock_start)
     body = body[:clock_start] + 'uint64_t forgetNow(){return fakeForgetNow;}\n' + body[clock_end:]
+    clock_start = body.index('uint64_t\nithsBlogNow()')
+    clock_end = body.index('bool\nvalidITHSInput', clock_start)
+    body = body[:clock_start] + 'uint64_t ithsBlogNow(){return fakeITHSNow;}\n' + body[clock_end:]
     source = PRE + fields + '\n};\n}\n' + body + POST
     with tempfile.TemporaryDirectory(prefix='stellar-multishot-') as tmp:
         cpp, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'

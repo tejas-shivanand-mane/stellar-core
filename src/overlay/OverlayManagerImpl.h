@@ -12,6 +12,7 @@
 #include "ledger/LedgerTxn.h"
 #include "overlay/Floodgate.h"
 #include "overlay/ForgetITConsensus.h"
+#include "overlay/ITHSBlogConsensus.h"
 #include "overlay/NormalPathConsensus.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/OverlayMetrics.h"
@@ -101,10 +102,8 @@ class OverlayManagerImpl : public OverlayManager
     void prop();
     void legacyProp(bool ithsMode);
     void shabdizProp();
-    void ithsProp();
     void shabdizCollect();
     void acceptShabdizLocalProposal(CustomMessage const& cm);
-    void acceptITHSLocalProposal(CustomMessage const& cm);
     void deliverBufferedForCurrentView();
     void handleShabdizMessage(StellarMessage const& msg, Peer::pointer peer);
     bool paperShabdizEnabled() const;
@@ -114,8 +113,17 @@ class OverlayManagerImpl : public OverlayManager
     void receivePaperShabdiz(CustomMessage const& msg, NodeID const& sender);
     std::shared_ptr<ShabdizRuntime> mPaperShabdiz;
     std::unique_ptr<VirtualTimer> mPaperShabdizTimer;
-    void handleITHSMessage(StellarMessage const& msg, Peer::pointer peer);
     void initializeNormalPath();
+    bool advanceITHSBlog(uint64_t seq);
+    void tickITHSBlog();
+    void armITHSBlogTimer();
+    void startITHSBlog(uint64_t seq, std::string const& data, uint64_t epoch);
+    void handleITHSBlogMessage(CustomMessage const& cm, NodeID const& sender);
+    void sendITHSBlog(uint64_t seq, ITHSBlogPacket const& packet,
+                      std::optional<NodeID> const& recipient = {});
+    std::unique_ptr<VirtualTimer> mITHSBlogTimer;
+    std::optional<uint64_t> mITHSBlogDeadline;
+    std::set<uint64_t> mITHSBlogActive;
     bool advanceTetraBFT(uint64_t seq);
     bool advanceForgetIT(uint64_t seq);
     void tickForgetIT();
@@ -138,6 +146,9 @@ class OverlayManagerImpl : public OverlayManager
         std::unique_ptr<ForgetITConsensus<NodeID>> forget;
         std::vector<std::pair<NodeID, ForgetITConsensus<NodeID>::Message>>
             forgetEarly;
+        std::unique_ptr<ITHSBlogConsensus<NodeID>> iths;
+        std::string ithsInput;
+        std::vector<std::pair<NodeID, ITHSBlogPacket>> ithsEarly;
         SimpleITNormal<NodeID, Hash> simple;
         Hash digest;
         std::string data;
@@ -147,7 +158,8 @@ class OverlayManagerImpl : public OverlayManager
     std::set<NodeID> mNormalMembers;
     std::optional<NodeID> mNormalLeader;
     std::map<uint64_t, NormalSlot> mNormalSlots;
-    uint64_t mNormalNextSeq = 1; // Forget-IT independent instance sequence
+    uint64_t mNormalNextSeq =
+        1; // Forget-IT / IT-HS independent instance sequence
     uint64_t mNormalReady = 0;   // next proposal may overlap current commit
     uint64_t mNormalNotarized = 0;
     uint64_t mNormalLastReal = 0;
@@ -212,11 +224,6 @@ class OverlayManagerImpl : public OverlayManager
     void sendPBFTPrePrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
     void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash) override;
     void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash) override;
-
-    void sendITHSEcho( uint64_t view, Hash const& blockHash, std::string const& data) override;
-    void sendITHSAccept( uint64_t view, Hash const& blockHash, std::string const& data) override;
-    void sendITHSLock( uint64_t view, Hash const& blockHash, std::string const& data) override;
-    void sendITHSCommit( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
     void startClientListener(int port = experiment::CLIENT_PORT);
 

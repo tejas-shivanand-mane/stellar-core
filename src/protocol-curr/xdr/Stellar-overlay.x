@@ -90,7 +90,8 @@ enum CustomMessageType
     CUSTOM_SHABDIZ_PAPER = 31,
     // Benchmark ingress supplies work to native multi-shot leaders.
     CUSTOM_EXPERIMENT_WORK = 32,
-    CUSTOM_FORGET_NATIVE = 33
+    CUSTOM_FORGET_NATIVE = 33,
+    CUSTOM_ITHS_BLOG = 34
 };
 
 // Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.
@@ -121,6 +122,18 @@ struct ForgetITPacket
     string value<90000>;
     uint32 guardKind;
     string guard<90000>;
+};
+
+// kind 0 distributes the benchmark input and common start epoch. Kinds 1-6
+// are the blog's SUGGEST/PROPOSE/ECHO/ACCEPT/LOCK/COMMIT. COMMIT has view 0.
+struct ITHSBlogPacket
+{
+    uint32 wireVersion;
+    uint32 kind;
+    uint64 epochMs;
+    uint64 view;
+    uint64 lockView;
+    string value<90000>;
 };
 
 struct CustomMessage
