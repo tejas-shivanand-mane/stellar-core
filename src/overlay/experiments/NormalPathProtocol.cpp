@@ -37,7 +37,8 @@ OverlayManagerImpl::initializeNormalPath()
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
         CLOG_INFO(Overlay,
                   "[{} CONFIG] members={} quorum={} simple_optimistic={} "
-                  "normal_path_only=true",
+                  "normal_path_only=true payload=full_value "
+                  "simple_commit=round_only",
                   normalPathName(), mNormalMembers.size(), mNormalQuorum,
                   SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC);
     }
@@ -79,7 +80,7 @@ OverlayManagerImpl::normalSend(CustomMessageType type, uint64_t seq,
     auto& cm = msg->customMessage();
     cm.msgType = type;
     cm.view = seq; // independent instance number, NOT a recovery view
-    cm.vp = normalMetadata(seq);
+    cm.vp = type == CUSTOM_SIMPLE_COMMIT ? 0 : normalMetadata(seq);
     // Forget-IT's first-view guard is SAFE, explicitly encoded on vote-2.
     cm.dependencyVp = type == CUSTOM_FORGET_VOTE2 ? 1 : 0;
     cm.blockHash = digest;
@@ -108,11 +109,11 @@ OverlayManagerImpl::normalProp()
     auto& slot = mNormalSlots[seq];
     slot.digest = digest;
     if (TETRABFT_MODE)
-        slot.tetra.propose(digest);
+        slot.tetra.propose(data);
     else if (SIMPLE_IT_MODE)
-        slot.simple.propose(digest);
+        slot.simple.propose(data);
     else
-        slot.forget.propose(digest);
+        slot.forget.propose(data);
     slot.proposed = true;
     slot.data = data;
     normalSend(normalProposalType(), seq, digest, data);
@@ -131,7 +132,7 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
     bool retainedSimple =
         SIMPLE_IT_MODE && seq <= mNormalExecuted && mNormalSlots.count(seq);
     if (!mNormalMembers.count(sender) || seq == 0 ||
-        cm.vp != normalMetadata(seq) ||
+        cm.vp != (cm.msgType == CUSTOM_SIMPLE_COMMIT ? 0 : normalMetadata(seq)) ||
         (!retainedSimple && seq <= mNormalExecuted) ||
         (seq > mNormalExecuted && seq - mNormalExecuted > NORMAL_PATH_WINDOW))
         return;
@@ -152,9 +153,9 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
             return;
         }
         auto& slot = mNormalSlots[seq];
-        bool accepted = TETRABFT_MODE    ? slot.tetra.propose(cm.blockHash)
-                        : SIMPLE_IT_MODE ? slot.simple.propose(cm.blockHash)
-                                         : slot.forget.propose(cm.blockHash);
+        bool accepted = TETRABFT_MODE    ? slot.tetra.propose(cm.data)
+                        : SIMPLE_IT_MODE ? slot.simple.propose(cm.data)
+                                         : slot.forget.propose(cm.data);
         if (!accepted)
             return;
         // Bind only after membership, metadata, digest and payload validation.
@@ -166,25 +167,36 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
     }
     else
     {
-        if (!cm.data.empty()) // votes contain only the batch digest
+        bool roundCommit = SIMPLE_IT_MODE && cm.msgType == CUSTOM_SIMPLE_COMMIT;
+        // Basic value-carrying algorithms: a digest-only vote is not a value.
+        // COMMIT in Simple-IT is the exception: RBC uniquely binds the round.
+        if (roundCommit)
+        {
+            if (!cm.data.empty() || cm.blockHash != Hash{})
+                return;
+        }
+        else if (cm.data.empty() || sha256(cm.data) != cm.blockHash)
             return;
         if (TETRABFT_MODE)
             mNormalSlots[seq].tetra.vote(cm.msgType - CUSTOM_TETRA_VOTE1 + 1,
-                                         sender, cm.blockHash);
+                                         sender, cm.data);
         else if (SIMPLE_IT_MODE)
         {
             if (!SIMPLE_IT_OPTIMISTIC && (cm.msgType == CUSTOM_SIMPLE_VOTE ||
                                           cm.msgType == CUSTOM_SIMPLE_ACK))
                 return;
-            mNormalSlots[seq].simple.vote(cm.msgType - CUSTOM_SIMPLE_ECHO + 1,
-                                          sender, cm.blockHash);
+            if (roundCommit)
+                mNormalSlots[seq].simple.commit(sender);
+            else
+                mNormalSlots[seq].simple.vote(cm.msgType - CUSTOM_SIMPLE_ECHO + 1,
+                                              sender, cm.data);
         }
         else
         {
             if (cm.msgType == CUSTOM_FORGET_VOTE2 && cm.dependencyVp != 1)
                 return; // only SAFE-guard first-view messages supported
             mNormalSlots[seq].forget.vote(cm.msgType - CUSTOM_FORGET_VOTE1 + 1,
-                                          sender, cm.blockHash);
+                                          sender, cm.data);
         }
     }
     normalAdvance(seq);

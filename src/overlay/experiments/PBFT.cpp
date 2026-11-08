@@ -230,7 +230,7 @@ OverlayManagerImpl::sendPBFTPrePrepare(uint64_t pbftView, uint64_t seq,
 
 void
 OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView, uint64_t seq,
-                                    Hash const& digest, std::string const& data)
+                                    Hash const& digest)
 {
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
@@ -240,7 +240,9 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView, uint64_t seq,
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
 
-    msg->customMessage().data = data;
+    // Castro-Liskov, OSDI 1999, section 4.2: votes carry the digest,
+    // not the request piggybacked on PRE-PREPARE.
+    msg->customMessage().data.clear();
 
     broadcastMessage(msg);
 
@@ -250,7 +252,7 @@ OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView, uint64_t seq,
 
 void
 OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView, uint64_t seq,
-                                   Hash const& digest, std::string const& data)
+                                   Hash const& digest)
 {
     auto msg = std::make_shared<StellarMessage>();
     msg->type(CUSTOM_MESSAGE);
@@ -260,7 +262,9 @@ OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView, uint64_t seq,
     msg->customMessage().vp = pbftView;
     msg->customMessage().blockHash = digest;
 
-    msg->customMessage().data = data;
+    // Castro-Liskov, OSDI 1999, section 4.2: votes carry the digest,
+    // not the request piggybacked on PRE-PREPARE.
+    msg->customMessage().data.clear();
 
     broadcastMessage(msg);
 
@@ -392,7 +396,7 @@ OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq,
             st.commitVotersByDigest[digest].insert(
                 mApp.getConfig().NODE_SEED.getPublicKey());
 
-            sendPBFTCommit(view, seq, digest, st.data);
+            sendPBFTCommit(view, seq, digest);
         }
     }
 
@@ -477,7 +481,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
             // Count own PREPARE.
             st.prepareVotersByDigest[digest].insert(selfID);
 
-            sendPBFTPrepare(view, seq, digest, cm.data);
+            sendPBFTPrepare(view, seq, digest);
         }
 
         CLOG_DEBUG(Overlay,

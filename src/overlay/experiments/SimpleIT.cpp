@@ -31,8 +31,16 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
     decided =
         slot.simple.decide(mNormalQuorum, mNormalLeader.value(), safeParent);
     for (auto phase : outgoing)
-        normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq,
-                   slot.digest);
+    {
+        auto type = static_cast<CustomMessageType>(firstVote + phase - 1);
+        // Simple-IT section 3.2 / Figure 2: COMMIT identifies only the round.
+        // Basic Opt-RBC (2505.02761v4 Figure 1) carries m in ECHO/VOTE/ACK/
+        // READY. We use the full batch as m, not the erasure-coded variant.
+        if (type == CUSTOM_SIMPLE_COMMIT)
+            normalSend(type, seq, Hash{});
+        else
+            normalSend(type, seq, slot.digest, slot.data);
+    }
     return decided;
 }
 

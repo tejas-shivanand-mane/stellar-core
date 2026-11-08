@@ -13,6 +13,11 @@ namespace stellar
 {
 using namespace experiment;
 
+// IT-HS blog version, not the OPODIS paper:
+// https://decentralizedthoughts.github.io/2021-09-20-information-theoretic-hotstuff-it-hs-part-one/
+// ECHO, ACCEPT, LOCK and COMMIT carry b. Here b includes the batch data;
+// preserve these value-carrying messages rather than applying PBFT's digests.
+
 void
 OverlayManagerImpl::sendITHSEcho(uint64_t view, Hash const& blockHash,
                                  std::string const& data)

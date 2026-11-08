@@ -119,11 +119,13 @@ class OverlayManagerImpl : public OverlayManager
     bool advanceForgetIT(uint64_t seq);
     bool advanceSimpleIT(uint64_t seq);
     void pbftProp();
+    // Basic algorithms agree on the complete serialized batch value.
+    // The digest is only an overlay/client-ACK identifier.
     struct NormalSlot
     {
-        TetraBFTNormal<NodeID, Hash> tetra;
-        ForgetITNormal<NodeID, Hash> forget;
-        SimpleITNormal<NodeID, Hash> simple;
+        TetraBFTNormal<NodeID, std::string> tetra;
+        ForgetITNormal<NodeID, std::string> forget;
+        SimpleITNormal<NodeID, std::string> simple;
         Hash digest;
         std::string data;
         bool proposed = false;
@@ -180,8 +182,8 @@ class OverlayManagerImpl : public OverlayManager
     void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
     void sendPBFTPrePrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
-    void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
-    void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
+    void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash) override;
+    void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash) override;
 
     void sendITHSEcho( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendITHSAccept( uint64_t view, Hash const& blockHash, std::string const& data) override;

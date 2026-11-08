@@ -165,8 +165,71 @@ void newThresholds()
     }
 }
 
+void valuePayloadsAndRoundCommits()
+{
+    // Different values with the same prefix (including a NUL) must not be
+    // combined into one quorum. This also exercises full-length comparisons.
+    std::string a = std::string("batch\0", 6) + std::string(4096, 'a');
+    std::string b = a;
+    b.back() = 'b';
+    Forget valueVotes;
+    valueVotes.propose(a);
+    valueVotes.advance(0, 3);
+    valueVotes.vote(1, 1, b);
+    valueVotes.vote(1, 2, a);
+    assert(valueVotes.advance(0, 3).empty());
+    valueVotes.vote(1, 3, a);
+    assert(valueVotes.advance(0, 3) == std::vector<unsigned>{2});
+    valueVotes.vote(2, 1, b);
+    valueVotes.vote(2, 2, a);
+    assert(!valueVotes.decide(3, 2));
+    valueVotes.vote(2, 3, a);
+    assert(valueVotes.decide(3, 2));
+
+    for (bool optimistic : {false, true})
+    {
+        Simple early;
+        // These round-only commits may arrive before the proposal or RBC.
+        for (int sender : {1, 2, 3}) early.commit(sender);
+        assert(!early.decide(3, 0, true));
+        early.propose(a);
+        early.advance(0, 0, 4, optimistic, true);
+        assert(!early.decide(3, 0, true));
+        early.vote(Simple::Echo, 1, b);
+        early.vote(Simple::Echo, 2, a);
+        early.advance(0, 0, 4, optimistic, true);
+        assert(!early.decide(3, 0, true));
+        early.vote(Simple::Echo, 3, a);
+        early.advance(0, 0, 4, optimistic, true);
+        if (!optimistic)
+        {
+            assert(!early.decide(3, 0, true));
+            early.vote(Simple::Ready, 2, a);
+            early.vote(Simple::Ready, 3, a);
+            early.advance(0, 0, 4, false, true);
+        }
+        assert(!early.decide(3, 0, false)); // still requires a safe parent
+        assert(early.decide(3, 0, true));
+        assert(!early.decide(3, 0, true));
+
+        Simple duplicate;
+        duplicate.propose(a);
+        for (int sender : {1, 2, 3})
+        {
+            duplicate.vote(Simple::Echo, sender, a);
+            duplicate.vote(Simple::Ready, sender, a);
+        }
+        duplicate.advance(0, 0, 4, optimistic, true); // own commit
+        for (int i = 0; i < 10; ++i) duplicate.commit(1);
+        assert(!duplicate.decide(3, 0, true));
+        duplicate.commit(2);
+        assert(duplicate.decide(3, 0, true));
+    }
+}
+
 int main()
 {
+    valuePayloadsAndRoundCommits();
     State s;
     assert(s.advance(0, 3).empty());
     assert(!s.decide(3));

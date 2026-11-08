@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -96,7 +97,8 @@ using ForgetITNormal = BasicNormalPath<Node, Digest, 2>;
 template <typename Node, typename Digest> class SimpleITNormal
 {
     std::optional<Digest> mProposal;
-    std::array<std::map<Node, Digest>, 5> mVotes;
+    std::array<std::map<Node, Digest>, 4> mVotes;
+    std::set<Node> mCommits;
     std::array<bool, 5> mSent{};
     bool mDelivered = false;
     bool mDecided = false;
@@ -122,7 +124,18 @@ template <typename Node, typename Digest> class SimpleITNormal
     {
         if (phase < 1 || phase > 5)
             throw std::invalid_argument("Invalid Simple-IT phase");
+        if (phase == Commit)
+        {
+            commit(sender);
+            return;
+        }
         mVotes[phase - 1].emplace(sender, digest);
+    }
+    // Simple-IT Figure 2: <commit, round>. The caller selects this round's
+    // state; no value is attached. Early commits wait for local RBC delivery.
+    void commit(Node const& sender)
+    {
+        mCommits.insert(sender);
     }
     std::vector<unsigned> advance(Node const& self, Node const& leader,
                                   size_t n, bool optimistic, bool safeParent)
@@ -164,10 +177,10 @@ template <typename Node, typename Digest> class SimpleITNormal
             send(Commit);
         return result;
     }
-    bool decide(size_t quorum, Node const& leader, bool safeParent)
+    bool decide(size_t quorum, Node const& /*leader*/, bool safeParent)
     {
         if (mDecided || !mDelivered || !safeParent ||
-            count(Commit, leader, false) < quorum)
+            mCommits.size() < quorum)
             return false;
         mDecided = true;
         return true;

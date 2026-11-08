@@ -25,9 +25,10 @@ OverlayManagerImpl::advanceTetraBFT(uint64_t seq)
     outgoing = slot.tetra.advance(mApp.getConfig().NODE_SEED.getPublicKey(),
                                   mNormalQuorum);
     decided = slot.tetra.decide(mNormalQuorum);
+    // Basic TetraBFT section 3.1: each vote carries (view, value).
     for (auto phase : outgoing)
         normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq,
-                   slot.digest);
+                   slot.digest, slot.data);
     return decided;
 }
 
