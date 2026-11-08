@@ -123,7 +123,11 @@ class OverlayManagerImpl : public OverlayManager
     // Never execute an instance before its proposal data is available.
     struct NormalSlot
     {
-        TetraBFTNormal<NodeID, Hash> tetra;
+        // Multi-shot TetraBFT: one vote per block, four notarized blocks.
+        std::map<NodeID, Hash> tetraVotes;
+        Hash parent{};
+        bool tetraVoted = false;
+        bool tetraNotarized = false;
         ForgetITNormal<NodeID, Hash> forget;
         SimpleITNormal<NodeID, Hash> simple;
         Hash digest;
@@ -134,7 +138,22 @@ class OverlayManagerImpl : public OverlayManager
     std::set<NodeID> mNormalMembers;
     std::optional<NodeID> mNormalLeader;
     std::map<uint64_t, NormalSlot> mNormalSlots;
-    uint64_t mNormalNextSeq = 1;
+    uint64_t mNormalNextSeq = 1; // Forget-IT independent instance sequence
+    uint64_t mNormalReady = 0;   // next proposal may overlap current commit
+    uint64_t mNormalNotarized = 0;
+    uint64_t mNormalLastReal = 0;
+    std::vector<NodeID> mNormalLeaders;
+    struct NormalWork
+    {
+        std::string data;
+        std::chrono::steady_clock::time_point forwarded{};
+    };
+    std::map<uint64_t, NormalWork> mNormalWork;
+    NodeID const& normalLeader(uint64_t seq) const;
+    Hash normalDigest(uint64_t seq, Hash const& parent,
+                      std::string const& data) const;
+    bool normalTakeWork(uint64_t seq, std::string& data);
+    void normalReceiveWork(CustomMessage const& cm, NodeID const& sender);
     uint64_t mNormalExecuted = 0;
     size_t mNormalQuorum = 0;
     bool normalPathEnabled() const;

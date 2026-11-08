@@ -16,20 +16,36 @@ using namespace experiment;
 bool
 OverlayManagerImpl::advanceTetraBFT(uint64_t seq)
 {
+    // arXiv:2405.02615v2 section 6.1: the healthy multi-shot protocol,
+    // not repeated instances of Basic TetraBFT's four voting phases.
     auto& slot = mNormalSlots.at(seq);
-    std::vector<unsigned> outgoing;
-    CustomMessageType firstVote;
-    bool decided;
-
-    firstVote = CUSTOM_TETRA_VOTE1;
-    outgoing = slot.tetra.advance(mApp.getConfig().NODE_SEED.getPublicKey(),
-                                  mNormalQuorum);
-    decided = slot.tetra.decide(mNormalQuorum);
-    // The batch digest identifies the proposed value; data stays in the slot.
-    for (auto phase : outgoing)
-        normalSend(static_cast<CustomMessageType>(firstVote + phase - 1), seq,
-                   slot.digest);
-    return decided;
+    bool parentReady =
+        seq == 1 ? slot.parent == Hash{}
+                 : seq - 1 <= mNormalNotarized && mNormalSlots.count(seq - 1) &&
+                       mNormalSlots.at(seq - 1).digest == slot.parent;
+    if (!parentReady)
+        return false;
+    if (!slot.tetraVoted)
+    {
+        slot.tetraVoted = true;
+        slot.tetraVotes.emplace(mApp.getConfig().NODE_SEED.getPublicKey(),
+                                slot.digest);
+        normalSend(CUSTOM_TETRA_VOTE1, seq, slot.digest);
+        // The next leader may propose before this block is notarized.
+        if (seq == mNormalReady + 1)
+            mNormalReady = seq;
+    }
+    size_t votes = 0;
+    for (auto const& vote : slot.tetraVotes)
+        votes += vote.second == slot.digest;
+    if (!slot.tetraNotarized && votes >= mNormalQuorum)
+    {
+        slot.tetraNotarized = true;
+        if (seq == mNormalNotarized + 1)
+            mNormalNotarized = seq;
+        return seq >= 4; // four consecutively notarized, linked blocks
+    }
+    return false;
 }
 
 } // namespace stellar

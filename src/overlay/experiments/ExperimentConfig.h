@@ -7,14 +7,17 @@ namespace stellar::experiment
 {
 // Build-time experiment settings shared by replicas and shab_client.
 // Rebuild all replicas after edits. SEND_CUSTOM_MESSAGE=true selects client
-// ingress. Shabdiz rotates leaders; the other custom protocols use this node
-// to initiate proposals.
-
-// Conformance status: PBFT/IT-HS/TetraBFT/Simple-IT/Forget-IT adapters are
-// incomplete normal-path benchmarks, NOT complete implementations of the cited
-// protocols. Removing the generic per-batch rotation patch does not fix missing
-// view change, recovery, native multi-shot transitions, or pipelining. These
-// gaps must be implemented and fault-tested before a full-protocol comparison.
+// ingress. Shabdiz, native multi-shot TetraBFT and Simple-IT rotate leaders.
+// PBFT, IT-HS (blog Part One) and Forget-IT retain their fixed normal-path leader.
+//
+// Scope: fault-free benchmarks. TetraBFT implements section 6.1's chained
+// multi-shot path; Simple-IT implements Figure 2's non-speculative S/S_opt
+// round progression and RBC/commit overlap. Their view change, timeouts,
+// recovery/disabled rounds are NOT implemented. Simple-IT uses the existing
+// full-value proposal/digest-vote RBC, without erasure coding or speculation.
+// PBFT/IT-HS/Forget-IT still lack their full view-change/recovery components;
+// IT-HS/Forget-IT still run independent first-view instances. Do not report
+// these adapters as complete fault-tolerant implementations of the papers.
 
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;

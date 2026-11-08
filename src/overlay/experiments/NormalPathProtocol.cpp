@@ -21,10 +21,9 @@ OverlayManagerImpl::initializeNormalPath()
     if (normalPathEnabled())
     {
         auto const& cfg = mApp.getConfig();
-        // Match the existing custom protocols: SEND_CUSTOM_MESSAGE selects
-        // the proposer. Followers learn and pin its authenticated identity from
-        // the first valid proposal; no separate leader key is configured.
-        if (cfg.SEND_CUSTOM_MESSAGE)
+        // Forget-IT remains an independent first-view benchmark. TetraBFT
+        // and Simple-IT use their native per-slot/per-round leader schedules.
+        if (FORGET_IT_MODE && cfg.SEND_CUSTOM_MESSAGE)
             mNormalLeader = cfg.NODE_SEED.getPublicKey();
         mNormalMembers.insert(mApp.getConfig().NODE_SEED.getPublicKey());
         LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
@@ -34,13 +33,15 @@ OverlayManagerImpl::initializeNormalPath()
         if (mNormalMembers.size() < 4)
             throw std::invalid_argument(
                 "Normal-path protocols need at least four fixed members");
+        mNormalLeaders.assign(mNormalMembers.begin(), mNormalMembers.end());
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
         CLOG_INFO(Overlay,
                   "[{} CONFIG] members={} quorum={} simple_optimistic={} "
                   "normal_path_only=true payload=digest_votes "
-                  "simple_commit=round_only",
+                  "simple_commit=round_only rotation={} native_pipeline={}",
                   normalPathName(), mNormalMembers.size(), mNormalQuorum,
-                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC);
+                  SIMPLE_IT_MODE && SIMPLE_IT_OPTIMISTIC, !FORGET_IT_MODE,
+                  !FORGET_IT_MODE);
     }
 }
 
@@ -79,12 +80,14 @@ OverlayManagerImpl::normalSend(CustomMessageType type, uint64_t seq,
     msg->type(CUSTOM_MESSAGE);
     auto& cm = msg->customMessage();
     cm.msgType = type;
-    cm.view = seq; // independent instance number, NOT a recovery view
+    cm.view = seq; // block slot / round (independent instance for Forget-IT)
     cm.vp = type == CUSTOM_SIMPLE_COMMIT ? 0 : normalMetadata(seq);
     // Forget-IT's first-view guard is SAFE, explicitly encoded on vote-2.
     cm.dependencyVp = type == CUSTOM_FORGET_VOTE2 ? 1 : 0;
     cm.blockHash = digest;
     cm.data = data;
+    if (TETRABFT_MODE && type == normalProposalType())
+        cm.bp = mNormalSlots.at(seq).parent;
     // Direct authenticated channels: identical votes from distinct senders
     // must not be collapsed by the overlay's content-based flood cache.
     for (auto const& peer : getAuthenticatedPeers())
@@ -92,27 +95,144 @@ OverlayManagerImpl::normalSend(CustomMessageType type, uint64_t seq,
             peer.second->sendMessage(msg);
 }
 
+NodeID const&
+OverlayManagerImpl::normalLeader(uint64_t seq) const
+{
+    releaseAssert(seq > 0 && !mNormalLeaders.empty());
+    return mNormalLeaders[(seq - 1) % mNormalLeaders.size()];
+}
+
+Hash
+OverlayManagerImpl::normalDigest(uint64_t seq, Hash const& parent,
+                                 std::string const& data) const
+{
+    if (FORGET_IT_MODE)
+        return sha256(data);
+    // Bind the TetraBFT block to its parent hash. Simple-IT instead refers to
+    // its parent by round, as in Figure 2; it is not a hash-chain wrapper.
+    return sha256((TETRABFT_MODE ? std::string("tetra:") : "simple:") +
+                  std::to_string(seq) + ":" +
+                  (TETRABFT_MODE ? binToHex(parent) : std::to_string(seq - 1)) +
+                  ":" + data);
+}
+
+bool
+OverlayManagerImpl::normalTakeWork(uint64_t seq, std::string& data)
+{
+    auto const& cfg = mApp.getConfig();
+    auto it = mNormalWork.find(seq);
+    if (it == mNormalWork.end() && cfg.SEND_CUSTOM_MESSAGE &&
+        g_clientListenerActive)
+    {
+        TransactionBatch batch;
+        std::vector<ClientAck> acks;
+        if (tryBuildServerBatch(batch, acks))
+        {
+            auto payload = batch.serialize();
+            g_blockClientAcks[BlockKey{seq, sha256(payload)}] = std::move(acks);
+            it = mNormalWork.emplace(seq, NormalWork{std::move(payload)}).first;
+        }
+        else if (TETRABFT_MODE && mNormalLastReal > mNormalExecuted &&
+                 seq > mNormalLastReal && seq - mNormalLastReal <= 3)
+        {
+            // Empty descendants finalize the last real batch even with only
+            // one outstanding client request. They contain no synthetic txns.
+            it = mNormalWork.emplace(seq, NormalWork{}).first;
+        }
+    }
+    if (it == mNormalWork.end())
+        return false;
+    auto const& leader = normalLeader(seq);
+    if (leader == cfg.NODE_SEED.getPublicKey())
+    {
+        data = it->second.data;
+        return true;
+    }
+    if (cfg.SEND_CUSTOM_MESSAGE)
+    {
+        auto now = std::chrono::steady_clock::now();
+        if (it->second.forwarded == std::chrono::steady_clock::time_point{} ||
+            now - it->second.forwarded >= std::chrono::seconds(1))
+        {
+            auto peers = getAuthenticatedPeers();
+            auto peer = peers.find(leader);
+            if (peer != peers.end())
+            {
+                auto msg = std::make_shared<StellarMessage>();
+                msg->type(CUSTOM_MESSAGE);
+                auto& cm = msg->customMessage();
+                cm.msgType = CUSTOM_EXPERIMENT_WORK;
+                cm.view = seq;
+                cm.data = it->second.data;
+                cm.blockHash = sha256(cm.data);
+                peer->second->sendMessage(msg);
+                it->second.forwarded = now;
+            }
+        }
+    }
+    return false;
+}
+
+void
+OverlayManagerImpl::normalReceiveWork(CustomMessage const& cm,
+                                      NodeID const& sender)
+{
+    auto seq = cm.view;
+    if (!mNormalMembers.count(sender) || seq <= mNormalExecuted ||
+        seq - mNormalExecuted > NORMAL_PATH_WINDOW ||
+        !(normalLeader(seq) == mApp.getConfig().NODE_SEED.getPublicKey()) ||
+        mNormalWork.count(seq) || sha256(cm.data) != cm.blockHash)
+        return;
+    try
+    {
+        auto batch = TransactionBatch::deserialize(cm.data);
+        if ((batch.transactions.size() != SERVER_BATCH_SIZE &&
+             !(TETRABFT_MODE && cm.data.empty())) ||
+            batch.serialize() != cm.data)
+            return;
+    }
+    catch (std::exception const&)
+    {
+        return;
+    }
+    mNormalWork.emplace(seq, NormalWork{cm.data});
+    normalProp();
+}
+
 void
 OverlayManagerImpl::normalProp()
 {
-    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE ||
-        mNormalNextSeq != mNormalExecuted + 1)
+    uint64_t seq = FORGET_IT_MODE ? mNormalNextSeq : mNormalReady + 1;
+    auto existing = mNormalSlots.find(seq);
+    if (existing != mNormalSlots.end() && existing->second.proposed)
         return;
-    TransactionBatch batch;
-    std::vector<ClientAck> acks;
-    if (!g_clientListenerActive || !tryBuildServerBatch(batch, acks))
+    std::string data;
+    if (FORGET_IT_MODE)
+    {
+        if (!mApp.getConfig().SEND_CUSTOM_MESSAGE || seq != mNormalExecuted + 1)
+            return;
+        TransactionBatch batch;
+        std::vector<ClientAck> acks;
+        if (!g_clientListenerActive || !tryBuildServerBatch(batch, acks))
+            return;
+        data = batch.serialize();
+        g_blockClientAcks[BlockKey{seq, sha256(data)}] = std::move(acks);
+        ++mNormalNextSeq;
+    }
+    else if (!normalTakeWork(seq, data))
         return;
-    auto data = batch.serialize();
-    auto digest = sha256(data);
-    uint64_t seq = mNormalNextSeq++;
-    g_blockClientAcks[BlockKey{seq, digest}] = std::move(acks);
+    Hash parent{};
+    if (TETRABFT_MODE && seq > 1)
+        parent = mNormalSlots.at(seq - 1).digest;
+    auto digest = normalDigest(seq, parent, data);
     auto& slot = mNormalSlots[seq];
     slot.digest = digest;
-    if (TETRABFT_MODE)
-        slot.tetra.propose(digest);
-    else if (SIMPLE_IT_MODE)
+    slot.parent = parent;
+    if (!data.empty())
+        mNormalLastReal = std::max(mNormalLastReal, seq);
+    if (SIMPLE_IT_MODE)
         slot.simple.propose(digest);
-    else
+    else if (FORGET_IT_MODE)
         slot.forget.propose(digest);
     slot.proposed = true;
     slot.data = data;
@@ -130,7 +250,7 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
     // before this replica has received the last vote of the previous one.
     // Simple-IT continues the RBC's auxiliary messages briefly after execution.
     bool retainedSimple =
-        SIMPLE_IT_MODE && seq <= mNormalExecuted && mNormalSlots.count(seq);
+        !FORGET_IT_MODE && seq <= mNormalExecuted && mNormalSlots.count(seq);
     if (!mNormalMembers.count(sender) || seq == 0 ||
         cm.vp != (cm.msgType == CUSTOM_SIMPLE_COMMIT ? 0 : normalMetadata(seq)) ||
         (!retainedSimple && seq <= mNormalExecuted) ||
@@ -138,13 +258,18 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         return;
     if (cm.msgType == normalProposalType())
     {
-        if ((mNormalLeader && !(sender == *mNormalLeader)) ||
-            (!mNormalLeader && seq != 1) || sha256(cm.data) != cm.blockHash)
+        bool wrongLeader =
+            FORGET_IT_MODE ? ((mNormalLeader && !(sender == *mNormalLeader)) ||
+                              (!mNormalLeader && seq != 1))
+                           : !(sender == normalLeader(seq));
+        if (wrongLeader || normalDigest(seq, cm.bp, cm.data) != cm.blockHash ||
+            (!TETRABFT_MODE && cm.bp != Hash{}))
             return;
         try
         {
             auto batch = TransactionBatch::deserialize(cm.data);
-            if (batch.transactions.size() != SERVER_BATCH_SIZE ||
+            if ((batch.transactions.size() != SERVER_BATCH_SIZE &&
+                 !(TETRABFT_MODE && cm.data.empty())) ||
                 batch.serialize() != cm.data)
                 return;
         }
@@ -153,17 +278,21 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
             return;
         }
         auto& slot = mNormalSlots[seq];
-        bool accepted = TETRABFT_MODE    ? slot.tetra.propose(cm.blockHash)
+        bool accepted = TETRABFT_MODE
+                            ? (!slot.proposed || slot.digest == cm.blockHash)
                         : SIMPLE_IT_MODE ? slot.simple.propose(cm.blockHash)
                                          : slot.forget.propose(cm.blockHash);
         if (!accepted)
             return;
         // Bind only after membership, metadata, digest and payload validation.
-        if (!mNormalLeader)
+        if (FORGET_IT_MODE && !mNormalLeader)
             mNormalLeader = sender;
         slot.digest = cm.blockHash;
         slot.proposed = true;
         slot.data = cm.data;
+        slot.parent = cm.bp;
+        if (!cm.data.empty())
+            mNormalLastReal = std::max(mNormalLastReal, seq);
     }
     else
     {
@@ -178,8 +307,11 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         else if (!cm.data.empty())
             return;
         if (TETRABFT_MODE)
-            mNormalSlots[seq].tetra.vote(cm.msgType - CUSTOM_TETRA_VOTE1 + 1,
-                                         sender, cm.blockHash);
+        {
+            if (cm.msgType != CUSTOM_TETRA_VOTE1)
+                return; // one vote per block in the native multi-shot path
+            mNormalSlots[seq].tetraVotes.emplace(sender, cm.blockHash);
+        }
         else if (SIMPLE_IT_MODE)
         {
             if (!SIMPLE_IT_OPTIMISTIC && (cm.msgType == CUSTOM_SIMPLE_VOTE ||
@@ -205,14 +337,39 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
 void
 OverlayManagerImpl::normalAdvance(uint64_t seq)
 {
-    auto& slot = mNormalSlots.at(seq);
-    if (!slot.proposed)
-        return;
-    bool decided = TETRABFT_MODE    ? advanceTetraBFT(seq)
-                   : FORGET_IT_MODE ? advanceForgetIT(seq)
-                                    : advanceSimpleIT(seq);
-    if (decided)
-        slot.decided = true;
+    // Reconsider the affected slot, then only children unblocked by it.
+    // Do not rescan the retained history on every vote in the fast path.
+    auto current = mNormalSlots.find(seq);
+    while (current != mNormalSlots.end() && current->second.proposed)
+    {
+        auto round = current->first;
+        auto oldReady = mNormalReady;
+        auto oldNotarized = mNormalNotarized;
+        bool decided = TETRABFT_MODE    ? advanceTetraBFT(round)
+                       : FORGET_IT_MODE ? advanceForgetIT(round)
+                                        : advanceSimpleIT(round);
+        if (decided)
+        {
+            if (FORGET_IT_MODE)
+                current->second.decided = true;
+            else
+            {
+                // Simple-IT delivers Log(round); TetraBFT finalizes the prefix
+                // ending three ancestors behind a newly notarized block.
+                uint64_t last = TETRABFT_MODE ? round - 3 : round;
+                for (auto it = mNormalSlots.upper_bound(mNormalExecuted);
+                     it != mNormalSlots.end() && it->first <= last; ++it)
+                    it->second.decided = true;
+            }
+        }
+        if (FORGET_IT_MODE ||
+            (TETRABFT_MODE && oldNotarized == mNormalNotarized) ||
+            (SIMPLE_IT_MODE && oldReady == mNormalReady))
+            break;
+        ++current;
+        if (current != mNormalSlots.end() && current->first != round + 1)
+            break;
+    }
 
     // Execution is ordered even if network delivery reorders decisions.
     while (true)
@@ -243,24 +400,20 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
                   normalPathName(), mNormalExecuted, hexAbbrev(ready.digest),
                   batch.transactions.size());
         if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-            ackClientBatchesForBlock(mNormalExecuted, ready.digest);
-        if (!SIMPLE_IT_MODE)
+            ackClientBatchesForBlock(mNormalExecuted, sha256(ready.data));
+        mNormalWork.erase(mNormalExecuted);
+        if (FORGET_IT_MODE)
             mNormalSlots.erase(it);
     }
-    if (SIMPLE_IT_MODE)
+    if (!FORGET_IT_MODE)
     {
         // Bounded retention lets slow RBC messages finish without re-execution.
         while (!mNormalSlots.empty() && mNormalExecuted > NORMAL_PATH_WINDOW &&
                mNormalSlots.begin()->first <
                    mNormalExecuted - NORMAL_PATH_WINDOW)
             mNormalSlots.erase(mNormalSlots.begin());
-        auto next = mNormalSlots.find(mNormalExecuted + 1);
-        if (next != mNormalSlots.end() && next->second.proposed &&
-            seq != next->first)
-            normalAdvance(next->first); // reconsider a now-safe parent
     }
-    if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        normalProp();
+    normalProp();
 }
 
 } // namespace stellar

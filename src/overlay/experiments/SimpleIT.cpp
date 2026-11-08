@@ -22,14 +22,14 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
     bool decided;
 
     firstVote = CUSTOM_SIMPLE_ECHO;
-    // Consecutive parent is safe once already executed. Serialized proposals
-    // deliberately omit Simple-IT's pipeline and disabled-round machinery.
-    bool safeParent = seq - 1 <= mNormalExecuted;
+    // arXiv:2606.14404v2 Figure 2 (non-speculative S/S_opt), healthy path:
+    // a safe parent need not be committed. Vote, then enter the next round
+    // immediately, overlapping this round's commit with the next RBC.
+    bool safeParent = seq - 1 <= mNormalReady;
     outgoing = slot.simple.advance(mApp.getConfig().NODE_SEED.getPublicKey(),
-                                   mNormalLeader.value(), mNormalMembers.size(),
+                                   normalLeader(seq), mNormalMembers.size(),
                                    SIMPLE_IT_OPTIMISTIC, safeParent);
-    decided =
-        slot.simple.decide(mNormalQuorum, mNormalLeader.value(), safeParent);
+    decided = slot.simple.decide(mNormalQuorum, normalLeader(seq), safeParent);
     for (auto phase : outgoing)
     {
         auto type = static_cast<CustomMessageType>(firstVote + phase - 1);
@@ -41,6 +41,8 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
         else
             normalSend(type, seq, slot.digest);
     }
+    if (slot.simple.commitSent() && seq == mNormalReady + 1)
+        mNormalReady = seq;
     return decided;
 }
 

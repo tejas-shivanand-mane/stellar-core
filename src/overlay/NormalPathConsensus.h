@@ -185,6 +185,11 @@ template <typename Node, typename Digest> class SimpleITNormal
         mDecided = true;
         return true;
     }
+    bool
+    commitSent() const
+    {
+        return mSent[Commit - 1];
+    }
     Digest const& digest() const { return mProposal.value(); }
 };
 }

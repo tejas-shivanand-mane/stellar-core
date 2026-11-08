@@ -364,8 +364,9 @@ OverlayManagerImpl::tickExperiment()
     // Retry proposal only after all peers are connected and listener is active.
     // This prevents the startup race where prop() runs before the client queue
     // has enough requests.
-    if (shabdiz_start == 1 && mApp.getConfig().SEND_CUSTOM_MESSAGE &&
-        g_clientListenerActive)
+    if (shabdiz_start == 1 &&
+        ((mApp.getConfig().SEND_CUSTOM_MESSAGE && g_clientListenerActive) ||
+         TETRABFT_MODE || SIMPLE_IT_MODE))
     {
         if (PBFT_MODE || normalPathEnabled())
         {
@@ -396,6 +397,12 @@ OverlayManagerImpl::prop()
                "currentView={}, clientRequestQueue={}",
                shortID, txn_count, latestCommittedView, currentView,
                clientQueueSize);
+
+    if (TETRABFT_MODE || SIMPLE_IT_MODE)
+    {
+        normalProp();
+        return;
+    }
 
     // Non-leader/custom-disabled nodes do not drive Shabdiz / IT-HS proposals.
     if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
@@ -436,6 +443,12 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     }
     if (type == CUSTOM_SHABDIZ_PAPER)
         return;
+    if (type == CUSTOM_EXPERIMENT_WORK)
+    {
+        if (TETRABFT_MODE || SIMPLE_IT_MODE)
+            normalReceiveWork(stellarMsg.customMessage(), peer->getPeerID());
+        return;
+    }
     bool tetraMessage =
         type >= CUSTOM_TETRA_PROPOSE && type <= CUSTOM_TETRA_VOTE4;
     bool simpleMessage =

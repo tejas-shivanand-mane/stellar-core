@@ -87,7 +87,9 @@ enum CustomMessageType
     CUSTOM_FORGET_PREPARE = 28,
     CUSTOM_FORGET_VOTE1 = 29,
     CUSTOM_FORGET_VOTE2 = 30,
-    CUSTOM_SHABDIZ_PAPER = 31
+    CUSTOM_SHABDIZ_PAPER = 31,
+    // Benchmark ingress supplies work to native multi-shot leaders.
+    CUSTOM_EXPERIMENT_WORK = 32
 };
 
 // Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.
