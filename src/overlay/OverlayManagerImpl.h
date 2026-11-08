@@ -132,7 +132,19 @@ class OverlayManagerImpl : public OverlayManager
         bool decided = false;
     };
     std::set<NodeID> mNormalMembers;
-    std::optional<NodeID> mNormalLeader;
+    // Fixed, sorted membership gives every replica the same per-slot leader.
+    std::vector<NodeID> mExperimentLeaders;
+    struct ExperimentWork
+    {
+        std::string data;
+        std::chrono::steady_clock::time_point forwarded{};
+    };
+    std::map<uint64_t, ExperimentWork> mExperimentWork;
+    uint64_t mExperimentExecuted = 0;
+    NodeID const& experimentLeader(uint64_t slot) const;
+    bool takeExperimentBatch(uint64_t slot, std::string& data);
+    void receiveExperimentWork(CustomMessage const& cm, NodeID const& sender);
+    void finishExperimentBatch(uint64_t slot, Hash const& batchDigest);
     std::map<uint64_t, NormalSlot> mNormalSlots;
     uint64_t mNormalNextSeq = 1;
     uint64_t mNormalExecuted = 0;

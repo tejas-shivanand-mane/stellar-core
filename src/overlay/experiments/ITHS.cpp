@@ -2,6 +2,7 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "crypto/SHA.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/OverlayManagerImpl.h"
@@ -126,6 +127,10 @@ OverlayManagerImpl::handleITHSMessage(StellarMessage const& stellarMsg,
     auto const& cm = stellarMsg.customMessage();
     NodeID sender = peer->getPeerID();
     NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
+    if (!mNormalMembers.count(sender) || cm.view == 0 ||
+        (cm.msgType == CUSTOM_ITHS_PROPOSE &&
+         !(sender == experimentLeader(cm.view))))
+        return;
     BlockKey key{cm.view, cm.blockHash};
     auto& st = g_txn[key];
     switch (cm.msgType)
@@ -328,7 +333,7 @@ OverlayManagerImpl::handleITHSMessage(StellarMessage const& stellarMsg,
                       hexAbbrev(cm.blockHash), cm.view,
                       batch.transactions.size(), cm.view + 1);
 
-            ackClientBatchesForBlock(cm.view, cm.blockHash);
+            finishExperimentBatch(cm.view, sha256(cm.data));
 
             currentView = cm.view + 1;
             lastCollectSentView = UINT64_MAX;

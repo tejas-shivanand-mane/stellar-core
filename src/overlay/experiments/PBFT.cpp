@@ -16,7 +16,7 @@ using namespace experiment;
 
 struct PbftSlotKey
 {
-    uint64_t view; // PBFT view, fixed to 0 without view change
+    uint64_t view; // Recovery view within each independent batch instance
     uint64_t seq;  // PBFT sequence number
 
     bool
@@ -110,15 +110,6 @@ pbftDigest(std::string const& data)
 void
 OverlayManagerImpl::pbftProp()
 {
-
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-    std::string shortID = KeyUtils::toShortString(selfID);
-
-    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
-    {
-        return;
-    }
-
     if (g_pbftNextSeq != g_pbftLastExecuted + 1)
     {
         CLOG_DEBUG(Overlay,
@@ -128,47 +119,11 @@ OverlayManagerImpl::pbftProp()
         return;
     }
 
-    TransactionBatch batch;
-    bool fromExternalClient = false;
-    std::vector<ClientAck> clientAcks;
-
-    if (g_clientListenerActive)
-    {
-        if (!tryBuildServerBatch(batch, clientAcks))
-        {
-            CLOG_DEBUG(Overlay,
-                       "[PBFT CLIENT] Only {} queued requests; need {}",
-                       getClientRequestQueueSize(), SERVER_BATCH_SIZE);
-            return;
-        }
-
-        fromExternalClient = true;
-
-        releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
-        releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
-    }
-    else
-    {
-        batch =
-            makeSyntheticYCSBBatch(mApp, shortID, txn_count, SERVER_BATCH_SIZE);
-    }
-
-    if (batch.transactions.empty())
-    {
-        CLOG_WARNING(Overlay, "[PBFT PROP SKIP] empty batch");
+    std::string data;
+    if (!takeExperimentBatch(g_pbftNextSeq, data))
         return;
-    }
-
-    txn_count += batch.transactions.size();
-
-    std::string data = batch.serialize();
+    txn_count += SERVER_BATCH_SIZE;
     Hash digest = pbftDigest(data);
-
-    CLOG_DEBUG(
-        Overlay, "[PBFT BATCH SIZE] txns={} data_bytes={} bytes_per_txn={}",
-        batch.transactions.size(), data.size(),
-        batch.transactions.empty() ? 0
-                                   : data.size() / batch.transactions.size());
 
     uint64_t view = g_pbftView;
     uint64_t seq = g_pbftNextSeq++;
@@ -182,20 +137,10 @@ OverlayManagerImpl::pbftProp()
 
     g_pbftAcceptedDigest[slot] = digest;
 
-    if (fromExternalClient)
-    {
-        // For benchmark compatibility with current shab_client:
-        // use seq as the "view" field in existing ACK map.
-        BlockKey ackKey{seq, digest};
-        auto& acks = g_blockClientAcks[ackKey];
-        acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
-    }
-
     CLOG_INFO(
         Overlay,
         "[PBFT SEND PRE-PREPARE] view={} seq={} digest={} txns={} source={}",
-        view, seq, hexAbbrev(digest), batch.transactions.size(),
-        fromExternalClient ? "external-client" : "synthetic");
+        view, seq, hexAbbrev(digest), SERVER_BATCH_SIZE, "external-client");
 
     sendPBFTPrePrepare(view, seq, digest, data);
 
@@ -319,6 +264,8 @@ OverlayManagerImpl::tryExecutePBFT()
 
         st.executed = true;
         g_pbftLastExecuted = nextSeq;
+        g_pbftNextSeq = nextSeq + 1;
+        finishExperimentBatch(nextSeq, st.digest);
 
         if (g_pbftLastExecuted > PBFT_HISTORY)
         {
@@ -346,16 +293,7 @@ OverlayManagerImpl::tryExecutePBFT()
                    g_pbftView, nextSeq, hexAbbrev(st.digest),
                    batch.transactions.size());
 
-        // Benchmark-compatible ACK to current shab_client.
-        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        {
-            ackClientBatchesForBlock(nextSeq, st.digest);
-        }
-
-        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        {
-            prop();
-        }
+        prop();
     }
 }
 
@@ -433,6 +371,15 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
     uint64_t view = cm.vp;
     Hash digest = cm.blockHash;
 
+    if (!mNormalMembers.count(sender) || seq == 0 ||
+        seq <= g_pbftLastExecuted ||
+        seq - g_pbftLastExecuted > NORMAL_PATH_WINDOW)
+        return;
+    auto const& primary = experimentLeader(seq);
+    if ((cm.msgType == CUSTOM_PBFT_PRE_PREPARE && !(sender == primary)) ||
+        (cm.msgType == CUSTOM_PBFT_PREPARE && sender == primary))
+        return;
+
     if (view != g_pbftView)
     {
         CLOG_DEBUG(Overlay,
@@ -474,7 +421,7 @@ OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
         st.digest = digest;
         st.data = cm.data;
 
-        if (!st.prepareSent)
+        if (!st.prepareSent && !(selfID == primary))
         {
             st.prepareSent = true;
 

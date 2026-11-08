@@ -26,10 +26,10 @@ OverlayManagerImpl::advanceSimpleIT(uint64_t seq)
     // deliberately omit Simple-IT's pipeline and disabled-round machinery.
     bool safeParent = seq - 1 <= mNormalExecuted;
     outgoing = slot.simple.advance(mApp.getConfig().NODE_SEED.getPublicKey(),
-                                   mNormalLeader.value(), mNormalMembers.size(),
+                                   experimentLeader(seq), mNormalMembers.size(),
                                    SIMPLE_IT_OPTIMISTIC, safeParent);
     decided =
-        slot.simple.decide(mNormalQuorum, mNormalLeader.value(), safeParent);
+        slot.simple.decide(mNormalQuorum, experimentLeader(seq), safeParent);
     for (auto phase : outgoing)
     {
         auto type = static_cast<CustomMessageType>(firstVote + phase - 1);
