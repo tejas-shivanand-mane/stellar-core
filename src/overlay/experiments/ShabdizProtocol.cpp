@@ -98,8 +98,8 @@ struct ShabdizRuntime
     NodeID self;
     std::set<NodeID> members;
     std::unique_ptr<PaperShabdiz> engine;
-    // Files are an archive of blocks, not retained consensus votes. Only a
-    // bounded working cache is in memory; ancestry remains fetchable after GC.
+    // Packed archive of blocks, separate from retained consensus votes. Only
+    // bounded caches/queues stay in memory; ancestry remains fetchable after GC.
     std::unique_ptr<ShabdizArchive> archive;
     std::map<Hash, ShabdizBatch> parsed;
     std::deque<Hash> parsedOrder;
@@ -261,7 +261,8 @@ OverlayManagerImpl::initializePaperShabdiz()
         NonPrune_MODE, SHABDIZ_FAST_PATH_ONLY);
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin "
-              "prepared_pipeline=true fast_path_only={} archive={}",
+              "prepared_pipeline=true fast_path_only={} archive={} "
+              "archive_format=sqlite_zlib archive_batch_blocks=1000",
               r->members.size(), r->engine->quorum(), SHABDIZ_FAST_PATH_ONLY,
               archivePath.string());
     mPaperShabdiz = std::move(r);
@@ -470,6 +471,16 @@ OverlayManagerImpl::tickPaperShabdiz()
                   r.engine->view(), r.engine->prepared().view,
                   r.engine->committed().view, r.fastProposals, r.slowProposals,
                   r.collects, r.wishes);
+        auto archive = r.archive->stats();
+        CLOG_INFO(
+            Overlay,
+            "[SHABDIZ ARCHIVE] pending_records={} pending_bytes={} "
+            "peak_bytes={} transactions={} blocks={} raw_bytes={} "
+            "stored_bytes={} waits={} wait_us={} max_wait_us={}",
+            archive.pendingRecords, archive.pendingBytes, archive.peakBytes,
+            archive.transactions, archive.blocksWritten, archive.rawBytes,
+            archive.storedBytes, archive.waitCount, archive.waitMicros,
+            archive.maxWaitMicros);
         pumpPaperShabdiz();
     }
 }

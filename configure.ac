@@ -304,6 +304,9 @@ sqlite3_LIBS=
 AC_SUBST(sqlite3_CFLAGS)
 AC_SUBST(sqlite3_LIBS)
 
+# Shabdiz's packed application archive compresses payloads off the main thread.
+PKG_CHECK_MODULES(zlib, [zlib])
+
 PKG_CHECK_MODULES(libsodium, [libsodium >= 1.0.17], :, libsodium_INTERNAL=yes)
 
 AX_PKGCONFIG_SUBDIR(lib/libsodium)

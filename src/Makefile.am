@@ -72,7 +72,8 @@ main/XDRFilesSha256.cpp: $(SRC_X_FILES) Makefile $(top_srcdir)/hash-xdrs.sh
 	$(top_srcdir)/hash-xdrs.sh protocol-curr >$@
 endif
 
-stellar_core_LDADD = $(soci_LIBS) $(libmedida_LIBS)		\
+AM_CPPFLAGS += $(zlib_CFLAGS)
+stellar_core_LDADD = $(soci_LIBS) $(libmedida_LIBS) $(zlib_LIBS)	\
 	$(top_builddir)/lib/lib3rdparty.a $(sqlite3_LIBS)	\
 	$(libpq_LIBS) $(xdrpp_LIBS) $(libsodium_LIBS) $(libunwind_LIBS)
 
