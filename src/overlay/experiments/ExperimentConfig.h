@@ -108,7 +108,9 @@ inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_STEP_MS = 1;
 
 // Benchmark ablation only. Disable collection, WISH/view-timeout recovery and
 // COMMITTED-report catch-up. Preserve fast-path voting, normal view progress,
-// data fetching and archival storage. A faulty leader can stall this mode.
+// data fetching. Blocks/markers are retained in memory for the entire run;
+// diagnostic logging and the disk archive are disabled. Wait for all fixed
+// peers before startup. A faulty/disconnected leader can stall this mode.
 // Keep false when evaluating the complete protocol.
 inline constexpr bool SHABDIZ_FAST_PATH_ONLY = false;
 
@@ -246,3 +248,4 @@ using defaults::SCP_OPS_PER_TX;
 using defaults::zipfian_alpha;
 using defaults::zipfian_n;
 } // namespace stellar::experiment
+

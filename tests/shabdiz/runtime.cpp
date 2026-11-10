@@ -282,6 +282,48 @@ archive(std::filesystem::path const& root)
 }
 
 void
+memoryArchive(std::filesystem::path const& root)
+{
+    ShabdizArchive::Options options;
+    options.memoryOnly = true;
+    auto path = root / "memory-only";
+    {
+        ShabdizArchive store(path, options, [] {
+            throw std::runtime_error("Memory-only storage must not start a writer");
+        });
+        auto data = batchData();
+        // Exceed both the recent-key cache and disk pending-queue capacity.
+        // Old blocks and execution markers must remain fetchable in RAM.
+        for (unsigned i = 0; i < 5000; ++i)
+        {
+            store.put(archiveKey('b', i), data + std::to_string(i));
+            store.put(archiveKey('e', i), {});
+        }
+        for (unsigned i = 0; i < 5000; ++i)
+        {
+            auto key = archiveKey('b', i);
+            store.put(key, "must not overwrite");
+            assert(store.contains(key));
+            assert(store.get(key) == data + std::to_string(i));
+            assert(store.contains(archiveKey('e', i)));
+            assert(store.get(archiveKey('e', i)) == "");
+        }
+        store.put(std::string(1, '\2') + std::string(32, '\0'), "binary key");
+        assert(store.get(std::string(1, '\2') + std::string(32, '\0')) ==
+               "binary key");
+        assert(!store.contains("absent") && !store.get("absent"));
+        store.flush();
+        store.check();
+        assert(store.stats().transactions == 0);
+        assert(store.stats().recordsWritten == 0);
+        assert(store.stats().pendingRecords == 0);
+        assert(!std::filesystem::exists(path));
+    }
+    assert(!std::filesystem::exists(path));
+    std::cout << "Memory-only archive: 10001 records, no files or writer\n";
+}
+
+void
 benchmark()
 {
     auto data = batchData();
@@ -310,6 +352,7 @@ main(int argc, char** argv)
                 ("shabdiz-runtime-test-" + std::to_string(getpid()) + "-" +
                  std::to_string(Clock::now().time_since_epoch().count()));
     parser();
+    memoryArchive(root);
     archive(root);
     std::filesystem::remove_all(root);
     std::cout << "Shabdiz parser equivalence, pending fetch, replay dedup, "
@@ -318,3 +361,4 @@ main(int argc, char** argv)
     if (argc == 2 && std::string(argv[1]) == "--bench")
         benchmark();
 }
+

@@ -98,8 +98,8 @@ struct ShabdizRuntime
     NodeID self;
     std::set<NodeID> members;
     std::unique_ptr<PaperShabdiz> engine;
-    // Packed archive of blocks, separate from retained consensus votes. Only
-    // bounded caches/queues stay in memory; ancestry remains fetchable after GC.
+    // Block storage, separate from retained consensus votes. Fast-only runs
+    // retain all blocks/markers in RAM; full-protocol runs use the packed archive.
     std::unique_ptr<ShabdizArchive> archive;
     std::map<Hash, ShabdizBatch> parsed;
     std::deque<Hash> parsedOrder;
@@ -248,7 +248,9 @@ OverlayManagerImpl::initializePaperShabdiz()
     auto archivePath =
         std::filesystem::path(cfg.BUCKET_DIR_PATH) /
         ("shabdiz-" + std::to_string(getpid()) + "-" + std::to_string(stamp));
-    r->archive = std::make_unique<ShabdizArchive>(archivePath);
+    ShabdizArchive::Options archiveOptions;
+    archiveOptions.memoryOnly = SHABDIZ_FAST_PATH_ONLY;
+    r->archive = std::make_unique<ShabdizArchive>(archivePath, archiveOptions);
     auto raw = r.get();
     r->engine = std::make_unique<PaperShabdiz>(
         r->self, std::vector<NodeID>(r->members.begin(), r->members.end()),
@@ -406,7 +408,12 @@ OverlayManagerImpl::tickPaperShabdiz()
         size_t connected = 1;
         for (auto const& peer : getAuthenticatedPeers())
             connected += r.members.count(peer.first);
-        if (connected < r.engine->quorum())
+        // A fast-only run cannot recover lost startup proposals/votes. Wait
+        // for every configured member; the runner also checks all replicas
+        // before admitting client work. Full-protocol availability is unchanged.
+        auto required = SHABDIZ_FAST_PATH_ONLY ? r.members.size()
+                                              : r.engine->quorum();
+        if (connected < required)
             return;
         r.started = true;
         r.startedAt = Clock::now();
@@ -533,3 +540,4 @@ OverlayManagerImpl::receivePaperShabdiz(CustomMessage const& cm,
     pumpPaperShabdiz();
 }
 } // namespace stellar
+

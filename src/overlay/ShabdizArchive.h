@@ -41,6 +41,9 @@ class ShabdizArchive
   public:
     struct Options
     {
+        // Benchmark-only storage: no directory, SQLite handles or writer thread.
+        // Retain all records for this run so delayed block requests stay valid.
+        bool memoryOnly = false;
         size_t batchBlocks = 1000;
         size_t maxPendingRecords = 4096;
         size_t maxPendingBytes = 64 * 1024 * 1024;
@@ -81,6 +84,7 @@ class ShabdizArchive
     using DB = std::unique_ptr<sqlite_api::sqlite3, CloseDB>;
     using Statement = std::unique_ptr<sqlite_api::sqlite3_stmt, Finalize>;
     Options mOptions;
+    std::map<std::string, std::string> mMemory;
     BeforeWrite mBeforeWrite;
     DB mWriter, mReader;
     std::mutex mMutex;
@@ -326,6 +330,8 @@ class ShabdizArchive
                    BeforeWrite beforeWrite = {})
         : mOptions(options), mBeforeWrite(std::move(beforeWrite))
     {
+        if (mOptions.memoryOnly)
+            return;
         if (!options.batchBlocks || options.batchBlocks > SIZE_MAX / 2 ||
             !options.maxPendingRecords || !options.maxPendingBytes ||
             options.maxDelay.count() <= 0 || std::filesystem::exists(root))
@@ -348,6 +354,8 @@ class ShabdizArchive
     }
     ~ShabdizArchive()
     {
+        if (!mWorker.joinable())
+            return;
         {
             std::lock_guard<std::mutex> lock(mMutex);
             mStopping = true;
@@ -371,6 +379,11 @@ class ShabdizArchive
     bool
     contains(std::string const& key)
     {
+        if (mOptions.memoryOnly)
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            return mMemory.count(packedKey(key)) != 0;
+        }
         check();
         if (mRecent.count(key))
             return true;
@@ -393,8 +406,14 @@ class ShabdizArchive
     {
         size_t bytes = key.size() + data.size();
         if (data.size() > MAX_RECORD || key.size() > 1024 ||
-            bytes > mOptions.maxPendingBytes)
+            (!mOptions.memoryOnly && bytes > mOptions.maxPendingBytes))
             throw std::invalid_argument("Oversized Shabdiz archive record");
+        if (mOptions.memoryOnly)
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            mMemory.emplace(packedKey(key), std::move(data));
+            return;
+        }
         if (contains(key))
             return;
         auto value = std::make_shared<std::string const>(std::move(data));
@@ -438,6 +457,14 @@ class ShabdizArchive
     std::optional<std::string>
     get(std::string const& key)
     {
+        if (mOptions.memoryOnly)
+        {
+            std::lock_guard<std::mutex> lock(mMutex);
+            auto it = mMemory.find(packedKey(key));
+            if (it == mMemory.end())
+                return {};
+            return it->second;
+        }
         {
             std::lock_guard<std::mutex> lock(mMutex);
             checkLocked();
@@ -478,6 +505,8 @@ class ShabdizArchive
     void
     flush()
     {
+        if (mOptions.memoryOnly)
+            return;
         std::unique_lock<std::mutex> lock(mMutex);
         mFlush = true;
         mChanged.notify_all();
@@ -487,3 +516,4 @@ class ShabdizArchive
     }
 };
 } // namespace stellar
+
