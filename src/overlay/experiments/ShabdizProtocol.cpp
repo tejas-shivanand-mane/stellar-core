@@ -99,7 +99,8 @@ struct ShabdizRuntime
     std::set<NodeID> members;
     std::unique_ptr<PaperShabdiz> engine;
     // Block storage, separate from retained consensus votes. Fast-only runs
-    // retain all blocks/markers in RAM; full-protocol runs use the packed archive.
+    // retain 100 recent blocks/markers in RAM; full-protocol runs use the
+    // packed archive.
     std::unique_ptr<ShabdizArchive> archive;
     std::map<Hash, ShabdizBatch> parsed;
     std::deque<Hash> parsedOrder;
@@ -116,6 +117,13 @@ struct ShabdizRuntime
     bool newWork = false, retryWork = false;
     Clock::time_point deadline, retry, startedAt;
 
+    size_t
+    blockCacheSize() const
+    {
+        return SHABDIZ_FAST_PATH_ONLY ? ShabdizArchive::Options{}.memoryBlocks
+                                     : BLOCK_CACHE_SIZE;
+    }
+
     ShabdizBatch const*
     batch(std::string const& data, Hash const& id)
     {
@@ -127,7 +135,7 @@ struct ShabdizRuntime
             return nullptr;
         it = parsed.emplace(id, std::move(*result)).first;
         parsedOrder.push_back(id);
-        while (parsed.size() > BLOCK_CACHE_SIZE)
+        while (parsed.size() > blockCacheSize())
         {
             parsed.erase(parsedOrder.front());
             parsedOrder.pop_front();
@@ -154,7 +162,7 @@ struct ShabdizRuntime
     {
         if (cache.emplace(b.hash, b).second)
             cacheOrder.push_back(b.hash);
-        while (cache.size() > BLOCK_CACHE_SIZE)
+        while (cache.size() > blockCacheSize())
         {
             cache.erase(cacheOrder.front());
             cacheOrder.pop_front();

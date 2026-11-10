@@ -42,8 +42,9 @@ class ShabdizArchive
     struct Options
     {
         // Benchmark-only storage: no directory, SQLite handles or writer thread.
-        // Retain all records for this run so delayed block requests stay valid.
+        // Bounded recent history only; older block fetches/replay markers expire.
         bool memoryOnly = false;
+        size_t memoryBlocks = 100;
         size_t batchBlocks = 1000;
         size_t maxPendingRecords = 4096;
         size_t maxPendingBytes = 64 * 1024 * 1024;
@@ -56,6 +57,7 @@ class ShabdizArchive
         uint64_t waitCount = 0, waitMicros = 0, maxWaitMicros = 0;
         size_t pendingRecords = 0, pendingBytes = 0;
         size_t peakRecords = 0, peakBytes = 0;
+        size_t memoryRecords = 0, memoryBytes = 0;
     };
     // Fault/slow-storage injection for tests, invoked on the writer thread.
     using BeforeWrite = std::function<void()>;
@@ -85,6 +87,7 @@ class ShabdizArchive
     using Statement = std::unique_ptr<sqlite_api::sqlite3_stmt, Finalize>;
     Options mOptions;
     std::map<std::string, std::string> mMemory;
+    std::deque<std::string> mMemoryBlocks, mMemoryMarkers;
     BeforeWrite mBeforeWrite;
     DB mWriter, mReader;
     std::mutex mMutex;
@@ -331,7 +334,12 @@ class ShabdizArchive
         : mOptions(options), mBeforeWrite(std::move(beforeWrite))
     {
         if (mOptions.memoryOnly)
+        {
+            if (!mOptions.memoryBlocks)
+                throw std::invalid_argument(
+                    "Memory archive requires a positive block limit");
             return;
+        }
         if (!options.batchBlocks || options.batchBlocks > SIZE_MAX / 2 ||
             !options.maxPendingRecords || !options.maxPendingBytes ||
             options.maxDelay.count() <= 0 || std::filesystem::exists(root))
@@ -411,7 +419,24 @@ class ShabdizArchive
         if (mOptions.memoryOnly)
         {
             std::lock_guard<std::mutex> lock(mMutex);
-            mMemory.emplace(packedKey(key), std::move(data));
+            auto packed = packedKey(key);
+            auto inserted = mMemory.emplace(packed, std::move(data));
+            if (!inserted.second)
+                return;
+            mStats.memoryBytes += packed.size() + inserted.first->second.size();
+            // Bound payloads and execution markers independently: a proposal
+            // can arrive before execution of the preceding block. Duplicate
+            // inserts neither overwrite nor refresh the retention order.
+            auto& order = isBlock(key) ? mMemoryBlocks : mMemoryMarkers;
+            order.push_back(std::move(packed));
+            while (order.size() > mOptions.memoryBlocks)
+            {
+                auto it = mMemory.find(order.front());
+                mStats.memoryBytes -= it->first.size() + it->second.size();
+                mMemory.erase(it);
+                order.pop_front();
+            }
+            mStats.memoryRecords = mMemory.size();
             return;
         }
         if (contains(key))

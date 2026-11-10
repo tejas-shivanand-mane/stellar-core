@@ -292,14 +292,25 @@ memoryArchive(std::filesystem::path const& root)
             throw std::runtime_error("Memory-only storage must not start a writer");
         });
         auto data = batchData();
-        // Exceed both the recent-key cache and disk pending-queue capacity.
-        // Old blocks and execution markers must remain fetchable in RAM.
+        // Long runs must retain only the newest 100 blocks and 100 markers.
+        assert(options.memoryBlocks == 100);
         for (unsigned i = 0; i < 5000; ++i)
         {
             store.put(archiveKey('b', i), data + std::to_string(i));
             store.put(archiveKey('e', i), {});
+            assert(store.stats().memoryRecords <= 2 * options.memoryBlocks);
+            assert(store.stats().memoryBytes <=
+                   options.memoryBlocks * (66 + data.size() + 4));
         }
-        for (unsigned i = 0; i < 5000; ++i)
+        assert(store.stats().memoryRecords == 200);
+        for (unsigned i = 0; i < 4900; ++i)
+        {
+            assert(!store.contains(archiveKey('b', i)));
+            assert(!store.get(archiveKey('b', i)));
+            assert(!store.contains(archiveKey('e', i)));
+            assert(!store.get(archiveKey('e', i)));
+        }
+        for (unsigned i = 4900; i < 5000; ++i)
         {
             auto key = archiveKey('b', i);
             store.put(key, "must not overwrite");
@@ -308,7 +319,19 @@ memoryArchive(std::filesystem::path const& root)
             assert(store.contains(archiveKey('e', i)));
             assert(store.get(archiveKey('e', i)) == "");
         }
+        // Repeated inserts above must not refresh the oldest record's age.
+        store.put(archiveKey('b', 5000), "newest");
+        assert(!store.get(archiveKey('b', 4900)));
+        assert(store.get(archiveKey('b', 4901)));
+        assert(store.get(archiveKey('e', 4900)));
+        // Marker-only churn must not evict retained block payloads.
+        for (unsigned i = 5000; i < 5200; ++i)
+            store.put(archiveKey('e', i), {});
+        assert(store.get(archiveKey('b', 4901)));
+        assert(!store.get(archiveKey('e', 5000)));
+        assert(store.get(archiveKey('e', 5199)));
         store.put(std::string(1, '\2') + std::string(32, '\0'), "binary key");
+        assert(store.stats().memoryRecords == 200);
         assert(store.get(std::string(1, '\2') + std::string(32, '\0')) ==
                "binary key");
         assert(!store.contains("absent") && !store.get("absent"));
@@ -320,7 +343,19 @@ memoryArchive(std::filesystem::path const& root)
         assert(!std::filesystem::exists(path));
     }
     assert(!std::filesystem::exists(path));
-    std::cout << "Memory-only archive: 10001 records, no files or writer\n";
+    options.memoryBlocks = 0;
+    bool rejected = false;
+    try
+    {
+        ShabdizArchive store(path, options);
+    }
+    catch (std::invalid_argument const&)
+    {
+        rejected = true;
+    }
+    assert(rejected);
+    std::cout << "Memory-only archive: bounded 100 blocks + 100 markers, "
+                 "no files or writer\n";
 }
 
 void

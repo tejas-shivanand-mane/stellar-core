@@ -338,7 +338,8 @@ slowValidationBoundaries()
 
 void
 network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
-        bool routedWork = false, bool fastPathOnly = false)
+        bool routedWork = false, bool fastPathOnly = false,
+        size_t memoryBlocks = 0, uint64_t limit = 8)
 {
     struct Delivery
     {
@@ -350,13 +351,13 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     for (int i = 0; i < n; ++i)
         members.push_back(i);
     std::vector<std::map<std::string, Block>> stores(n);
+    std::vector<std::deque<std::string>> storeOrder(n);
     std::vector<std::unique_ptr<Engine>> engines(n);
     std::vector<std::vector<Block>> executed(n);
     std::vector<Delivery> pending;
     std::vector<std::set<uint64_t>> availableWork(n);
     uint64_t forwardedView = 0;
     std::mt19937 rng(seed);
-    const uint64_t limit = 8;
     for (int i = absent; i < n; ++i)
     {
         engines[i] = std::make_unique<Engine>(
@@ -367,7 +368,17 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
                     return it->second;
                 return {};
             },
-            [&, i](auto const& b) { stores[i][b.hash] = b; }, digest,
+            [&, i](auto const& b) {
+                if (stores[i].emplace(b.hash, b).second && memoryBlocks)
+                {
+                    storeOrder[i].push_back(b.hash);
+                    while (storeOrder[i].size() > memoryBlocks)
+                    {
+                        stores[i].erase(storeOrder[i].front());
+                        storeOrder[i].pop_front();
+                    }
+                }
+            }, digest,
             [&, i](auto const&) -> std::optional<std::string> {
                 if (engines[i]->committed().view >= limit ||
                     (routedWork && !availableWork[i].count(engines[i]->view())))
@@ -558,6 +569,11 @@ main()
                 network(n, 0, seed, true, false, routed, true);
                 ++schedules;
             }
+    // Fast-only runs continue committing across repeated history eviction,
+    // including when only the ingress initially owns each batch.
+    network(4, 0, 11, false, false, false, true, 100, 256);
+    network(7, 0, 12, false, false, true, true, 100, 256);
+    schedules += 2;
     std::cout << "Shabdiz rules and " << schedules
               << " randomized network schedules passed\n";
 }
