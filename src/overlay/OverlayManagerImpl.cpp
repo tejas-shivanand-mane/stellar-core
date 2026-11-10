@@ -324,6 +324,15 @@ OverlayManagerImpl::OverlayManagerImpl(Application& app)
     , mResolvingPeersRetryCount(0)
     , mScheduledMessages(100000, true)
 {
+    CLOG_INFO(Overlay,
+              "[EXPERIMENT CONFIG] protocol={} batch_size={} client_port={} "
+              "workload={} iths_delta_ms={} forget_it_delta_ms={} "
+              "shabdiz_fast_path_only={}",
+              experiment::PROTOCOL, experiment::SERVER_BATCH_SIZE,
+              experiment::CLIENT_PORT,
+              static_cast<int>(experiment::currentWorkload),
+              experiment::ITHS_BLOG_DELTA_MS, experiment::FORGET_IT_DELTA_MS,
+              experiment::SHABDIZ_FAST_PATH_ONLY);
     initializeNormalPath();
     mPeerSources[PeerType::INBOUND] = std::make_unique<RandomPeerSource>(
         mPeerManager, RandomPeerSource::nextAttemptCutoff(PeerType::INBOUND));

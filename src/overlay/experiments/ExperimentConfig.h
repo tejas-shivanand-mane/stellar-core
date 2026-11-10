@@ -2,11 +2,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
+#include <stdexcept>
+#include <string>
 
 namespace stellar::experiment
 {
-// Build-time experiment settings shared by replicas and shab_client.
-// Rebuild all replicas after edits. SEND_CUSTOM_MESSAGE=true selects client
+// Default experiment settings shared by replicas and shab_client.
+// STELLAR_EXPERIMENT_* environment overrides are read once at process startup.
+// One binary supports every protocol and system size; changing these defaults
+// still requires a rebuild. SEND_CUSTOM_MESSAGE=true selects client
 // ingress. Shabdiz, native multi-shot TetraBFT and Simple-IT rotate leaders.
 // Forget-IT rotates within an instance through Algorithm 1's view changes;
 // each fresh benchmark instance still begins with the client-ingress leader.
@@ -26,7 +32,37 @@ namespace stellar::experiment
 // PBFT still lacks its view-change/recovery components. Do not
 // report these adapters as complete fault-tolerant implementations of the
 // papers.
+//
+// Example (set the same settings on every replica):
+// STELLAR_EXPERIMENT_PROTOCOL=pbft ./src/stellar-core run --conf node.cfg
+// Use shabdiz, iths, pbft, tetrabft, simple_it, simple_it_bracha, forget_it,
+// or scp. Membership/system size comes from node.cfg, not this header.
+// Set STELLAR_EXPERIMENT_WORKLOAD on shab_client as well as the replicas.
+// Without overrides, existing scripts retain the defaults below.
 
+enum YCSBWorkload
+{
+    WORKLOAD_A,
+    WORKLOAD_B,
+    WORKLOAD_F,
+    WORKLOAD_W,
+
+    // New explicit read-ratio workloads
+    WORKLOAD_R0,
+    WORKLOAD_R10,
+    WORKLOAD_R20,
+    WORKLOAD_R25,
+    WORKLOAD_R40,
+    WORKLOAD_R50,
+    WORKLOAD_R60,
+    WORKLOAD_R75,
+    WORKLOAD_R80,
+    WORKLOAD_R100
+};
+
+// Retain compile-time defaults for older experiment scripts that edit this header.
+namespace defaults
+{
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;
 inline constexpr bool PBFT_MODE = false;
@@ -73,7 +109,7 @@ inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_STEP_MS = 1;
 // Benchmark ablation only. Disable collection, WISH/view-timeout recovery and
 // COMMITTED-report catch-up. Preserve fast-path voting, normal view progress,
 // data fetching and archival storage. A faulty leader can stall this mode.
-// Keep false when evaluating the complete protocol. Rebuild every replica.
+// Keep false when evaluating the complete protocol.
 inline constexpr bool SHABDIZ_FAST_PATH_ONLY = false;
 
 // Native SCP workload generator (not SCP consensus parameters).
@@ -81,29 +117,132 @@ inline constexpr int NUM_TEST_ACCOUNTS = 100;
 inline constexpr int SCP_NATIVE_ROUNDS = 1;
 inline constexpr int SCP_OPS_PER_TX = 100;
 
-enum YCSBWorkload
-{
-    WORKLOAD_A,
-    WORKLOAD_B,
-    WORKLOAD_F,
-    WORKLOAD_W,
-
-    // New explicit read-ratio workloads
-    WORKLOAD_R0,
-    WORKLOAD_R10,
-    WORKLOAD_R20,
-    WORKLOAD_R25,
-    WORKLOAD_R40,
-    WORKLOAD_R50,
-    WORKLOAD_R60,
-    WORKLOAD_R75,
-    WORKLOAD_R80,
-    WORKLOAD_R100
-};
-
 inline constexpr YCSBWorkload currentWorkload = WORKLOAD_W;
 inline constexpr double zipfian_alpha = 0.99;
 inline constexpr uint64_t zipfian_n = 1000000;
 
 static_assert(SERVER_BATCH_SIZE > 0 && NORMAL_PATH_WINDOW > 0);
+} // namespace defaults
+
+namespace detail
+{
+// These settings are immutable after startup. No environment lookups occur in
+// transaction processing, and protocol switches cannot alter a running node.
+inline uint64_t
+number(char const* name, uint64_t fallback, uint64_t minimum, uint64_t maximum)
+{
+    char const* raw = std::getenv(name);
+    if (!raw)
+        return fallback;
+    std::string text(raw);
+    if (text.empty() || text.find_first_not_of("0123456789") != std::string::npos)
+        throw std::invalid_argument(std::string(name) +
+                                    " must be an unsigned integer");
+    uint64_t value;
+    try
+    {
+        value = std::stoull(text);
+    }
+    catch (std::out_of_range const&)
+    {
+        throw std::invalid_argument(std::string(name) + " is out of range");
+    }
+    if (value < minimum || value > maximum)
+        throw std::invalid_argument(std::string(name) + " is out of range");
+    return value;
+}
+
+inline bool
+boolean(char const* name, bool fallback)
+{
+    char const* raw = std::getenv(name);
+    if (!raw)
+        return fallback;
+    std::string value(raw);
+    if (value == "true" || value == "1")
+        return true;
+    if (value == "false" || value == "0")
+        return false;
+    throw std::invalid_argument(std::string(name) + " must be true or false");
+}
+
+inline std::string
+protocol()
+{
+    char const* raw = std::getenv("STELLAR_EXPERIMENT_PROTOCOL");
+    std::string value =
+        raw                          ? raw
+        : defaults::ITHS_MODE        ? "iths"
+        : defaults::PBFT_MODE        ? "pbft"
+        : defaults::ENABLE_SCP_TRACKING ? "scp"
+        : defaults::TETRABFT_MODE     ? "tetrabft"
+        : defaults::SIMPLE_IT_MODE
+            ? (defaults::SIMPLE_IT_OPTIMISTIC ? "simple_it" : "simple_it_bracha")
+        : defaults::FORGET_IT_MODE ? "forget_it" : "shabdiz";
+    if (value != "shabdiz" && value != "iths" && value != "pbft" &&
+        value != "scp" && value != "tetrabft" && value != "simple_it" &&
+        value != "simple_it_bracha" && value != "forget_it")
+        throw std::invalid_argument("Unknown STELLAR_EXPERIMENT_PROTOCOL: " +
+                                    value);
+    return value;
+}
+
+inline YCSBWorkload
+workload()
+{
+    char const* raw = std::getenv("STELLAR_EXPERIMENT_WORKLOAD");
+    if (!raw)
+        return defaults::currentWorkload;
+    char const* names[] = {
+        "WORKLOAD_A",   "WORKLOAD_B",   "WORKLOAD_F",   "WORKLOAD_W",
+        "WORKLOAD_R0",  "WORKLOAD_R10", "WORKLOAD_R20", "WORKLOAD_R25",
+        "WORKLOAD_R40", "WORKLOAD_R50", "WORKLOAD_R60", "WORKLOAD_R75",
+        "WORKLOAD_R80", "WORKLOAD_R100"};
+    for (std::size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i)
+        if (std::string(raw) == names[i])
+            return static_cast<YCSBWorkload>(i);
+    throw std::invalid_argument(
+        std::string("Unknown STELLAR_EXPERIMENT_WORKLOAD: ") + raw);
+}
+} // namespace detail
+
+inline const std::string PROTOCOL = detail::protocol();
+inline const bool ITHS_MODE = PROTOCOL == "iths";
+inline const bool PBFT_MODE = PROTOCOL == "pbft";
+inline const bool ENABLE_SCP_TRACKING = PROTOCOL == "scp";
+inline const bool TETRABFT_MODE = PROTOCOL == "tetrabft";
+inline const bool SIMPLE_IT_MODE =
+    PROTOCOL == "simple_it" || PROTOCOL == "simple_it_bracha";
+inline const bool FORGET_IT_MODE = PROTOCOL == "forget_it";
+inline const bool SIMPLE_IT_OPTIMISTIC =
+    SIMPLE_IT_MODE ? PROTOCOL == "simple_it" : defaults::SIMPLE_IT_OPTIMISTIC;
+inline const bool NonPrune_MODE =
+    detail::boolean("STELLAR_EXPERIMENT_NONPRUNE", defaults::NonPrune_MODE);
+inline const int CLIENT_PORT = static_cast<int>(detail::number(
+    "STELLAR_EXPERIMENT_CLIENT_PORT", defaults::CLIENT_PORT, 1, 65535));
+inline const std::size_t SERVER_BATCH_SIZE = static_cast<std::size_t>(detail::number(
+    "STELLAR_EXPERIMENT_BATCH_SIZE", defaults::SERVER_BATCH_SIZE, 1,
+    std::numeric_limits<int>::max()));
+inline const uint64_t ITHS_BLOG_DELTA_MS = detail::number(
+    "STELLAR_EXPERIMENT_ITHS_DELTA_MS", defaults::ITHS_BLOG_DELTA_MS, 1, UINT64_MAX / 10);
+inline const uint64_t FORGET_IT_DELTA_MS = detail::number(
+    "STELLAR_EXPERIMENT_FORGET_IT_DELTA_MS", defaults::FORGET_IT_DELTA_MS, 1, UINT64_MAX / 4);
+inline const int FORCE_COLLECT_AFTER_SEC = static_cast<int>(detail::number(
+    "STELLAR_EXPERIMENT_FORCE_COLLECT_AFTER_SEC", defaults::FORCE_COLLECT_AFTER_SEC,
+    0, std::numeric_limits<int>::max()));
+inline const bool SHABDIZ_FAST_PATH_ONLY = detail::boolean(
+    "STELLAR_EXPERIMENT_SHABDIZ_FAST_PATH_ONLY", defaults::SHABDIZ_FAST_PATH_ONLY);
+inline const YCSBWorkload currentWorkload = detail::workload();
+
+using defaults::MAX_VIEW_HISTORY;
+using defaults::PBFT_HISTORY;
+using defaults::NORMAL_PATH_WINDOW;
+using defaults::MAX_COLLECT_ATTEMPTS;
+using defaults::SHABDIZ_VIEW_TIMEOUT_MS;
+using defaults::SHABDIZ_VIEW_TIMEOUT_STEP_MS;
+using defaults::NUM_TEST_ACCOUNTS;
+using defaults::SCP_NATIVE_ROUNDS;
+using defaults::SCP_OPS_PER_TX;
+using defaults::zipfian_alpha;
+using defaults::zipfian_n;
 } // namespace stellar::experiment
