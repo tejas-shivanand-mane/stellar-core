@@ -3,7 +3,6 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "util/Logging.h"
-#include "overlay/experiments/ExperimentConfig.h"
 #include "util/types.h"
 
 #if defined(USE_SPDLOG)
@@ -21,16 +20,6 @@
 
 namespace stellar
 {
-namespace
-{
-bool
-quietShabdizBenchmark()
-{
-    return experiment::PROTOCOL == "shabdiz" &&
-           experiment::SHABDIZ_FAST_PATH_ONLY;
-}
-}
-
 std::array<std::string const, 14> const Logging::kPartitionNames = {
 #define LOG_PARTITION(name) #name,
 #include "util/LogPartitions.def"
@@ -50,7 +39,7 @@ bool Logging::mLogToConsole = true;
 
 // Right now this is hard-coded to log messages at least as important as INFO
 CoutLogger::CoutLogger(LogLevel l)
-    : mShouldLog(!quietShabdizBenchmark() && l <= Logging::getLogLevel(""))
+    : mShouldLog(l <= Logging::getLogLevel(""))
 {
 }
 
@@ -106,7 +95,7 @@ Logging::init(bool truncate)
         using std::shared_ptr;
         std::vector<shared_ptr<sink>> sinks;
 
-        if (mLogToConsole && !quietShabdizBenchmark())
+        if (mLogToConsole)
         {
             auto console = (mColor ? static_cast<shared_ptr<sink>>(
                                          make_shared<stderr_color_sink_mt>())
@@ -115,7 +104,7 @@ Logging::init(bool truncate)
             sinks.emplace_back(console);
         }
 
-        if (!mLastFilenamePattern.empty() && !quietShabdizBenchmark())
+        if (!mLastFilenamePattern.empty())
         {
             VirtualClock clock(VirtualClock::REAL_TIME);
             std::time_t time = VirtualClock::to_time_t(clock.system_now());
@@ -196,15 +185,11 @@ Logging::init(bool truncate)
         }
         auto maxLevel = mGlobalLogLevel;
         spdlog::set_pattern(mLastPattern);
-        spdlog::set_level(quietShabdizBenchmark()
-                              ? spdlog::level::off
-                              : convert_loglevel(mGlobalLogLevel));
+        spdlog::set_level(convert_loglevel(mGlobalLogLevel));
         for (auto const& pair : mPartitionLogLevels)
         {
             maxLevel = std::max(maxLevel, pair.second);
-            spdlog::get(pair.first)->set_level(
-                quietShabdizBenchmark() ? spdlog::level::off
-                                       : convert_loglevel(pair.second));
+            spdlog::get(pair.first)->set_level(convert_loglevel(pair.second));
         }
         spdlog::flush_every(std::chrono::seconds(1));
         spdlog::flush_on(spdlog::level::err);
@@ -308,8 +293,7 @@ Logging::setLogLevel(LogLevel level, const char* partition)
 #if defined(USE_SPDLOG)
     deinit();
     init();
-    auto slev = quietShabdizBenchmark() ? spdlog::level::off
-                                      : convert_loglevel(level);
+    auto slev = convert_loglevel(level);
     if (partition)
     {
         spdlog::get(partition)->set_level(slev);

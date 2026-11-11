@@ -272,9 +272,13 @@ OverlayManagerImpl::initializePaperShabdiz()
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin "
               "prepared_pipeline=true fast_path_only={} archive={} "
-              "archive_format=sqlite_zlib archive_batch_blocks=1000",
+              "archive_format={} archive_batch_blocks={} "
+              "archive_memory_blocks={}",
               r->members.size(), r->engine->quorum(), SHABDIZ_FAST_PATH_ONLY,
-              archivePath.string());
+              archiveOptions.memoryOnly ? "none" : archivePath.string(),
+              archiveOptions.memoryOnly ? "memory_only" : "sqlite_zlib",
+              archiveOptions.memoryOnly ? 0 : archiveOptions.batchBlocks,
+              archiveOptions.memoryBlocks);
     mPaperShabdiz = std::move(r);
     mPaperShabdizTimer = std::make_unique<VirtualTimer>(mApp);
 }
