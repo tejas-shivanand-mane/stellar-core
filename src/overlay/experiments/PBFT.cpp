@@ -3,534 +3,779 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "crypto/SHA.h"
+#include "crypto/SecretKey.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/OverlayManagerImpl.h"
 #include "overlay/experiments/ExperimentState.h"
-#include "util/GlobalChecks.h"
+#include "scp/LocalNode.h"
 #include "util/Logging.h"
+#include "xdrpp/marshal.h"
 
 namespace stellar
 {
 using namespace experiment;
 
-struct PbftSlotKey
+namespace
 {
-    uint64_t view; // PBFT view, fixed to 0 without view change
-    uint64_t seq;  // PBFT sequence number
+enum Kind : uint32_t
+{
+    ClientWork,
+    Proposal,
+    Prepare,
+    Commit,
+    ViewChange,
+    NewView,
+    Fetch,
+    Decision,
+    Status
+};
+using Clock = std::chrono::steady_clock;
+using Votes = std::map<uint32_t, PbftVote>;
+
+Hash
+valueDigest(uint64_t originView, std::string const& value)
+{
+    return sha256(xdr::xdr_to_opaque(originView, xdr::xstring<90000>(value)));
+}
+
+bool
+validBatch(std::string const& value)
+{
+    if (value.empty() || value.size() > 90000)
+        return false;
+    try
+    {
+        auto b = TransactionBatch::deserialize(value);
+        return b.transactions.size() == SERVER_BATCH_SIZE &&
+               b.serialize() == value;
+    }
+    catch (std::exception const&)
+    {
+        return false;
+    }
+}
+}
+
+// A replica votes only on its next unexecuted sequence number. Its previous
+// decision is an implicit low watermark. This makes a view-change report
+// contain at most one prepared certificate. Peers behind the watermark can
+// request the ordered decisions, each accompanied by a commit certificate.
+struct OverlayManagerImpl::PbftRuntime
+{
+    OverlayManagerImpl& owner;
+    std::vector<NodeID> members;
+    uint32_t self;
+    size_t quorum;
+    Hash domain;
+    uint64_t seq = 1, base = 1, view = 1;
+    bool changing = false;
+    bool synthetic = false;
+    Clock::time_point deadline{}, retry{}, lastFetch{}, lastRepeat{},
+        lastStatus{};
+    uint64_t highestSeen = 1;
+    std::string pending; // ingress keeps its client requests until execution
+    std::vector<ClientAck> acks;
+    std::string candidate;
+    std::optional<PbftPacket> proposal, prepared, required, ownChange;
+    Votes prepares, commits;
+    std::map<uint32_t, std::pair<Hash, PbftVote>> earlyPrepares, earlyCommits;
+    std::map<uint32_t, uint64_t> requested;
+    std::map<uint32_t, PbftPacket> changes;
+    std::map<uint64_t, PbftPacket> history;
+    std::map<uint32_t, std::vector<PbftPacket>> nextPackets;
+    bool sentNewView = false;
+
+    explicit PbftRuntime(OverlayManagerImpl& o) : owner(o)
+    {
+        auto const& cfg = owner.mApp.getConfig();
+        std::set<NodeID> ids{cfg.NODE_SEED.getPublicKey()};
+        LocalNode::forAllNodes(cfg.QUORUM_SET, [&](NodeID const& id) {
+            ids.insert(id);
+            return true;
+        });
+        members.assign(ids.begin(), ids.end());
+        if (members.size() < 4 || members.size() > 256)
+            throw std::invalid_argument("PBFT requires 4..256 fixed replicas");
+        self = std::lower_bound(members.begin(), members.end(),
+                                cfg.NODE_SEED.getPublicKey()) -
+               members.begin();
+        quorum = members.size() - (members.size() - 1) / 3;
+        xdr::xvector<NodeID, 256> roster(members.begin(), members.end());
+        domain = sha256(xdr::xdr_to_opaque(xdr::xstring<>("stellar-pbft-v1"),
+                                           owner.mApp.getNetworkID(), roster,
+                                           bool(PBFT_ROTATING)));
+        CLOG_INFO(Overlay,
+                  "[PBFT CONFIG] protocol={} quorum={} timeout_ms={} "
+                  "rotation_batches={} primary={} signatures=ed25519",
+                  PROTOCOL, quorum, PBFT_TIMEOUT_MS, PBFT_ROTATING ? 1 : 0,
+                  KeyUtils::toShortString(members[0]));
+    }
+
+    uint32_t
+    leader(uint64_t v) const
+    {
+        return (v - 1) % members.size();
+    }
+
+    // On the normal path the primary's signed proposal and Q-1 distinct
+    // backup prepares form a transferable prepared certificate.
+    auto
+    statement(uint32_t kind, uint64_t v, Hash const& digest,
+              uint64_t preparedView = 0) const
+    {
+        return xdr::xdr_to_opaque(domain, kind, seq, v, digest, preparedView);
+    }
+
+    PbftVote
+    sign(uint32_t k, uint64_t v, Hash const& d, uint64_t pv = 0)
+    {
+        PbftVote a;
+        a.signer = self;
+        a.signature =
+            owner.mApp.getConfig().NODE_SEED.sign(statement(k, v, d, pv));
+        return a;
+    }
 
     bool
-    operator==(PbftSlotKey const& other) const noexcept
+    verify(PbftVote const& a, uint32_t k, uint64_t v, Hash const& d,
+           uint64_t pv = 0) const
     {
-        return view == other.view && seq == other.seq;
+        return a.signer < members.size() &&
+               PubKeyUtils::verifySig(members[a.signer], a.signature,
+                                      statement(k, v, d, pv));
     }
-};
 
-struct PbftSlotKeyHash
-{
-    size_t
-    operator()(PbftSlotKey const& k) const noexcept
+    void
+    send(PbftPacket const& p, std::optional<uint32_t> recipient = {},
+         std::optional<uint64_t> sequence = {})
     {
-        return std::hash<uint64_t>()(k.view) ^
-               (std::hash<uint64_t>()(k.seq) << 1);
+        auto bytes = xdr::xdr_to_opaque(p);
+        auto msg = std::make_shared<StellarMessage>();
+        msg->type(CUSTOM_MESSAGE);
+        auto& cm = msg->customMessage();
+        cm.msgType = CUSTOM_PBFT_NATIVE;
+        cm.view = sequence.value_or(seq);
+        cm.data.assign(bytes.begin(), bytes.end());
+        transmit(msg, recipient);
     }
-};
 
-struct HashHash
-{
-    size_t
-    operator()(Hash const& h) const noexcept
+    void
+    transmit(std::shared_ptr<StellarMessage> const& msg,
+             std::optional<uint32_t> recipient)
     {
-        size_t out = 0;
-        for (auto b : h)
+        auto peers = owner.getAuthenticatedPeers();
+        if (recipient)
         {
-            out = (out * 131) ^ b;
+            auto it = peers.find(members[*recipient]);
+            if (it != peers.end())
+                it->second->sendMessage(msg);
         }
-        return out;
+        else
+            for (auto const& [id, peer] : peers)
+                if (std::binary_search(members.begin(), members.end(), id))
+                    peer->sendMessage(msg);
+    }
+
+    PbftPacket
+    packet(Kind k) const
+    {
+        PbftPacket p{};
+        p.kind = k;
+        p.view = view;
+        return p;
+    }
+
+    void
+    arm()
+    {
+        if (deadline == Clock::time_point{})
+        {
+            auto planned = PBFT_ROTATING && seq > 1 ? 1u : 0u;
+            auto shifts = std::min<uint64_t>(view - base - planned, 10);
+            deadline = Clock::now() +
+                       std::chrono::milliseconds(PBFT_TIMEOUT_MS << shifts);
+        }
+    }
+
+    bool
+    validValue(PbftPacket const& p, uint64_t atView) const
+    {
+        return p.valueView >= base && p.valueView <= atView &&
+               validBatch(p.value) &&
+               valueDigest(p.valueView, p.value) == p.digest;
+    }
+
+    bool
+    certificate(PbftPacket const& p, uint64_t atView, bool decision) const
+    {
+        if (p.proof.size() != quorum || !validValue(p, atView))
+            return false;
+        std::set<uint32_t> seen;
+        for (auto const& a : p.proof)
+        {
+            uint32_t k =
+                decision ? Commit
+                         : (a.signer == leader(atView) ? Proposal : Prepare);
+            if (!seen.insert(a.signer).second ||
+                !verify(a, k, atView, p.digest))
+                return false;
+        }
+        return decision || seen.count(leader(atView));
+    }
+
+    void
+    input()
+    {
+        if (!owner.mApp.getConfig().SEND_CUSTOM_MESSAGE ||
+            (!g_clientListenerActive && !synthetic))
+            return;
+        if (pending.empty())
+        {
+            TransactionBatch b;
+            if (g_clientListenerActive)
+            {
+                if (!tryBuildServerBatch(b, acks))
+                    return;
+            }
+            else
+            {
+                b = makeSyntheticYCSBBatch(
+                    owner.mApp, KeyUtils::toShortString(members[self]),
+                    txn_count, SERVER_BATCH_SIZE);
+            }
+            txn_count += b.transactions.size();
+            pending = b.serialize();
+            if (!validBatch(pending))
+                throw std::invalid_argument(
+                    "PBFT client batch exceeds the wire limit or is invalid");
+        }
+        auto now = Clock::now();
+        if (retry > now)
+            return;
+        bool retransmit = retry != Clock::time_point{};
+        retry = now + std::chrono::milliseconds(
+                          std::max<uint64_t>(100, PBFT_TIMEOUT_MS / 2));
+        candidate = pending;
+        arm();
+        if (leader(view) != self || retransmit)
+        {
+            auto w = packet(ClientWork);
+            w.value = pending;
+            // Wake backups if a primary stops before sending its proposal.
+            if (retransmit)
+                send(w);
+            else
+                send(w, leader(view));
+        }
+        propose();
+    }
+
+    void
+    propose()
+    {
+        if (changing || self != leader(view) || proposal ||
+            (!required && candidate.empty()))
+            return;
+        auto p = packet(Proposal);
+        p.valueView = required ? required->valueView : view;
+        p.value = required ? required->value : candidate;
+        p.digest = valueDigest(p.valueView, p.value);
+        p.proof.push_back(sign(Proposal, view, p.digest));
+        send(p);
+        normal(self, p);
+    }
+
+    void
+    advance()
+    {
+        if (changing || !proposal)
+            return;
+        if (prepares.size() >= quorum && (!prepared || prepared->view != view))
+        {
+            prepared = proposal;
+            prepared->proof.clear();
+            // Always include the primary, even if its index is last.
+            prepared->proof.push_back(proposal->proof.front());
+            for (auto const& [id, a] : prepares)
+                if (id != leader(view) && prepared->proof.size() < quorum)
+                    prepared->proof.push_back(a);
+            auto c = packet(Commit);
+            c.digest = proposal->digest;
+            c.proof.push_back(sign(Commit, view, c.digest));
+            commits.emplace(self, c.proof.front());
+            send(c);
+        }
+        if (prepared && prepared->view == view && commits.size() >= quorum)
+        {
+            auto d = *proposal;
+            d.kind = Decision;
+            d.proof.clear();
+            for (auto const& [id, a] : commits)
+                if (d.proof.size() < quorum)
+                    d.proof.push_back(a);
+            execute(d);
+        }
+    }
+
+    void
+    normal(uint32_t sender, PbftPacket const& p)
+    {
+        if (p.view != view || p.proof.size() != 1 || !p.reports.empty() ||
+            p.proof.front().signer != sender)
+            return;
+        if (p.kind == Proposal)
+        {
+            if (sender != leader(view) || proposal || !validValue(p, view) ||
+                (!changing && !allowedProposal(p)) ||
+                !verify(p.proof.front(), Proposal, view, p.digest))
+                return;
+            proposal = p;
+            if (changing)
+                return; // NEW-VIEW may be delivered after PRE-PREPARE
+            acceptProposal();
+        }
+        else
+        {
+            if ((p.kind == Prepare && sender == leader(view)) ||
+                !p.value.empty() || p.valueView != 0 ||
+                !verify(p.proof.front(), p.kind, view, p.digest))
+                return;
+            if (changing || !proposal)
+            {
+                auto& early = p.kind == Prepare ? earlyPrepares : earlyCommits;
+                early.emplace(sender,
+                              std::make_pair(p.digest, p.proof.front()));
+                return;
+            }
+            if (proposal->digest != p.digest)
+                return;
+            (p.kind == Prepare ? prepares : commits)
+                .emplace(sender, p.proof.front());
+            advance();
+        }
+    }
+
+    bool
+    allowedProposal(PbftPacket const& p) const
+    {
+        return required ? p.digest == required->digest : p.valueView == view;
+    }
+
+    void
+    acceptProposal()
+    {
+        auto const& p = *proposal;
+        arm();
+        prepares.emplace(leader(view), p.proof.front());
+        for (auto const& [id, vote] : earlyPrepares)
+            if (vote.first == p.digest)
+                prepares.emplace(id, vote.second);
+        for (auto const& [id, vote] : earlyCommits)
+            if (vote.first == p.digest)
+                commits.emplace(id, vote.second);
+        earlyPrepares.clear();
+        earlyCommits.clear();
+        if (leader(view) != self)
+        {
+            auto m = packet(Prepare);
+            m.digest = p.digest;
+            m.proof.push_back(sign(Prepare, view, m.digest));
+            prepares.emplace(self, m.proof.front());
+            send(m);
+        }
+        advance();
+    }
+
+    void
+    clearRound()
+    {
+        proposal.reset();
+        required.reset();
+        ownChange.reset();
+        prepares.clear();
+        commits.clear();
+        earlyPrepares.clear();
+        earlyCommits.clear();
+        changes.clear();
+        sentNewView = false;
+        deadline = {};
+    }
+
+    void
+    change(uint64_t target)
+    {
+        if (target <= view)
+            return;
+        clearRound(); // keep the highest prepared certificate across views
+        view = target;
+        changing = true;
+        arm();
+        auto p = packet(ViewChange);
+        PbftReport r{};
+        if (prepared)
+        {
+            r.preparedView = prepared->view;
+            r.digest = p.digest = prepared->digest;
+            p.valueView = prepared->valueView;
+            p.value = prepared->value;
+            p.proof = prepared->proof;
+        }
+        r.author = sign(ViewChange, view, r.digest, r.preparedView);
+        p.reports.push_back(r);
+        CLOG_INFO(Overlay, "[PBFT VIEW-CHANGE] seq={} view={} prepared_view={}",
+                  seq, view, r.preparedView);
+        ownChange = p;
+        send(p);
+        recordChange(self, p);
+    }
+
+    bool
+    validReport(PbftReport const& r, uint64_t target) const
+    {
+        return (r.preparedView
+                    ? (r.preparedView >= base && r.preparedView < target)
+                    : r.digest == Hash{}) &&
+               verify(r.author, ViewChange, target, r.digest, r.preparedView);
+    }
+
+    // Validate the individual reports at the new primary. NEW-VIEW carries
+    // all Q signed summaries and only the highest prepared certificate. Every
+    // backup recomputes that choice and verifies the same transferable proof.
+    void
+    recordChange(uint32_t sender, PbftPacket const& p)
+    {
+        if (p.view <= base || p.view < view || p.reports.size() != 1)
+            return;
+        auto const& r = p.reports.front();
+        if (r.author.signer != sender || r.digest != p.digest ||
+            !validReport(r, p.view))
+            return;
+        if (r.preparedView
+                ? !certificate(p, r.preparedView, false)
+                : (!p.proof.empty() || !p.value.empty() || p.valueView))
+            return;
+        auto& wanted = requested[sender];
+        wanted = std::max(wanted, p.view);
+        // Refuse a view jump based on a single replica's request.
+        if (p.view > view)
+        {
+            std::vector<uint64_t> ahead;
+            for (auto const& [id, v] : requested)
+                if (v > view)
+                    ahead.push_back(v);
+            auto faults = members.size() - quorum;
+            if (ahead.size() > faults)
+            {
+                // At least f+1 distinct members requested this view or later.
+                std::sort(ahead.begin(), ahead.end(), std::greater<uint64_t>());
+                change(ahead[faults]);
+            }
+        }
+        if (!changing || view != p.view || leader(view) != self || sentNewView)
+            return;
+        changes.emplace(sender, p);
+        if (changes.size() < quorum)
+            return;
+        auto nv = packet(NewView);
+        uint64_t high = 0;
+        for (auto const& [id, vc] : changes)
+        {
+            auto const& report = vc.reports.front();
+            nv.reports.push_back(report);
+            if (report.preparedView > high)
+            {
+                high = report.preparedView;
+                nv.digest = vc.digest;
+                nv.valueView = vc.valueView;
+                nv.value = vc.value;
+                nv.proof = vc.proof;
+            }
+        }
+        changes.clear();
+        sentNewView = true;
+        send(nv);
+        install(self, nv);
+    }
+
+    void
+    install(uint32_t sender, PbftPacket const& p)
+    {
+        if (p.view <= base || p.view < view || (p.view == view && !changing) ||
+            leader(p.view) != sender || p.reports.size() != quorum)
+            return;
+        std::set<uint32_t> seen;
+        uint64_t high = 0;
+        Hash selected{};
+        for (auto const& r : p.reports)
+        {
+            if (!seen.insert(r.author.signer).second || !validReport(r, p.view))
+                return;
+            if (r.preparedView > high)
+            {
+                selected = r.digest;
+                high = r.preparedView;
+            }
+            else if (r.preparedView == high && r.digest != selected)
+                return;
+        }
+        if (p.digest != selected ||
+            (high ? !certificate(p, high, false)
+                  : (!p.proof.empty() || !p.value.empty() || p.valueView)))
+            return;
+        if (view != p.view)
+            clearRound();
+        view = p.view;
+        changing = false;
+        ownChange.reset();
+        if (high)
+            required = p;
+        CLOG_INFO(Overlay,
+                  "[PBFT NEW-VIEW] seq={} view={} primary={} reports={} "
+                  "prepared_view={}",
+                  seq, view, KeyUtils::toShortString(members[sender]),
+                  seen.size(), high);
+        deadline = {};
+        if (required || !candidate.empty() || !pending.empty())
+            arm();
+        if (proposal && !allowedProposal(*proposal))
+            proposal.reset();
+        if (proposal)
+            acceptProposal();
+        else
+            propose();
+    }
+
+    void
+    execute(PbftPacket const& d)
+    {
+        auto b = TransactionBatch::deserialize(d.value);
+        for (auto const& txn : b.transactions)
+        {
+            std::istringstream input(txn.payload);
+            std::string op, key, value;
+            input >> op >> key;
+            if (op == "READ")
+                (void)g_kvStore.find(key);
+            else if ((op == "UPDATE" || op == "RMW") && (input >> value))
+                g_kvStore[key] = value;
+        }
+        if (!pending.empty() && pending == d.value)
+        {
+            if (!acks.empty())
+            {
+                auto h = sha256(pending);
+                g_blockClientAcks[BlockKey{seq, h}] = std::move(acks);
+                ackClientBatchesForBlock(seq, h);
+            }
+            pending.clear();
+            acks.clear();
+        }
+        CLOG_INFO(Overlay,
+                  "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} txns={}",
+                  d.view, seq, hexAbbrev(d.digest), b.transactions.size());
+        history.emplace(seq, d);
+        if (history.size() > PBFT_HISTORY)
+            history.erase(history.begin());
+        // Bind the next sequence's initial primary to the decided value.
+        // Replicas can learn the same value in different commit views.
+        auto lastView = std::max(view, d.view);
+        base = d.valueView;
+        ++seq;
+        view = base;
+        clearRound();
+        prepared.reset();
+        requested.clear();
+        candidate.clear();
+        changing = false;
+        retry = {};
+        auto early = std::move(nextPackets);
+        nextPackets.clear();
+        auto replaySeq = seq;
+        // A carried-over value may have originated under a failed primary.
+        // Keep the installed view (rotate from it in the scheduled policy).
+        // Reconcile different commit views through the same certified handoff.
+        auto target = lastView + (PBFT_ROTATING ? 1 : 0);
+        if (target > base)
+            change(target);
+        for (auto const& [id, packets] : early)
+            for (auto const& p : packets)
+                if (seq == replaySeq)
+                    receive(id, replaySeq, p);
+        input();
+    }
+
+    void
+    fetch()
+    {
+        auto now = Clock::now();
+        if (now - lastFetch >= std::chrono::milliseconds(250))
+        {
+            lastFetch = now;
+            send(packet(Fetch));
+        }
+    }
+
+    void
+    receive(uint32_t sender, uint64_t s, PbftPacket const& p)
+    {
+        if (!s || !p.view || p.kind > Status)
+            return;
+        if (p.kind == Status)
+        {
+            if (s > seq)
+            {
+                highestSeen = std::max(highestSeen, s);
+                fetch();
+            }
+            return;
+        }
+        if (p.kind == Fetch)
+        {
+            auto i = history.find(s);
+            if (i != history.end())
+                send(i->second, sender, s);
+            return;
+        }
+        if (s < seq)
+            return;
+        if (s > seq)
+        {
+            highestSeen = std::max(highestSeen, s);
+            // Peers can execute a batch a few messages apart. Replay bounded
+            // next-slot traffic immediately after execution, in arrival order
+            // per sender. Request a certified decision for longer gaps.
+            if (s == seq + 1 && nextPackets[sender].size() < 8)
+                nextPackets[sender].push_back(p);
+            if (s > seq + 1)
+                fetch();
+            return;
+        }
+        switch (p.kind)
+        {
+        case ClientWork:
+            if (candidate.empty() && validBatch(p.value))
+                candidate = p.value;
+            if (!candidate.empty())
+            {
+                arm();
+                propose();
+            }
+            break;
+        case Proposal:
+        case Prepare:
+        case Commit:
+            normal(sender, p);
+            break;
+        case ViewChange:
+            recordChange(sender, p);
+            break;
+        case NewView:
+            install(sender, p);
+            break;
+        case Decision:
+            if (p.reports.empty() && p.view >= base &&
+                certificate(p, p.view, true))
+                execute(p);
+            break;
+        }
+    }
+
+    void
+    tick()
+    {
+        auto now = Clock::now();
+        // A reconnecting replica can miss the last decision of an idle run.
+        // Advertise just the next sequence number. Payloads are sent on demand.
+        if (now - lastStatus >= std::chrono::seconds(1))
+        {
+            lastStatus = now;
+            send(packet(Status));
+        }
+        if (highestSeen > seq)
+            fetch();
+        if (deadline != Clock::time_point{} && now >= deadline)
+        {
+            fetch();
+            change(view + 1);
+        }
+        else if (changing && now - lastRepeat >= std::chrono::milliseconds(250))
+        {
+            // An early request may have arrived before its target entered the
+            // view. Repeat our own signed report so a live primary can finish.
+            lastRepeat = now;
+            if (ownChange)
+                send(*ownChange);
+        }
+        input();
     }
 };
 
-struct PbftState
+void
+OverlayManagerImpl::initializePBFT()
 {
-    bool prePrepared = false;
-    bool prepareSent = false;
-    bool prepared = false;
-    bool commitSent = false;
-    bool committedLocal = false;
-    bool executed = false;
-
-    Hash digest{};
-    std::string data;
-
-    std::unordered_map<Hash, std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
-                       HashHash>
-        prepareVotersByDigest;
-
-    std::unordered_map<Hash, std::unordered_set<NodeID, NodeIDHash, NodeIDEq>,
-                       HashHash>
-        commitVotersByDigest;
-};
-
-static size_t
-pbftPrepareCount(PbftState const& st, Hash const& digest)
-{
-    auto it = st.prepareVotersByDigest.find(digest);
-    if (it == st.prepareVotersByDigest.end())
-    {
-        return 0;
-    }
-    return it->second.size();
-}
-
-static size_t
-pbftCommitCount(PbftState const& st, Hash const& digest)
-{
-    auto it = st.commitVotersByDigest.find(digest);
-    if (it == st.commitVotersByDigest.end())
-    {
-        return 0;
-    }
-    return it->second.size();
-}
-
-static std::unordered_map<PbftSlotKey, PbftState, PbftSlotKeyHash> g_pbft;
-static std::unordered_map<PbftSlotKey, Hash, PbftSlotKeyHash>
-    g_pbftAcceptedDigest;
-
-static uint64_t g_pbftView = 0;
-static uint64_t g_pbftNextSeq = 1;
-static uint64_t g_pbftLastExecuted = 0;
-
-static Hash
-pbftDigest(std::string const& data)
-{
-    return sha256(data);
+    mPbft = std::make_shared<PbftRuntime>(*this);
 }
 
 void
 OverlayManagerImpl::pbftProp()
 {
-
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-    std::string shortID = KeyUtils::toShortString(selfID);
-
-    if (!mApp.getConfig().SEND_CUSTOM_MESSAGE)
+    if (mPbft)
     {
+        mPbft->synthetic = !g_clientListenerActive;
+        mPbft->input();
+    }
+}
+
+void
+OverlayManagerImpl::tickPBFT()
+{
+    if (!mPbft || mShuttingDown)
         return;
-    }
-
-    if (g_pbftNextSeq != g_pbftLastExecuted + 1)
+    if (!mPbftTimer)
     {
-        CLOG_DEBUG(Overlay,
-                   "[PBFT PROP SKIP] one slot already in flight: "
-                   "nextSeq={} lastExecuted={}",
-                   g_pbftNextSeq, g_pbftLastExecuted);
-        return;
+        mPbftTimer = std::make_unique<VirtualTimer>(mApp);
+        armPbftTimer();
     }
-
-    TransactionBatch batch;
-    bool fromExternalClient = false;
-    std::vector<ClientAck> clientAcks;
-
-    if (g_clientListenerActive)
-    {
-        if (!tryBuildServerBatch(batch, clientAcks))
-        {
-            CLOG_DEBUG(Overlay,
-                       "[PBFT CLIENT] Only {} queued requests; need {}",
-                       getClientRequestQueueSize(), SERVER_BATCH_SIZE);
-            return;
-        }
-
-        fromExternalClient = true;
-
-        releaseAssert(batch.transactions.size() == SERVER_BATCH_SIZE);
-        releaseAssert(clientAcks.size() == SERVER_BATCH_SIZE);
-    }
-    else
-    {
-        batch =
-            makeSyntheticYCSBBatch(mApp, shortID, txn_count, SERVER_BATCH_SIZE);
-    }
-
-    if (batch.transactions.empty())
-    {
-        CLOG_WARNING(Overlay, "[PBFT PROP SKIP] empty batch");
-        return;
-    }
-
-    txn_count += batch.transactions.size();
-
-    std::string data = batch.serialize();
-    Hash digest = pbftDigest(data);
-
-    CLOG_DEBUG(
-        Overlay, "[PBFT BATCH SIZE] txns={} data_bytes={} bytes_per_txn={}",
-        batch.transactions.size(), data.size(),
-        batch.transactions.empty() ? 0
-                                   : data.size() / batch.transactions.size());
-
-    uint64_t view = g_pbftView;
-    uint64_t seq = g_pbftNextSeq++;
-
-    PbftSlotKey slot{view, seq};
-    auto& st = g_pbft[slot];
-
-    st.prePrepared = true;
-    st.digest = digest;
-    st.data = data;
-
-    g_pbftAcceptedDigest[slot] = digest;
-
-    if (fromExternalClient)
-    {
-        // For benchmark compatibility with current shab_client:
-        // use seq as the "view" field in existing ACK map.
-        BlockKey ackKey{seq, digest};
-        auto& acks = g_blockClientAcks[ackKey];
-        acks.insert(acks.end(), clientAcks.begin(), clientAcks.end());
-    }
-
-    CLOG_INFO(
-        Overlay,
-        "[PBFT SEND PRE-PREPARE] view={} seq={} digest={} txns={} source={}",
-        view, seq, hexAbbrev(digest), batch.transactions.size(),
-        fromExternalClient ? "external-client" : "synthetic");
-
-    sendPBFTPrePrepare(view, seq, digest, data);
-
-    // The primary does not send PREPARE;
-    // replicas use a 2f PREPARE threshold.
-    //
+    mPbft->tick();
 }
 
 void
-OverlayManagerImpl::sendPBFTPrePrepare(uint64_t pbftView, uint64_t seq,
-                                       Hash const& digest,
-                                       std::string const& data)
+OverlayManagerImpl::armPbftTimer()
 {
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-
-    msg->customMessage().msgType = CUSTOM_PBFT_PRE_PREPARE;
-
-    // Reuse fields:
-    // view = PBFT sequence number
-    // vp   = PBFT view number
-    msg->customMessage().view = seq;
-    msg->customMessage().vp = pbftView;
-    msg->customMessage().blockHash = digest;
-    msg->customMessage().data = data;
-
-    broadcastMessage(msg);
-
-    CLOG_DEBUG(Overlay, "[PBFT PRE-PREPARE] view={} seq={} digest={}", pbftView,
-               seq, hexAbbrev(digest));
-}
-
-void
-OverlayManagerImpl::sendPBFTPrepare(uint64_t pbftView, uint64_t seq,
-                                    Hash const& digest)
-{
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-
-    msg->customMessage().msgType = CUSTOM_PBFT_PREPARE;
-    msg->customMessage().view = seq;
-    msg->customMessage().vp = pbftView;
-    msg->customMessage().blockHash = digest;
-
-    // Castro-Liskov, OSDI 1999, section 4.2: votes carry the digest,
-    // not the request piggybacked on PRE-PREPARE.
-    msg->customMessage().data.clear();
-
-    broadcastMessage(msg);
-
-    CLOG_DEBUG(Overlay, "[PBFT PREPARE] view={} seq={} digest={}", pbftView,
-               seq, hexAbbrev(digest));
-}
-
-void
-OverlayManagerImpl::sendPBFTCommit(uint64_t pbftView, uint64_t seq,
-                                   Hash const& digest)
-{
-    auto msg = std::make_shared<StellarMessage>();
-    msg->type(CUSTOM_MESSAGE);
-
-    msg->customMessage().msgType = CUSTOM_PBFT_COMMIT;
-    msg->customMessage().view = seq;
-    msg->customMessage().vp = pbftView;
-    msg->customMessage().blockHash = digest;
-
-    // Castro-Liskov, OSDI 1999, section 4.2: votes carry the digest,
-    // not the request piggybacked on PRE-PREPARE.
-    msg->customMessage().data.clear();
-
-    broadcastMessage(msg);
-
-    CLOG_DEBUG(Overlay, "[PBFT COMMIT] view={} seq={} digest={}", pbftView, seq,
-               hexAbbrev(digest));
-}
-
-void
-OverlayManagerImpl::tryExecutePBFT()
-{
-    while (true)
-    {
-        uint64_t nextSeq = g_pbftLastExecuted + 1;
-        PbftSlotKey slot{g_pbftView, nextSeq};
-
-        auto it = g_pbft.find(slot);
-        if (it == g_pbft.end())
-        {
-            return;
-        }
-
-        auto& st = it->second;
-
-        if (!st.committedLocal || st.executed)
-        {
-            return;
-        }
-
-        TransactionBatch batch = TransactionBatch::deserialize(st.data);
-
-        for (auto const& txn : batch.transactions)
-        {
-            std::istringstream ss(txn.payload);
-
-            std::string op;
-            std::string key;
-            std::string value;
-
-            ss >> op >> key;
-
-            if (op == "READ")
+    mPbftTimer->expires_from_now(
+        std::chrono::milliseconds(std::min<uint64_t>(100, PBFT_TIMEOUT_MS)));
+    mPbftTimer->async_wait(
+        [this]() {
+            if (!mShuttingDown)
             {
-                auto kvIt = g_kvStore.find(key);
-                (void)kvIt;
+                mPbft->tick();
+                armPbftTimer();
             }
-            else if (op == "UPDATE" || op == "RMW")
-            {
-                ss >> value;
-                g_kvStore[key] = value;
-            }
-        }
-
-        st.executed = true;
-        g_pbftLastExecuted = nextSeq;
-
-        if (g_pbftLastExecuted > PBFT_HISTORY)
-        {
-            uint64_t cutoff = g_pbftLastExecuted - PBFT_HISTORY;
-
-            for (auto it = g_pbft.begin(); it != g_pbft.end();)
-            {
-                if (it->first.seq < cutoff)
-                    it = g_pbft.erase(it);
-                else
-                    ++it;
-            }
-
-            for (auto it = g_pbftAcceptedDigest.begin();
-                 it != g_pbftAcceptedDigest.end();)
-            {
-                if (it->first.seq < cutoff)
-                    it = g_pbftAcceptedDigest.erase(it);
-                else
-                    ++it;
-            }
-        }
-
-        CLOG_DEBUG(Overlay, "[PBFT EXECUTED] view={} seq={} digest={} txns={}",
-                   g_pbftView, nextSeq, hexAbbrev(st.digest),
-                   batch.transactions.size());
-
-        // Benchmark-compatible ACK to current shab_client.
-        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        {
-            ackClientBatchesForBlock(nextSeq, st.digest);
-        }
-
-        if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
-        {
-            prop();
-        }
-    }
+        },
+        VirtualTimer::onFailureNoop);
 }
 
 void
-OverlayManagerImpl::tryAdvancePBFT(uint64_t view, uint64_t seq,
-                                   Hash const& digest)
+OverlayManagerImpl::handlePBFTMessage(CustomMessage const& cm,
+                                      NodeID const& sender)
 {
-    PbftSlotKey slot{view, seq};
-    auto& st = g_pbft[slot];
-
-    if (seq <= g_pbftLastExecuted)
+    if (!mPbft)
+        return;
+    auto i =
+        std::lower_bound(mPbft->members.begin(), mPbft->members.end(), sender);
+    if (i == mPbft->members.end() || !(*i == sender))
+        return;
+    PbftPacket p;
+    try
     {
-        CLOG_INFO(Overlay, "[PBFT DROP OLD] view={} seq={} lastExecuted={}",
-                  view, seq, g_pbftLastExecuted);
+        std::vector<char> bytes(cm.data.begin(), cm.data.end());
+        xdr::xdr_from_opaque(bytes, p);
+    }
+    catch (xdr::xdr_runtime_error const&)
+    {
         return;
     }
-
-    if (!st.prePrepared || st.digest != digest)
-    {
-        return;
-    }
-
-    size_t prepareCount = pbftPrepareCount(st, digest);
-
-    if (!st.prepared && prepareCount >= 2 * f)
-    {
-        st.prepared = true;
-
-        CLOG_DEBUG(Overlay,
-                   "[PBFT PREPARED] view={} seq={} digest={} prepares={} "
-                   "threshold={} N={} f={}",
-                   view, seq, hexAbbrev(digest), prepareCount, 2 * f, N, f);
-
-        if (!st.commitSent)
-        {
-            st.commitSent = true;
-
-            st.commitVotersByDigest[digest].insert(
-                mApp.getConfig().NODE_SEED.getPublicKey());
-
-            sendPBFTCommit(view, seq, digest);
-        }
-    }
-
-    size_t commitCount = pbftCommitCount(st, digest);
-
-    CLOG_DEBUG(Overlay,
-               "[PBFT COMMIT CHECK] view={} seq={} digest={} commits={} "
-               "threshold={} prepared={} N={} f={}",
-               view, seq, hexAbbrev(digest), commitCount, 2 * f + 1,
-               st.prepared, N, f);
-
-    if (st.prepared && !st.committedLocal && commitCount >= 2 * f + 1)
-    {
-        st.committedLocal = true;
-
-        CLOG_INFO(Overlay,
-                  "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} commits={}",
-                  view, seq, hexAbbrev(digest), commitCount);
-
-        tryExecutePBFT();
-    }
+    mPbft->receive(i - mPbft->members.begin(), cm.view, p);
 }
-
-void
-OverlayManagerImpl::handlePBFTMessage(StellarMessage const& stellarMsg,
-                                      Peer::pointer peer)
-{
-    auto const& cm = stellarMsg.customMessage();
-
-    NodeID sender = peer->getPeerID();
-    NodeID selfID = mApp.getConfig().NODE_SEED.getPublicKey();
-
-    uint64_t seq = cm.view;
-    uint64_t view = cm.vp;
-    Hash digest = cm.blockHash;
-
-    if (view != g_pbftView)
-    {
-        CLOG_DEBUG(Overlay,
-                   "[PBFT DROP] wrong view msgView={} localView={} seq={}",
-                   view, g_pbftView, seq);
-        return;
-    }
-
-    PbftSlotKey slot{view, seq};
-    auto& st = g_pbft[slot];
-
-    switch (cm.msgType)
-    {
-    case CUSTOM_PBFT_PRE_PREPARE:
-    {
-        auto existing = g_pbftAcceptedDigest.find(slot);
-        if (existing != g_pbftAcceptedDigest.end() &&
-            existing->second != digest)
-        {
-            CLOG_WARNING(
-                Overlay,
-                "[PBFT REJECT PRE-PREPARE] conflicting digest view={} seq={}",
-                view, seq);
-            return;
-        }
-
-        if (pbftDigest(cm.data) != digest)
-        {
-            CLOG_WARNING(
-                Overlay,
-                "[PBFT REJECT PRE-PREPARE] digest mismatch view={} seq={}",
-                view, seq);
-            return;
-        }
-
-        g_pbftAcceptedDigest[slot] = digest;
-
-        st.prePrepared = true;
-        st.digest = digest;
-        st.data = cm.data;
-
-        if (!st.prepareSent)
-        {
-            st.prepareSent = true;
-
-            // Count own PREPARE.
-            st.prepareVotersByDigest[digest].insert(selfID);
-
-            sendPBFTPrepare(view, seq, digest);
-        }
-
-        CLOG_DEBUG(Overlay,
-                   "[PBFT GOT PRE-PREPARE] view={} seq={} digest={} "
-                   "prepares_buffered={} commits_buffered={}",
-                   view, seq, hexAbbrev(digest), pbftPrepareCount(st, digest),
-                   pbftCommitCount(st, digest));
-
-        // Re-evaluate buffered votes after accepting the PRE-PREPARE.
-        tryAdvancePBFT(view, seq, digest);
-
-        return;
-    }
-
-    case CUSTOM_PBFT_PREPARE:
-    {
-        bool inserted = st.prepareVotersByDigest[digest].insert(sender).second;
-
-        CLOG_DEBUG(Overlay,
-                   "[PBFT PREPARE VOTE] view={} seq={} digest={} inserted={} "
-                   "prepares={} threshold={} prePrepared={} N={} f={}",
-                   view, seq, hexAbbrev(digest), inserted,
-                   pbftPrepareCount(st, digest), 2 * f, st.prePrepared, N, f);
-
-        // Do not drop early PREPAREs. Store them and advance if possible.
-        tryAdvancePBFT(view, seq, digest);
-
-        return;
-    }
-
-    case CUSTOM_PBFT_COMMIT:
-    {
-        bool inserted = st.commitVotersByDigest[digest].insert(sender).second;
-
-        CLOG_DEBUG(Overlay,
-                   "[PBFT COMMIT VOTE] view={} seq={} digest={} inserted={} "
-                   "commits={} threshold={} prepared={} N={} f={}",
-                   view, seq, hexAbbrev(digest), inserted,
-                   pbftCommitCount(st, digest), 2 * f + 1, st.prepared, N, f);
-
-        // Do not drop early COMMITs. Store them and advance if possible.
-        tryAdvancePBFT(view, seq, digest);
-
-        return;
-    }
-
-    default:
-        return;
-    }
-}
-
 } // namespace stellar

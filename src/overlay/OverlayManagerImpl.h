@@ -186,11 +186,13 @@ class OverlayManagerImpl : public OverlayManager
     void normalSend(CustomMessageType type, uint64_t seq, Hash const& digest,
                    std::string const& data = {});
     void handleNormalMessage(StellarMessage const& msg, NodeID const& sender);
-    void tryExecutePBFT();
-
-    void handlePBFTMessage(StellarMessage const& stellarMsg,
-                           std::shared_ptr<Peer> peer);
-    void tryAdvancePBFT(uint64_t view, uint64_t seq, Hash const& digest);
+    struct PbftRuntime;
+    std::shared_ptr<PbftRuntime> mPbft;
+    std::unique_ptr<VirtualTimer> mPbftTimer;
+    void armPbftTimer();
+    void initializePBFT();
+    void tickPBFT();
+    void handlePBFTMessage(CustomMessage const& msg, NodeID const& sender);
 
     void tryCommitShabdizBlock(uint64_t view, Hash const& blockHash);
 
@@ -221,9 +223,6 @@ class OverlayManagerImpl : public OverlayManager
     void sendCommit( uint64_t view, Hash const& blockHash, std::string const& data) override;
     void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data) override;
 
-    void sendPBFTPrePrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data) override;
-    void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash) override;
-    void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash) override;
 
     void startClientListener(int port = experiment::CLIENT_PORT);
 

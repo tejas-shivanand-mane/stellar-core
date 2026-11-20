@@ -334,6 +334,8 @@ OverlayManagerImpl::OverlayManagerImpl(Application& app)
               experiment::ITHS_BLOG_DELTA_MS, experiment::FORGET_IT_DELTA_MS,
               experiment::SHABDIZ_FAST_PATH_ONLY);
     initializeNormalPath();
+    if (experiment::PBFT_MODE)
+        initializePBFT();
     mPeerSources[PeerType::INBOUND] = std::make_unique<RandomPeerSource>(
         mPeerManager, RandomPeerSource::nextAttemptCutoff(PeerType::INBOUND));
     mPeerSources[PeerType::OUTBOUND] = std::make_unique<RandomPeerSource>(
@@ -1364,6 +1366,8 @@ OverlayManagerImpl::shutdown()
     mPeerIPTimer.cancel();
     if (mPaperShabdizTimer)
         mPaperShabdizTimer->cancel();
+    if (mPbftTimer)
+        mPbftTimer->cancel();
 }
 
 bool

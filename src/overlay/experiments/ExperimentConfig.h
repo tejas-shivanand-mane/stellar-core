@@ -17,7 +17,8 @@ namespace stellar::experiment
 // Forget-IT rotates within an instance through Algorithm 1's view changes;
 // each fresh benchmark instance still begins with the client-ingress leader.
 // IT-HS Part One also rotates across its clock-scheduled views, with full
-// SUGGEST/lock validation and background boosting. PBFT keeps its primary.
+// SUGGEST/lock validation and background boosting. PBFT retains a healthy
+// primary. pbft_rotating changes view after each batch.
 //
 // Scope: fault-free benchmarks. TetraBFT implements section 6.1's chained
 // multi-shot path; Simple-IT implements Figure 2's non-speculative S/S_opt
@@ -29,14 +30,16 @@ namespace stellar::experiment
 // retention and client ingress are outside the one-shot paper algorithm.
 // IT-HS requires synchronized clocks and reliable channels as in Part One;
 // it retains evidence across views, without the OPODIS storage optimization.
-// PBFT still lacks its view-change/recovery components. Do not
+// Both PBFT policies use quorum-certified view changes and ordered replay
+// within PBFT_HISTORY. The benchmark has one client ingress and volatile
+// replica state. Crash/restart checkpoints are outside its scope. Do not
 // report these adapters as complete fault-tolerant implementations of the
 // papers.
 //
 // Example (set the same settings on every replica):
 // STELLAR_EXPERIMENT_PROTOCOL=pbft ./src/stellar-core run --conf node.cfg
-// Use shabdiz, iths, pbft, tetrabft, simple_it, simple_it_bracha, forget_it,
-// or scp. Membership/system size comes from node.cfg, not this header.
+// Use shabdiz, iths, pbft_fixed (alias pbft), pbft_rotating, tetrabft, simple_it,
+// simple_it_bracha, forget_it, or scp. Membership/system size comes from node.cfg, not this header.
 // Set STELLAR_EXPERIMENT_WORKLOAD on shab_client as well as the replicas.
 // Without overrides, existing scripts retain the defaults below.
 
@@ -66,6 +69,7 @@ namespace defaults
 // Protocol selection: all false selects Shabdiz.
 inline constexpr bool ITHS_MODE = false;
 inline constexpr bool PBFT_MODE = false;
+inline constexpr bool PBFT_ROTATING = false;
 inline constexpr bool ENABLE_SCP_TRACKING = false;
 inline constexpr bool TETRABFT_MODE = false;
 inline constexpr bool SIMPLE_IT_MODE = false;
@@ -176,13 +180,14 @@ protocol()
     std::string value =
         raw                          ? raw
         : defaults::ITHS_MODE        ? "iths"
-        : defaults::PBFT_MODE        ? "pbft"
+        : defaults::PBFT_MODE        ? (defaults::PBFT_ROTATING ? "pbft_rotating" : "pbft")
         : defaults::ENABLE_SCP_TRACKING ? "scp"
         : defaults::TETRABFT_MODE     ? "tetrabft"
         : defaults::SIMPLE_IT_MODE
             ? (defaults::SIMPLE_IT_OPTIMISTIC ? "simple_it" : "simple_it_bracha")
         : defaults::FORGET_IT_MODE ? "forget_it" : "shabdiz";
     if (value != "shabdiz" && value != "iths" && value != "pbft" &&
+        value != "pbft_rotating" && value != "pbft_fixed" &&
         value != "scp" && value != "tetrabft" && value != "simple_it" &&
         value != "simple_it_bracha" && value != "forget_it")
         throw std::invalid_argument("Unknown STELLAR_EXPERIMENT_PROTOCOL: " +
@@ -211,7 +216,11 @@ workload()
 
 inline const std::string PROTOCOL = detail::protocol();
 inline const bool ITHS_MODE = PROTOCOL == "iths";
-inline const bool PBFT_MODE = PROTOCOL == "pbft";
+inline const bool PBFT_ROTATING = PROTOCOL == "pbft_rotating";
+inline const bool PBFT_MODE =
+    PROTOCOL == "pbft" || PROTOCOL == "pbft_fixed" || PBFT_ROTATING;
+inline const uint64_t PBFT_TIMEOUT_MS = detail::number(
+    "STELLAR_EXPERIMENT_PBFT_TIMEOUT_MS", 2000, 1, 600000);
 inline const bool ENABLE_SCP_TRACKING = PROTOCOL == "scp";
 inline const bool TETRABFT_MODE = PROTOCOL == "tetrabft";
 inline const bool SIMPLE_IT_MODE =

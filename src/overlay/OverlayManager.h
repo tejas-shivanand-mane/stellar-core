@@ -96,9 +96,6 @@ class OverlayManager
     virtual void sendCommit( uint64_t view, Hash const& blockHash, std::string const& data)=0;
     virtual void sendExecute( uint64_t view, Hash const& blockHash, std::string const& data)=0;
 
-    virtual void sendPBFTPrePrepare( uint64_t view, uint64_t seq, Hash const& blockHash, std::string const& data)=0;
-    virtual void sendPBFTPrepare( uint64_t view, uint64_t seq, Hash const& blockHash)=0;
-    virtual void sendPBFTCommit( uint64_t view, uint64_t seq, Hash const& blockHash)=0;
 
     virtual void recvCustomMessage(StellarMessage const& msg, Peer::pointer peer)=0;
 

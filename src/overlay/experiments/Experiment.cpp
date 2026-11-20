@@ -365,6 +365,12 @@ OverlayManagerImpl::tickExperiment()
         }
     }
 
+    if (PBFT_MODE && shabdiz_start)
+    {
+        tickPBFT();
+        return;
+    }
+
     // Retry proposal only after all peers are connected and listener is active.
     // This prevents the startup race where prop() runs before the client queue
     // has enough requests.
@@ -372,7 +378,7 @@ OverlayManagerImpl::tickExperiment()
         ((mApp.getConfig().SEND_CUSTOM_MESSAGE && g_clientListenerActive) ||
          TETRABFT_MODE || SIMPLE_IT_MODE))
     {
-        if (PBFT_MODE || normalPathEnabled())
+        if (normalPathEnabled())
         {
             prop();
         }
@@ -436,6 +442,14 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
 {
 
     auto type = stellarMsg.customMessage().msgType;
+    if (PBFT_MODE)
+    {
+        if (type == CUSTOM_PBFT_NATIVE)
+            handlePBFTMessage(stellarMsg.customMessage(), peer->getPeerID());
+        return;
+    }
+    if (type == CUSTOM_PBFT_NATIVE)
+        return;
     if (paperShabdizEnabled())
     {
         if (type == CUSTOM_SHABDIZ_PAPER)
@@ -490,14 +504,6 @@ OverlayManagerImpl::recvCustomMessage(StellarMessage const& stellarMsg,
     {
         N = getAuthenticatedPeersCount() + 1;
         f = (N - 1) / 3;
-    }
-
-    if (PBFT_MODE &&
-        (cm.msgType == CUSTOM_PBFT_PRE_PREPARE ||
-         cm.msgType == CUSTOM_PBFT_PREPARE || cm.msgType == CUSTOM_PBFT_COMMIT))
-    {
-        handlePBFTMessage(stellarMsg, peer);
-        return;
     }
 
     bool ithsOldBackgroundMsg =

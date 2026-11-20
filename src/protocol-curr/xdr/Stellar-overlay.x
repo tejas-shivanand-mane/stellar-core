@@ -91,7 +91,8 @@ enum CustomMessageType
     // Benchmark ingress supplies work to native multi-shot leaders.
     CUSTOM_EXPERIMENT_WORK = 32,
     CUSTOM_FORGET_NATIVE = 33,
-    CUSTOM_ITHS_BLOG = 34
+    CUSTOM_ITHS_BLOG = 34,
+    CUSTOM_PBFT_NATIVE = 35
 };
 
 // Encoded inside CustomMessage.data only for CUSTOM_SHABDIZ_PAPER.
@@ -134,6 +135,32 @@ struct ITHSBlogPacket
     uint64 view;
     uint64 lockView;
     string value<90000>;
+};
+
+// PBFT's signed votes are transferable across views. Signer indices refer
+// to the sorted fixed membership, which is bound into the signature domain.
+struct PbftVote
+{
+    uint32 signer;
+    Signature signature;
+};
+
+struct PbftReport
+{
+    uint64 preparedView; // zero denotes no prepared certificate
+    Hash digest;
+    PbftVote author;
+};
+
+struct PbftPacket
+{
+    uint32 kind;
+    uint64 view;
+    Hash digest;
+    uint64 valueView; // bound into digest; primary to retain after execution
+    string value<90000>;
+    PbftVote proof<256>;
+    PbftReport reports<256>;
 };
 
 struct CustomMessage

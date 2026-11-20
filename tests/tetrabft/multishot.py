@@ -245,7 +245,7 @@ def main():
     args = parser.parse_args()
     header = (ROOT / 'src/overlay/OverlayManagerImpl.h').read_text()
     fields = header[header.index('    void initializeNormalPath();'):
-                    header.index('    void tryExecutePBFT();')]
+                    header.index('    struct PbftRuntime;')]
     body = '\n'.join(strip(f'src/overlay/experiments/{name}.cpp') for name in
                      ('NormalPathProtocol', 'TetraBFT', 'SimpleIT', 'ForgetIT', 'ITHS'))
     # Substitute only the clock, leaving the production state machine and wire
