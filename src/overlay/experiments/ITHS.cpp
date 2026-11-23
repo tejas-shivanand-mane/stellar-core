@@ -25,21 +25,6 @@ ithsBlogNow()
                std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
-bool
-validITHSInput(std::string const& data)
-{
-    try
-    {
-        auto batch = TransactionBatch::deserialize(data);
-        return data.size() <= 90000 &&
-               batch.transactions.size() == SERVER_BATCH_SIZE &&
-               batch.serialize() == data;
-    }
-    catch (std::exception const&)
-    {
-        return false;
-    }
-}
 }
 
 void
@@ -124,7 +109,7 @@ OverlayManagerImpl::handleITHSBlogMessage(CustomMessage const& cm,
         auto it = mNormalSlots.find(seq);
         if ((it == mNormalSlots.end() || !it->second.iths ||
              it->second.ithsInput != packet.value) &&
-            !validITHSInput(packet.value))
+            (packet.value.size() > 90000 || !mNormalBatches.get(packet.value)))
             return;
     }
     catch (std::exception const&)

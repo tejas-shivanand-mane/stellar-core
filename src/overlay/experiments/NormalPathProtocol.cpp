@@ -199,18 +199,8 @@ OverlayManagerImpl::normalReceiveWork(CustomMessage const& cm,
         !(normalLeader(seq) == mApp.getConfig().NODE_SEED.getPublicKey()) ||
         mNormalWork.count(seq) || sha256(cm.data) != cm.blockHash)
         return;
-    try
-    {
-        auto batch = TransactionBatch::deserialize(cm.data);
-        if ((batch.transactions.size() != SERVER_BATCH_SIZE &&
-             !(TETRABFT_MODE && cm.data.empty())) ||
-            batch.serialize() != cm.data)
-            return;
-    }
-    catch (std::exception const&)
-    {
+    if (!(TETRABFT_MODE && cm.data.empty()) && !mNormalBatches.get(cm.data))
         return;
-    }
     mNormalWork.emplace(seq, NormalWork{cm.data});
     normalProp();
 }
@@ -290,18 +280,8 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         if (wrongLeader || normalDigest(seq, cm.bp, cm.data) != cm.blockHash ||
             (!TETRABFT_MODE && cm.bp != Hash{}))
             return;
-        try
-        {
-            auto batch = TransactionBatch::deserialize(cm.data);
-            if ((batch.transactions.size() != SERVER_BATCH_SIZE &&
-                 !(TETRABFT_MODE && cm.data.empty())) ||
-                batch.serialize() != cm.data)
-                return;
-        }
-        catch (std::exception const&)
-        {
+        if (!(TETRABFT_MODE && cm.data.empty()) && !mNormalBatches.get(cm.data))
             return;
-        }
         auto& slot = mNormalSlots[seq];
         bool accepted = TETRABFT_MODE
                             ? (!slot.proposed || slot.digest == cm.blockHash)
@@ -334,7 +314,7 @@ OverlayManagerImpl::handleNormalMessage(StellarMessage const& msg,
         {
             if (cm.msgType != CUSTOM_TETRA_VOTE1)
                 return; // one vote per block in the native multi-shot path
-            mNormalSlots[seq].tetraVotes.emplace(sender, cm.blockHash);
+            mNormalSlots[seq].tetraVotes.record(sender, cm.blockHash);
         }
         else if (SIMPLE_IT_MODE)
         {
@@ -396,27 +376,19 @@ OverlayManagerImpl::normalAdvance(uint64_t seq)
         if (it == mNormalSlots.end() || !it->second.decided)
             break;
         auto const& ready = it->second;
-        auto batch = TransactionBatch::deserialize(ready.data);
-        for (auto const& txn : batch.transactions)
+        size_t applied = 0;
+        if (!(TETRABFT_MODE && ready.data.empty()))
         {
-            std::istringstream input(txn.payload);
-            std::string op, key, value;
-            input >> op >> key;
-            if (op == "READ")
-            {
-                auto found = g_kvStore.find(key);
-                (void)found;
-            }
-            else if (op == "UPDATE" || op == "RMW")
-            {
-                input >> value;
-                g_kvStore[key] = value;
-            }
+            auto batch = mNormalBatches.get(ready.data);
+            if (!batch)
+                throw std::runtime_error("Invalid decided transaction batch");
+            applyExperimentBatch(*batch, g_kvStore);
+            applied = batch->size();
         }
         ++mNormalExecuted;
         CLOG_INFO(Overlay, "[{} COMMITTED] seq={} digest={} txns={}",
                   normalPathName(), mNormalExecuted, hexAbbrev(ready.digest),
-                  batch.transactions.size());
+                  applied);
         if (mApp.getConfig().SEND_CUSTOM_MESSAGE)
             ackClientBatchesForBlock(mNormalExecuted, sha256(ready.data));
         mNormalWork.erase(mNormalExecuted);

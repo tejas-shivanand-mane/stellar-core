@@ -19,6 +19,8 @@ OverlayManagerImpl::advanceTetraBFT(uint64_t seq)
     // arXiv:2405.02615v2 section 6.1: the healthy multi-shot protocol,
     // not repeated instances of Basic TetraBFT's four voting phases.
     auto& slot = mNormalSlots.at(seq);
+    if (slot.tetraNotarized)
+        return false;
     bool parentReady =
         seq == 1 ? slot.parent == Hash{}
                  : seq - 1 <= mNormalNotarized && mNormalSlots.count(seq - 1) &&
@@ -28,17 +30,14 @@ OverlayManagerImpl::advanceTetraBFT(uint64_t seq)
     if (!slot.tetraVoted)
     {
         slot.tetraVoted = true;
-        slot.tetraVotes.emplace(mApp.getConfig().NODE_SEED.getPublicKey(),
+        slot.tetraVotes.record(mApp.getConfig().NODE_SEED.getPublicKey(),
                                 slot.digest);
         normalSend(CUSTOM_TETRA_VOTE1, seq, slot.digest);
         // The next leader may propose before this block is notarized.
         if (seq == mNormalReady + 1)
             mNormalReady = seq;
     }
-    size_t votes = 0;
-    for (auto const& vote : slot.tetraVotes)
-        votes += vote.second == slot.digest;
-    if (!slot.tetraNotarized && votes >= mNormalQuorum)
+    if (slot.tetraVotes.count(slot.digest) >= mNormalQuorum)
     {
         slot.tetraNotarized = true;
         if (seq == mNormalNotarized + 1)

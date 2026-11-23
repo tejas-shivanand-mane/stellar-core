@@ -138,9 +138,9 @@ template <class Node> class ForgetITConsensus
     struct Received
     {
         std::optional<Value> proposal;
-        std::map<Node, Value> vote1;
+        std::set<Node> vote1Senders, accepted2;
+        std::map<Value, size_t> vote1Counts, locks, guards;
         std::map<Node, std::vector<Message>> pending2;
-        std::map<Node, Message> vote2;
         std::array<std::map<Node, std::set<Value>>, 3> echoes;
     };
     Node mSelf;
@@ -153,13 +153,11 @@ template <class Node> class ForgetITConsensus
     bool mChanged = false;
     std::set<uint64_t> mPrepareAlive;
 
-    size_t
-    count(std::map<Node, Value> const& votes, Value const& value) const
+    static size_t
+    count(std::map<Value, size_t> const& counts, Value const& value)
     {
-        size_t n = 0;
-        for (auto const& v : votes)
-            n += v.second == value;
-        return n;
+        auto it = counts.find(value);
+        return it == counts.end() ? 0 : it->second;
     }
     void
     record(Node const& sender, Message const& msg)
@@ -171,9 +169,14 @@ template <class Node> class ForgetITConsensus
                 r.proposal = msg.value;
         }
         else if (msg.kind == Vote1)
-            r.vote1.emplace(sender, msg.value);
+        {
+            if (r.vote1Senders.insert(sender).second)
+                ++r.vote1Counts[msg.value];
+        }
         else if (msg.kind == Vote2)
         {
+            if (r.accepted2.count(sender))
+                return;
             auto& pending = r.pending2[sender];
             if (std::find(pending.begin(), pending.end(), msg) == pending.end())
                 pending.push_back(msg);
@@ -298,16 +301,28 @@ template <class Node> class ForgetITConsensus
             auto& received = mReceived[view];
             // Acceptance is separate from receipt: reconsider vote-2 on vote-1.
             for (auto& vr : mReceived)
-                for (auto const& p : vr.second.pending2)
-                    if (!vr.second.vote2.count(p.first))
-                        for (auto const& msg : p.second)
-                            if (msg.value.tag == Value::Bottom ||
-                                count(vr.second.vote1, msg.value) >= mF + 1)
-                            {
-                                vr.second.vote2.emplace(p.first, msg);
-                                mChanged = true;
-                                break;
-                            }
+            {
+                auto& r = vr.second;
+                for (auto it = r.pending2.begin(); it != r.pending2.end();)
+                {
+                    auto const& pending = it->second;
+                    auto accepted = std::find_if(
+                        pending.begin(), pending.end(), [&](Message const& msg) {
+                            return msg.value.tag == Value::Bottom ||
+                                   count(r.vote1Counts, msg.value) >= mF + 1;
+                        });
+                    if (accepted == pending.end())
+                    {
+                        ++it;
+                        continue;
+                    }
+                    r.accepted2.insert(it->first);
+                    ++r.locks[accepted->value];
+                    ++r.guards[accepted->guard];
+                    it = r.pending2.erase(it);
+                    mChanged = true;
+                }
+            }
             if (!current.passive && !current.changing && received.proposal &&
                 !current.vote1 &&
                 (current.guard.tag == Value::Safe ||
@@ -317,20 +332,18 @@ template <class Node> class ForgetITConsensus
                 send(*current.vote1);
             }
             if (!current.changing && !current.vote2)
-                for (auto const& p : received.vote1)
-                    if (count(received.vote1, p.second) >= mQ)
+                for (auto const& p : received.vote1Counts)
+                    if (p.second >= mQ)
                     {
-                        current.lock = p.second;
+                        current.lock = p.first;
                         voteTwo(view, current.lock, current.guard);
                         break;
                     }
             if (!mState.decision)
             {
-                std::map<Value, size_t> counts;
-                for (auto const& p : received.vote2)
-                    if (p.second.value.tag == Value::Data &&
-                        ++counts[p.second.value] >= mQ)
-                        mState.decision = p.second.value.data;
+                for (auto const& lock : received.locks)
+                    if (lock.first.tag == Value::Data && lock.second >= mQ)
+                        mState.decision = lock.first.data;
             }
             if (!current.passive && now - mEntered >= 3 * mDelta)
                 voteTwo(view, current.lock, current.guard);
@@ -352,13 +365,8 @@ template <class Node> class ForgetITConsensus
                 auto v = vm.first;
                 auto& s = vm.second;
                 auto& r = mReceived[v];
-                std::map<Value, size_t> locks, guards;
-                for (auto const& p : r.vote2)
-                {
-                    ++locks[p.second.value];
-                    ++guards[p.second.guard];
-                }
-                auto bottom = locks[Value{}];
+                auto const& locks = r.locks;
+                auto bottom = count(locks, Value{});
                 if (!s.alert)
                 {
                     if (bottom >= mQ)
@@ -378,7 +386,7 @@ template <class Node> class ForgetITConsensus
                             }
                 }
                 if (s.alert && *s.alert &&
-                    r.vote2.size() - locks[s.potential] >= mQ)
+                    r.accepted2.size() - count(locks, s.potential) >= mQ)
                 {
                     s.alert = false;
                     mChanged = true;
@@ -392,13 +400,13 @@ template <class Node> class ForgetITConsensus
                     if (!*s.alert)
                     {
                         size_t maxGuard = 0;
-                        for (auto const& g : guards)
+                        for (auto const& g : r.guards)
                         {
                             maxGuard = std::max(maxGuard, g.second);
                             if (g.second >= mF + 1)
                                 echo(0, v, g.first);
                         }
-                        if (r.vote2.size() - maxGuard >= mF + 1)
+                        if (r.accepted2.size() - maxGuard >= mF + 1)
                             echo(0, v, Value::safe());
                     }
                 }

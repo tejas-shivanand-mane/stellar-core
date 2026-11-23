@@ -90,6 +90,59 @@ parser()
     }
 }
 
+void
+comparisonBatches()
+{
+    for (auto rules : {BatchRules::NormalPath, BatchRules::PBFT})
+    {
+        ExperimentBatchCache cache(rules, 1);
+        std::map<std::string, std::string> expected, actual;
+        auto check = [&](std::string const& bytes) {
+            auto parsed = cache.get(bytes);
+            bool valid = false;
+            try
+            {
+                auto legacy = TransactionBatch::deserialize(bytes);
+                valid = legacy.transactions.size() == 1 &&
+                        legacy.serialize() == bytes &&
+                        (rules != BatchRules::PBFT || bytes.size() <= 90000);
+                if (valid)
+                {
+                    std::istringstream in(legacy.transactions[0].payload);
+                    std::string op, key, value;
+                    in >> op >> key;
+                    if (op == "UPDATE" || op == "RMW")
+                    {
+                        if ((in >> value) || rules == BatchRules::NormalPath)
+                            expected[key] = value;
+                    }
+                }
+            }
+            catch (std::exception const&)
+            {
+            }
+            assert(bool(parsed) == valid);
+            if (parsed)
+            {
+                assert(cache.get(bytes) == parsed);
+                applyExperimentBatch(*parsed, actual);
+                assert(actual == expected);
+            }
+        };
+        for (auto payload : {"READ k", "UPDATE k a", "RMW k b extra",
+                             "UPDATE k", "DELETE k", "RMW", "", "READ"})
+            check("0:" + std::string(payload) + ":5:");
+        for (auto data : {"0:READ k:0:c|", "01:READ k:0:c", "0:READ k:x:c",
+                          "0:READ k:0:c:d", "", "0:READ k:0:c|1:READ k:1:c"})
+            check(data);
+        check("0:UPDATE k " + std::string(90000, 'a') + ":5:c");
+        // Evict the first entry and validate/execute it again.
+        for (unsigned i = 0; i < 12; ++i)
+            check(std::to_string(i) + ":UPDATE k v:5:c");
+        check("0:UPDATE k a:5:");
+    }
+}
+
 std::string
 archiveKey(char kind, unsigned i)
 {
@@ -387,6 +440,7 @@ main(int argc, char** argv)
                 ("shabdiz-runtime-test-" + std::to_string(getpid()) + "-" +
                  std::to_string(Clock::now().time_since_epoch().count()));
     parser();
+    comparisonBatches();
     memoryArchive(root);
     archive(root);
     std::filesystem::remove_all(root);

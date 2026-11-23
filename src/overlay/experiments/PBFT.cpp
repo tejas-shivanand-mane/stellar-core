@@ -38,23 +38,6 @@ valueDigest(uint64_t originView, std::string const& value)
 {
     return sha256(xdr::xdr_to_opaque(originView, xdr::xstring<90000>(value)));
 }
-
-bool
-validBatch(std::string const& value)
-{
-    if (value.empty() || value.size() > 90000)
-        return false;
-    try
-    {
-        auto b = TransactionBatch::deserialize(value);
-        return b.transactions.size() == SERVER_BATCH_SIZE &&
-               b.serialize() == value;
-    }
-    catch (std::exception const&)
-    {
-        return false;
-    }
-}
 }
 
 // A replica votes only on its next unexecuted sequence number. Its previous
@@ -78,6 +61,7 @@ struct OverlayManagerImpl::PbftRuntime
     std::vector<ClientAck> acks;
     std::string candidate;
     std::optional<PbftPacket> proposal, prepared, required, ownChange;
+    ExperimentBatchCache batches{BatchRules::PBFT, SERVER_BATCH_SIZE};
     Votes prepares, commits;
     std::map<uint32_t, std::pair<Hash, PbftVote>> earlyPrepares, earlyCommits;
     std::map<uint32_t, uint64_t> requested;
@@ -199,15 +183,15 @@ struct OverlayManagerImpl::PbftRuntime
     }
 
     bool
-    validValue(PbftPacket const& p, uint64_t atView) const
+    validValue(PbftPacket const& p, uint64_t atView)
     {
         return p.valueView >= base && p.valueView <= atView &&
-               validBatch(p.value) &&
+               batches.get(p.value) &&
                valueDigest(p.valueView, p.value) == p.digest;
     }
 
     bool
-    certificate(PbftPacket const& p, uint64_t atView, bool decision) const
+    certificate(PbftPacket const& p, uint64_t atView, bool decision)
     {
         if (p.proof.size() != quorum || !validValue(p, atView))
             return false;
@@ -246,7 +230,7 @@ struct OverlayManagerImpl::PbftRuntime
             }
             txn_count += b.transactions.size();
             pending = b.serialize();
-            if (!validBatch(pending))
+            if (!batches.get(pending))
                 throw std::invalid_argument(
                     "PBFT client batch exceeds the wire limit or is invalid");
         }
@@ -549,17 +533,10 @@ struct OverlayManagerImpl::PbftRuntime
     void
     execute(PbftPacket const& d)
     {
-        auto b = TransactionBatch::deserialize(d.value);
-        for (auto const& txn : b.transactions)
-        {
-            std::istringstream input(txn.payload);
-            std::string op, key, value;
-            input >> op >> key;
-            if (op == "READ")
-                (void)g_kvStore.find(key);
-            else if ((op == "UPDATE" || op == "RMW") && (input >> value))
-                g_kvStore[key] = value;
-        }
+        auto batch = batches.get(d.value);
+        if (!batch)
+            throw std::runtime_error("Invalid PBFT decision batch");
+        applyExperimentBatch(*batch, g_kvStore);
         if (!pending.empty() && pending == d.value)
         {
             if (!acks.empty())
@@ -573,7 +550,7 @@ struct OverlayManagerImpl::PbftRuntime
         }
         CLOG_INFO(Overlay,
                   "[PBFT COMMITTED-LOCAL] view={} seq={} digest={} txns={}",
-                  d.view, seq, hexAbbrev(d.digest), b.transactions.size());
+                  d.view, seq, hexAbbrev(d.digest), batch->size());
         history.emplace(seq, d);
         if (history.size() > PBFT_HISTORY)
             history.erase(history.begin());
@@ -654,7 +631,7 @@ struct OverlayManagerImpl::PbftRuntime
         switch (p.kind)
         {
         case ClientWork:
-            if (candidate.empty() && validBatch(p.value))
+            if (candidate.empty() && batches.get(p.value))
                 candidate = p.value;
             if (!candidate.empty())
             {

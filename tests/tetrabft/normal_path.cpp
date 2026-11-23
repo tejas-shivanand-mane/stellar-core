@@ -229,6 +229,14 @@ void valuePayloadsAndRoundCommits()
 
 int main()
 {
+    stellar::DigestVotes<int, std::string> votes;
+    votes.record(0, "A");
+    votes.record(0, "B");
+    votes.record(1, "B");
+    votes.record(1, "B");
+    assert(votes.count("A") == 1 && votes.count("B") == 1);
+    assert(votes.countWithout("A", 0) == 0 && votes.countWithout("B", 0) == 1);
+    assert(votes.countWithout("unknown", 0) == 0);
     valuePayloadsAndRoundCommits();
     State s;
     assert(s.advance(0, 3).empty());
