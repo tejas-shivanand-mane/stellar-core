@@ -279,6 +279,13 @@ OverlayManagerImpl::initializePaperShabdiz()
               archiveOptions.memoryOnly ? "memory_only" : "sqlite_zlib",
               archiveOptions.memoryOnly ? 0 : archiveOptions.batchBlocks,
               archiveOptions.memoryBlocks);
+    if (cfg.SEND_CUSTOM_MESSAGE)
+    {
+        // Join a delayed commit's view to its configured validator name.
+        for (size_t slot = 1; slot <= r->members.size(); ++slot)
+            CLOG_INFO(Overlay, "[SHABDIZ LEADER] slot={} node={}", slot,
+                      cfg.toShortString(r->engine->leader(slot)));
+    }
     mPaperShabdiz = std::move(r);
     mPaperShabdizTimer = std::make_unique<VirtualTimer>(mApp);
 }
@@ -336,8 +343,14 @@ OverlayManagerImpl::pumpPaperShabdiz()
             r.workOrder.end());
         r.engine->workAvailable();
     }
-    auto peers = getAuthenticatedPeers();
-    for (auto const& out : r.engine->takeOutgoing())
+    auto outgoing = r.engine->takeOutgoing();
+    bool forwardWork = r.newWork || r.forwardedView != r.engine->view();
+    // Building the merged peer map copies one entry per connection. Most
+    // individual votes need neither a broadcast nor any client forwarding.
+    std::map<NodeID, Peer::pointer> peers;
+    if (!outgoing.empty() || (forwardWork && !r.localAcks.empty()))
+        peers = getAuthenticatedPeers();
+    for (auto const& out : outgoing)
     {
         r.fastProposals += out.message.kind == PaperShabdiz::Kind::FastProposal;
         r.slowProposals += out.message.kind == PaperShabdiz::Kind::SlowProposal;
@@ -354,7 +367,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
     // Client ingress is transport, not an extra all-to-all consensus phase.
     // Forward only to leader(v), and retry at view changes or the retry tick.
     // The leader's paper proposal supplies the batch to all other replicas.
-    if (r.newWork || r.forwardedView != r.engine->view())
+    if (forwardWork)
     {
         r.newWork = false;
         r.forwardedView = r.engine->view();

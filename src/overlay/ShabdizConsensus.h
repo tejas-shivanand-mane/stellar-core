@@ -96,7 +96,13 @@ template <typename Node, typename Hash> class ShabdizConsensus
         bool collectSent = false, sendSent = false;
         bool forceSlow = false;
         std::vector<Message> proposals;
-        std::map<Node, Hash> prepares, commits;
+        // Count only the first vote from a sender in each phase.
+        std::set<Node> prepareSenders, commitSenders;
+        struct VoteCount
+        {
+            size_t prepares = 0, commits = 0;
+        };
+        std::map<Hash, VoteCount> votes;
         std::map<Node, OriginState> origins;
         std::map<Node, Pair> collection;
         std::optional<std::pair<Pair, std::vector<Node>>> slowPlan;
@@ -189,12 +195,6 @@ template <typename Node, typename Hash> class ShabdizConsensus
             return p.hash == mGenesis;
         auto parent = block(b->parent);
         return parent && parent->view < b->view;
-    }
-    size_t
-    votes(std::map<Node, Hash> const& v, Hash const& hash) const
-    {
-        return std::count_if(v.begin(), v.end(),
-                             [&](auto const& x) { return x.second == hash; });
     }
     bool
     dependencyMet(ViewState const& s, Pair const& p, Dependency const& d) const
@@ -417,8 +417,13 @@ template <typename Node, typename Hash> class ShabdizConsensus
         case Kind::Commit:
             if (m.value.view != m.view)
                 return;
-            (m.kind == Kind::Prepare ? s.prepares : s.commits)
-                .emplace(sender, m.value.hash);
+            if (m.kind == Kind::Prepare)
+            {
+                if (s.prepareSenders.insert(sender).second)
+                    ++s.votes[m.value.hash].prepares;
+            }
+            else if (s.commitSenders.insert(sender).second)
+                ++s.votes[m.value.hash].commits;
             break;
         case Kind::Collect:
             if (!(sender == leader(m.view)) || m.view != mView || s.sendSent)
@@ -637,17 +642,11 @@ template <typename Node, typename Hash> class ShabdizConsensus
     votingRules(View v, ViewState& s)
     {
         bool changed = false;
-        std::set<Hash> candidates;
-        for (auto const& x : s.prepares)
-            candidates.insert(x.second);
-        for (auto const& x : s.commits)
-            candidates.insert(x.second);
-        for (auto const& h : candidates)
+        for (auto const& [hash, count] : s.votes)
         {
-            Pair p{v, h};
+            Pair p{v, hash};
             if (mOpen <= v && mPrepared.view < v &&
-                (votes(s.prepares, h) >= mQuorum ||
-                 votes(s.commits, h) >= mF + 1) &&
+                (count.prepares >= mQuorum || count.commits >= mF + 1) &&
                 targetBlock(p))
             {
                 mPrepared = p;
@@ -658,7 +657,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
                         it = mPS.erase(it);
                 emit(message(Kind::Commit, v, p));
             }
-            if (votes(s.commits, h) >= mQuorum)
+            if (count.commits >= mQuorum)
                 changed |= commitChain(p);
         }
         return changed;

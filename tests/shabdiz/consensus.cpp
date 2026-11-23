@@ -99,6 +99,24 @@ struct Fixture
 };
 
 void
+firstVoteCounts()
+{
+    Fixture f;
+    auto a = f.add(1), b = f.add(1, "g", "other");
+    f.e.receive(0, proposal(a)); // replica 3 prepares a
+    f.vote(Kind::Prepare, b, {0});
+    f.vote(Kind::Prepare, a, {0, 1, 1}); // 0 already prepared b
+    assert(f.e.prepared().view == 0);
+    f.vote(Kind::Prepare, a, {2});
+    assert(f.e.prepared().hash == a.hash);
+    f.vote(Kind::Commit, b, {0});
+    f.vote(Kind::Commit, a, {0, 1, 1});
+    assert(f.e.committed().view == 0);
+    f.vote(Kind::Commit, a, {2});
+    assert(f.e.committed().hash == a.hash);
+}
+
+void
 fastPipeline()
 {
     Fixture f;
@@ -531,6 +549,7 @@ fastPathOnlyBoundaries()
 int
 main()
 {
+    firstVoteCounts();
     fastPathOnlyBoundaries();
     fastPipeline();
     closeAndPrune();
