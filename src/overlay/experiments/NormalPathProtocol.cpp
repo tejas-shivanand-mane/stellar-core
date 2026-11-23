@@ -38,6 +38,8 @@ OverlayManagerImpl::initializeNormalPath()
                 "Normal-path protocols need at least four fixed members");
         mNormalLeaders.assign(mNormalMembers.begin(), mNormalMembers.end());
         mNormalQuorum = mNormalMembers.size() - (mNormalMembers.size() - 1) / 3;
+        if (FORGET_IT_MODE)
+            mForgetProgress.emplace(mNormalLeaders);
         if (ITHS_MODE)
             CLOG_INFO(
                 Overlay,

@@ -228,10 +228,45 @@ targeted()
     }
     assert(rejected);
 }
+void
+retainedInstances()
+{
+    std::vector<int> members;
+    for (int id = 0; id < 49; ++id)
+        members.push_back(id);
+    stellar::ForgetITProgress<int> progress(members);
+    std::map<uint64_t, Network> slots;
+    slots.try_emplace(115, 49, 1);
+    slots.try_emplace(116, 49, 2);
+    for (auto& entry : slots)
+    {
+        entry.second.drain();
+        entry.second.agree("input-0");
+        entry.second.sent.clear();
+    }
+    // All but the last replica report in-order execution. Even more than a
+    // quorum cannot justify stopping assistance for the remaining replica.
+    for (int id = 0; id < 48; ++id)
+        progress.report(id, 116);
+    progress.report(49, 116); // outside the membership
+    assert(progress.retireExecuted(slots) == 0 && slots.size() == 2);
+    progress.report(48, 115);
+    progress.report(48, 14); // delayed report on another instance
+    assert(progress.retireExecuted(slots) == 115 && slots.size() == 1);
+    auto& net = slots.at(116);
+    net.tick(40); // a retained, locally decided instance still helps
+    assert(net.sent.size() == 49);
+    for (auto const& m : net.sent)
+        assert(m.kind == Core::Echo1);
+    progress.report(48, 116);
+    assert(progress.retireExecuted(slots) == 116 && slots.empty());
+}
+
 int
 main()
 {
     targeted();
+    retainedInstances();
     for (unsigned seed = 0; seed < 30; ++seed)
     {
         for (int n : {4, 7, 16})

@@ -13,6 +13,39 @@
 
 namespace stellar
 {
+// Cumulative, in-order application execution reported by each fixed member.
+// A report can retire old instances only after every member has caught up.
+template <class Node> class ForgetITProgress
+{
+    std::map<Node, uint64_t> mExecuted;
+
+  public:
+    explicit ForgetITProgress(std::vector<Node> const& members)
+    {
+        for (auto const& member : members)
+            mExecuted.emplace(member, 0);
+    }
+    void
+    report(Node const& member, uint64_t executed)
+    {
+        auto it = mExecuted.find(member);
+        if (it != mExecuted.end())
+            it->second = std::max(it->second, executed);
+    }
+    template <class Slot>
+    uint64_t
+    retireExecuted(std::map<uint64_t, Slot>& slots) const
+    {
+        if (mExecuted.empty())
+            return 0;
+        auto prefix = mExecuted.begin()->second;
+        for (auto const& entry : mExecuted)
+            prefix = std::min(prefix, entry.second);
+        slots.erase(slots.begin(), slots.upper_bound(prefix));
+        return prefix;
+    }
+};
+
 // Forget-IT, August 2026, Algorithm 1. One Byzantine-agreement instance.
 // Values are compared directly: hashes are not information-theoretic evidence.
 // The caller supplies authenticated membership, clocks in milliseconds, and

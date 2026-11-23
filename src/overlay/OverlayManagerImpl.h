@@ -131,6 +131,9 @@ class OverlayManagerImpl : public OverlayManager
     void startForgetIT(uint64_t seq, std::string const& data);
     void sendForgetIT(uint64_t seq,
                       ForgetITConsensus<NodeID>::Message const& msg);
+    void broadcastForgetIT(uint64_t seq, std::vector<uint8_t> const& bytes);
+    std::optional<ForgetITProgress<NodeID>> mForgetProgress;
+    uint64_t mForgetLastAdvertised = 0;
     bool advanceSimpleIT(uint64_t seq);
     void pbftProp();
     // TetraBFT/Simple-IT proposals supply the batch; their votes use digests.

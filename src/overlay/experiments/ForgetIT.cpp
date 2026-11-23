@@ -56,12 +56,21 @@ OverlayManagerImpl::sendForgetIT(uint64_t seq, Forget::Message const& msg)
     packet.guardKind = msg.guard.tag;
     packet.guard = msg.guard.data;
     auto bytes = xdr::xdr_to_opaque(packet);
+    broadcastForgetIT(seq, bytes);
+}
+
+void
+OverlayManagerImpl::broadcastForgetIT(uint64_t seq,
+                                      std::vector<uint8_t> const& bytes)
+{
     auto out = std::make_shared<StellarMessage>();
     out->type(CUSTOM_MESSAGE);
     auto& cm = out->customMessage();
     cm.msgType = CUSTOM_FORGET_NATIVE;
     cm.view = seq; // independent BA instance; packet.view is its protocol view
+    cm.vp = mNormalExecuted;
     cm.data.assign(bytes.begin(), bytes.end());
+    mForgetLastAdvertised = mNormalExecuted;
     for (auto const& peer : getAuthenticatedPeers())
         if (mNormalMembers.count(peer.first))
             peer.second->sendMessage(out);
@@ -96,8 +105,16 @@ OverlayManagerImpl::handleForgetITMessage(CustomMessage const& cm,
                                           NodeID const& sender)
 {
     auto seq = cm.view;
-    if (!mNormalMembers.count(sender) || !seq ||
-        (seq > mNormalExecuted && seq - mNormalExecuted > NORMAL_PATH_WINDOW) ||
+    if (!mNormalMembers.count(sender))
+        return;
+    // Instance zero carries only progress when no native packet is pending.
+    if (!seq)
+    {
+        if (cm.data.empty())
+            mForgetProgress->report(sender, cm.vp);
+        return;
+    }
+    if ((seq > mNormalExecuted && seq - mNormalExecuted > NORMAL_PATH_WINDOW) ||
         (seq <= mNormalExecuted && !mNormalSlots.count(seq)))
         return;
     Forget::Message msg;
@@ -130,6 +147,7 @@ OverlayManagerImpl::handleForgetITMessage(CustomMessage const& cm,
     {
         return;
     }
+    mForgetProgress->report(sender, cm.vp);
     if (!mNormalLeader)
     {
         // Same ingress discovery as the existing benchmark, not leader
@@ -185,6 +203,18 @@ OverlayManagerImpl::tickForgetIT()
 {
     // Message handlers drive the healthy path without waiting for this tick.
     // The timer advances views only under Algorithm 1's timeout/echo rules.
+    // An individually decided replica can still be needed by a lagging peer.
+    // Once everyone has executed a prefix, its timers and late votes can no
+    // longer help anyone. Retire it before any timeout can start an echo wave.
+    if (mForgetLastAdvertised < mNormalExecuted)
+        broadcastForgetIT(0, {});
+    mForgetProgress->report(mApp.getConfig().NODE_SEED.getPublicKey(),
+                            mNormalExecuted);
+    auto retired = mForgetProgress->retireExecuted(mNormalSlots);
+    if (mNormalExecuted)
+        CLOG_INFO(Overlay,
+                  "[FORGET-IT PROGRESS] executed={} all_executed={} retained={}",
+                  mNormalExecuted, retired, mNormalSlots.size());
     auto now = forgetNow();
     std::vector<uint64_t> instances;
     for (auto const& slot : mNormalSlots)
