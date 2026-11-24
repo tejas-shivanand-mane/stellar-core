@@ -135,6 +135,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
     bool mKeepPrepareHistory = false;
     bool mFastPathOnly = false;
     size_t mForceSlow = 0;
+    View mWindowFirst = 0, mWindowCount = 0;
 
     bool
     member(Node const& n) const
@@ -320,7 +321,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
         mMissing.clear(); // rederive outstanding fetches from retained roots
         mReportsDirty = true;
         auto& state = mViews[v];
-        state.forceSlow = mForceSlow > 0;
+        state.forceSlow = mForceSlow > 0 || inCollectionWindow(v);
         if (mForceSlow)
             --mForceSlow;
         for (auto it = mViews.begin(); it != mViews.end();)
@@ -882,6 +883,22 @@ template <typename Node, typename Hash> class ShabdizConsensus
         for (auto const& h : mMissing)
             emit(message(Kind::GetBlock, 0, Pair{0, h}));
         drive();
+    }
+    // A common view interval lets rotating leaders run the same intervention
+    // even when replicas start at different wall-clock times.
+    void
+    setCollectionWindow(View first, View count)
+    {
+        if (!mFastPathOnly)
+        {
+            mWindowFirst = first;
+            mWindowCount = count;
+        }
+    }
+    bool
+    inCollectionWindow(View v) const
+    {
+        return mWindowFirst && v >= mWindowFirst && v - mWindowFirst < mWindowCount;
     }
     void
     forceSlowViews(size_t count)

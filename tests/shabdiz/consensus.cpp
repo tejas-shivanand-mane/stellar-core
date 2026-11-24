@@ -389,7 +389,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         bool routedWork = false, bool fastPathOnly = false,
         size_t memoryBlocks = 0, uint64_t limit = 8,
         std::vector<uint64_t> crashAfter = {}, bool skipDisconnected = false,
-        std::vector<int> crashOrder = {})
+        std::vector<int> crashOrder = {}, uint64_t scheduledRounds = 0)
 {
     struct Delivery
     {
@@ -407,6 +407,8 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     std::vector<Delivery> pending;
     std::vector<std::set<uint64_t>> availableWork(n);
     std::set<int> offline(members.begin(), members.begin() + absent);
+    std::set<uint64_t> windowProposals;
+    constexpr uint64_t firstView = 7;
     size_t injected = 0;
     uint64_t forwardedView = 0;
     std::mt19937 rng(seed);
@@ -438,6 +440,8 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
                 return "data" + std::to_string(engines[i]->view());
             },
             [](auto const& d) { return !d.empty(); }, false, fastPathOnly);
+        if (scheduledRounds)
+            engines[i]->setCollectionWindow(firstView, scheduledRounds);
         if (forceSlow)
             engines[i]->forceSlowViews(100);
     }
@@ -462,6 +466,15 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         executed[id].insert(executed[id].end(), blocks.begin(), blocks.end());
         for (auto const& o : engines[id]->takeOutgoing())
         {
+            if (scheduledRounds && (o.message.kind == Kind::FastProposal ||
+                                    o.message.kind == Kind::SlowProposal))
+            {
+                auto v = o.message.view;
+                bool inside = v >= firstView && v - firstView < scheduledRounds;
+                assert((o.message.kind == Kind::SlowProposal) == inside);
+                if (inside)
+                    windowProposals.insert(v);
+            }
             if (fastPathOnly)
                 assert(o.message.kind == Kind::FastProposal ||
                        o.message.kind == Kind::Prepare ||
@@ -541,6 +554,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
             drain(i);
         }
     }
+    assert(windowProposals.size() == scheduledRounds);
     assert(injected == crashAfter.size());
     for (int i = absent; i < n; ++i)
     {
@@ -625,7 +639,8 @@ main()
     slowProposalAndCatchup();
     malformedAndMissing();
     slowValidationBoundaries();
-    int schedules = 0;
+    network(4, 0, 1, false, false, true, false, 0, 70, {}, false, {}, 50);
+    int schedules = 1;
     for (int n : {4, 7, 8, 16})
         for (unsigned seed = 0; seed < 12; ++seed)
             for (bool slow : {false, true})

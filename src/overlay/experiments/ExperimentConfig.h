@@ -249,7 +249,11 @@ inline const YCSBWorkload currentWorkload = detail::workload();
 using defaults::MAX_VIEW_HISTORY;
 using defaults::PBFT_HISTORY;
 using defaults::NORMAL_PATH_WINDOW;
-using defaults::MAX_COLLECT_ATTEMPTS;
+inline const uint64_t MAX_COLLECT_ATTEMPTS = detail::number(
+    "STELLAR_EXPERIMENT_MAX_COLLECT_ATTEMPTS", defaults::MAX_COLLECT_ATTEMPTS,
+    0, UINT32_MAX);
+inline const uint64_t COLLECTION_START_VIEW = detail::number(
+    "STELLAR_EXPERIMENT_COLLECTION_START_VIEW", 0, 0, UINT32_MAX);
 using defaults::SHABDIZ_VIEW_TIMEOUT_MS;
 using defaults::SHABDIZ_VIEW_TIMEOUT_STEP_MS;
 using defaults::NUM_TEST_ACCOUNTS;

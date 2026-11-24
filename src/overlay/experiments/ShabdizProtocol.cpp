@@ -270,6 +270,8 @@ OverlayManagerImpl::initializePaperShabdiz()
             return raw->batch(data, sha256(data)) != nullptr;
         },
         NonPrune_MODE, SHABDIZ_FAST_PATH_ONLY);
+    if (COLLECTION_START_VIEW)
+        r->engine->setCollectionWindow(COLLECTION_START_VIEW, MAX_COLLECT_ATTEMPTS);
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin skip_disconnected={} "
               "prepared_pipeline=true fast_path_only={} archive={} "
@@ -356,6 +358,18 @@ OverlayManagerImpl::pumpPaperShabdiz()
         r.slowProposals += out.message.kind == PaperShabdiz::Kind::SlowProposal;
         r.collects += out.message.kind == PaperShabdiz::Kind::Collect;
         r.wishes += out.message.kind == PaperShabdiz::Kind::Wish;
+        if (COLLECTION_START_VIEW &&
+            (out.message.kind == PaperShabdiz::Kind::Collect ||
+             out.message.kind == PaperShabdiz::Kind::SlowProposal) &&
+            r.engine->inCollectionWindow(out.message.view))
+        {
+            auto now = std::chrono::system_clock::now().time_since_epoch();
+            CLOG_INFO(Overlay,
+                      "[SHABDIZ COLLECTION ROUND] view={} phase={} unix_us={}",
+                      out.message.view,
+                      out.message.kind == PaperShabdiz::Kind::Collect ? "collect" : "proposal",
+                      std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+        }
         auto msg = wireMessage(encode(out.message));
         // No flood-cache coalescing: votes from distinct authenticated senders
         // must remain distinct, even when their bytes are identical.
@@ -460,7 +474,7 @@ OverlayManagerImpl::tickPaperShabdiz()
             r.newWork = true;
         }
     }
-    if (!SHABDIZ_FAST_PATH_ONLY && !r.forced && Clock::now() - r.startedAt >=
+    if (!COLLECTION_START_VIEW && !SHABDIZ_FAST_PATH_ONLY && !r.forced && Clock::now() - r.startedAt >=
                          std::chrono::seconds(FORCE_COLLECT_AFTER_SEC))
     {
         r.forced = true;
