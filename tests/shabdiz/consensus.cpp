@@ -1,4 +1,5 @@
 #include "overlay/ShabdizConsensus.h"
+#include "overlay/ShabdizTimeout.h"
 #include <cassert>
 #include <iostream>
 #include <memory>
@@ -357,7 +358,8 @@ slowValidationBoundaries()
 void
 network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         bool routedWork = false, bool fastPathOnly = false,
-        size_t memoryBlocks = 0, uint64_t limit = 8)
+        size_t memoryBlocks = 0, uint64_t limit = 8,
+        std::vector<uint64_t> crashAfter = {})
 {
     struct Delivery
     {
@@ -374,6 +376,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     std::vector<std::vector<Block>> executed(n);
     std::vector<Delivery> pending;
     std::vector<std::set<uint64_t>> availableWork(n);
+    size_t injected = 0;
     uint64_t forwardedView = 0;
     std::mt19937 rng(seed);
     for (int i = absent; i < n; ++i)
@@ -454,6 +457,15 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
             auto d = std::move(pending[index]);
             pending[index] = std::move(pending.back());
             pending.pop_back();
+            // Crash-stop in-flight recipients as the ingress commits work.
+            if (injected < crashAfter.size() &&
+                engines.back()->committed().view >= crashAfter[injected])
+            {
+                ++absent;
+                ++injected;
+            }
+            if (d.to < absent)
+                continue;
             if (d.work)
             {
                 availableWork[d.to].insert(d.m.view);
@@ -483,6 +495,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
             drain(i);
         }
     }
+    assert(injected == crashAfter.size());
     for (int i = absent; i < n; ++i)
     {
         if (engines[i]->committed().view < limit)
@@ -549,6 +562,12 @@ fastPathOnlyBoundaries()
 int
 main()
 {
+    using namespace std::chrono_literals;
+    auto stalled = stellar::shabdizViewTimeout(15689);
+    assert(stellar::shabdizViewTimeout(0) == 2s);
+    assert(stalled > 2s && stalled < 2200ms);
+    assert(stellar::shabdizViewTimeout(15690) > stalled);
+    assert(stellar::shabdizViewTimeout(UINT64_MAX) > stalled);
     firstVoteCounts();
     fastPathOnlyBoundaries();
     fastPipeline();
@@ -566,6 +585,10 @@ main()
                     network(n, absent, seed, slow, seed % 2 == 0);
                     ++schedules;
                 }
+    // Keep the ingress alive. Lose three leaders after healthy commits and
+    // continue through several full rotations with exactly a quorum left.
+    network(10, 0, 5, false, false, true, false, 0, 60, {7, 18, 29});
+    ++schedules;
     network(48, 0, 1, false, false);
     network(48, 15, 2, true, false);
     schedules += 2;

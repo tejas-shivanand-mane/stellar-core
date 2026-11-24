@@ -10,6 +10,7 @@
 #include "overlay/ShabdizArchive.h"
 #include "overlay/ShabdizBatch.h"
 #include "overlay/ShabdizConsensus.h"
+#include "overlay/ShabdizTimeout.h"
 #include "overlay/experiments/ExperimentState.h"
 #include "scp/LocalNode.h"
 #include "util/Logging.h"
@@ -394,17 +395,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
     if (!SHABDIZ_FAST_PATH_ONLY && r.generation != r.engine->timerGeneration())
     {
         r.generation = r.engine->timerGeneration();
-        auto w = r.engine->confirmedView();
-        auto maxMillis =
-            uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-                         Clock::duration::max())
-                         .count() /
-                     4);
-        auto step = std::max<uint64_t>(1, SHABDIZ_VIEW_TIMEOUT_STEP_MS);
-        auto duration =
-            SHABDIZ_VIEW_TIMEOUT_MS +
-            std::min(w, (maxMillis - SHABDIZ_VIEW_TIMEOUT_MS) / step) * step;
-        r.deadline = Clock::now() + std::chrono::milliseconds(duration);
+        r.deadline = Clock::now() + shabdizViewTimeout(r.engine->confirmedView());
     }
 }
 
@@ -477,6 +468,9 @@ OverlayManagerImpl::tickPaperShabdiz()
     pumpPaperShabdiz();
     if (!SHABDIZ_FAST_PATH_ONLY && Clock::now() >= r.deadline)
     {
+        CLOG_INFO(Overlay, "[SHABDIZ TIMEOUT] view={} confirmed={} leader={}",
+                  r.engine->view(), r.engine->confirmedView(),
+                  mApp.getConfig().toShortString(r.engine->leader(r.engine->view())));
         r.engine->timeout();
         // Once expired, resend the highest wish until confirmation/request
         // resets the timer, as in section 10.2.
