@@ -24,6 +24,7 @@ PRE = r'''
 #include "util/XDROperators.h"
 #include "overlay/CustomProtocolTypes.h"
 #include "overlay/NormalPathConsensus.h"
+#include "overlay/ExperimentBatch.h"
 #include "overlay/ForgetITConsensus.h"
 #include "overlay/ITHSBlogConsensus.h"
 #include <functional>
@@ -55,7 +56,7 @@ std::map<uint64_t,int> acked;
 void emit(int receiver,StellarMessage const& m){
  auto t=m.customMessage().msgType;
  if(t==CUSTOM_ITHS_BLOG){ITHSBlogPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==2)proposals.emplace(m.customMessage().view,active);if(p.kind==6)assert(p.view==0);}
- if(t==CUSTOM_FORGET_NATIVE){ForgetITPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==1)proposals.emplace(m.customMessage().view,active);}
+ if(t==CUSTOM_FORGET_NATIVE && m.customMessage().view){ForgetITPacket p;std::vector<char> b(m.customMessage().data.begin(),m.customMessage().data.end());xdr::xdr_from_opaque(b,p);if(p.kind==1)proposals.emplace(m.customMessage().view,active);}
  if(t==CUSTOM_TETRA_PROPOSE || t==CUSTOM_SIMPLE_PROPOSE || t==CUSTOM_FORGET_PREPARE)
   proposals.emplace(m.customMessage().view,active);
  events.push_back({active,receiver,m});
@@ -165,8 +166,8 @@ void transitions(){
  tetra.invoke(1,[&](auto& s){
   for(uint64_t slot=1;slot<=4;++slot){auto& block=s.mNormalSlots[slot];block.proposed=true;block.data=batch(slot).serialize();block.parent=slot==1?Hash{}:s.mNormalSlots.at(slot-1).digest;block.digest=s.normalDigest(slot,block.parent,block.data);
    s.advanceTetraBFT(slot);assert(s.mNormalExecuted==0);
-   block.tetraVotes.emplace(node(0),block.digest);block.tetraVotes.emplace(node(0),block.digest);assert(!s.advanceTetraBFT(slot));
-   block.tetraVotes.emplace(node(2),block.digest);s.normalAdvance(slot);
+   block.tetraVotes.record(node(0),block.digest);block.tetraVotes.record(node(0),block.digest);assert(!s.advanceTetraBFT(slot));
+   block.tetraVotes.record(node(2),block.digest);s.normalAdvance(slot);
    assert(s.mNormalExecuted==(slot==4?1u:0u));
   }
  });
@@ -251,10 +252,10 @@ def main():
     # Substitute only the clock, leaving the production state machine and wire
     # decoder/encoder intact for deterministic timeout tests.
     clock_start = body.index('uint64_t\nforgetNow()')
-    clock_end = body.index('bool\nvalidForgetValue', clock_start)
+    clock_end = body.index('\n}', clock_start) + 2
     body = body[:clock_start] + 'uint64_t forgetNow(){return fakeForgetNow;}\n' + body[clock_end:]
     clock_start = body.index('uint64_t\nithsBlogNow()')
-    clock_end = body.index('bool\nvalidITHSInput', clock_start)
+    clock_end = body.index('\n}', clock_start) + 2
     body = body[:clock_start] + 'uint64_t ithsBlogNow(){return fakeITHSNow;}\n' + body[clock_end:]
     source = PRE + fields + '\n};\n}\n' + body + POST
     with tempfile.TemporaryDirectory(prefix='stellar-multishot-') as tmp:

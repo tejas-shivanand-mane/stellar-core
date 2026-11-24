@@ -14,6 +14,7 @@
 #include "overlay/ForgetITConsensus.h"
 #include "overlay/ITHSBlogConsensus.h"
 #include "overlay/NormalPathConsensus.h"
+#include "overlay/ExperimentBatch.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/OverlayMetrics.h"
 #include "overlay/SurveyManager.h"
@@ -114,6 +115,8 @@ class OverlayManagerImpl : public OverlayManager
     std::shared_ptr<ShabdizRuntime> mPaperShabdiz;
     std::unique_ptr<VirtualTimer> mPaperShabdizTimer;
     void initializeNormalPath();
+    ExperimentBatchCache mNormalBatches{BatchRules::NormalPath,
+                                        experiment::SERVER_BATCH_SIZE};
     bool advanceITHSBlog(uint64_t seq);
     void tickITHSBlog();
     void armITHSBlogTimer();
@@ -142,7 +145,7 @@ class OverlayManagerImpl : public OverlayManager
     struct NormalSlot
     {
         // Multi-shot TetraBFT: one vote per block, four notarized blocks.
-        std::map<NodeID, Hash> tetraVotes;
+        DigestVotes<NodeID, Hash> tetraVotes;
         Hash parent{};
         bool tetraVoted = false;
         bool tetraNotarized = false;

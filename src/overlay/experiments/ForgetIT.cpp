@@ -23,25 +23,6 @@ forgetNow()
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
-bool
-validForgetValue(Forget::Value const& value)
-{
-    if (!value.valid())
-        return false;
-    if (value.tag != Forget::Value::Data)
-        return true;
-    try
-    {
-        auto batch = TransactionBatch::deserialize(value.data);
-        return value.data.size() <= 90000 &&
-               batch.transactions.size() == SERVER_BATCH_SIZE &&
-               batch.serialize() == value.data;
-    }
-    catch (std::exception const&)
-    {
-        return false;
-    }
-}
 }
 
 void
@@ -137,7 +118,10 @@ OverlayManagerImpl::handleForgetITMessage(CustomMessage const& cm,
                 known != mNormalSlots.end() && known->second.forget &&
                 value.data == known->second.forget->state().input)
                 return true;
-            return validForgetValue(value);
+            return value.valid() &&
+                   (value.tag != Forget::Value::Data ||
+                    (value.data.size() <= 90000 &&
+                     mNormalBatches.get(value.data)));
         };
         if (!msg.view || msg.kind < Forget::Prepare ||
             msg.kind > Forget::Echo3 || !valid(msg.value) || !valid(msg.guard))

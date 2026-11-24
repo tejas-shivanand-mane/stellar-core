@@ -313,9 +313,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
                 auto batch = r.batch(b.data, id);
                 if (!batch)
                     throw std::runtime_error("Invalid committed Shabdiz batch");
-                for (auto const& op : *batch)
-                    if (op.write)
-                        g_kvStore[op.key] = op.value;
+                applyExperimentBatch(*batch, g_kvStore);
                 appliedTxns = batch->size();
                 r.archive->put("e-" + binToHex(id), {});
                 auto acks = r.localAcks.find(id);

@@ -90,6 +90,30 @@ using TetraBFTNormal = BasicNormalPath<Node, Digest, 4>;
 template <typename Node, typename Digest>
 using ForgetITNormal = BasicNormalPath<Node, Digest, 2>;
 
+// Keep the first vote from each member, including votes preceding a proposal.
+template <typename Node, typename Digest> class DigestVotes
+{
+    std::map<Node, Digest> mFirst;
+    std::map<Digest, size_t> mCounts;
+
+  public:
+    void record(Node const& sender, Digest const& digest)
+    {
+        if (mFirst.emplace(sender, digest).second)
+            ++mCounts[digest];
+    }
+    size_t count(Digest const& digest) const
+    {
+        auto it = mCounts.find(digest);
+        return it == mCounts.end() ? 0 : it->second;
+    }
+    size_t countWithout(Digest const& digest, Node const& excluded) const
+    {
+        auto it = mFirst.find(excluded);
+        return count(digest) - (it != mFirst.end() && it->second == digest);
+    }
+};
+
 // Simple-IT Fig. 2, with a safe consecutive parent provided by the caller.
 // Bracha RBC: proposal/echo/ready followed by consensus commit.
 // Opt-RBC: Fig. 1 of arXiv:2505.02761v4; only nonleader votes count
@@ -97,7 +121,7 @@ using ForgetITNormal = BasicNormalPath<Node, Digest, 2>;
 template <typename Node, typename Digest> class SimpleITNormal
 {
     std::optional<Digest> mProposal;
-    std::array<std::map<Node, Digest>, 4> mVotes;
+    std::array<DigestVotes<Node, Digest>, 4> mVotes;
     std::set<Node> mCommits;
     std::array<bool, 5> mSent{};
     bool mDelivered = false;
@@ -105,10 +129,9 @@ template <typename Node, typename Digest> class SimpleITNormal
 
     size_t count(unsigned phase, Node const& leader, bool excludeLeader) const
     {
-        size_t result = 0;
-        for (auto const& v : mVotes[phase - 1])
-            result += (!excludeLeader || !(v.first == leader)) && v.second == *mProposal;
-        return result;
+        auto const& votes = mVotes[phase - 1];
+        return excludeLeader ? votes.countWithout(*mProposal, leader)
+                             : votes.count(*mProposal);
     }
 
   public:
@@ -129,7 +152,7 @@ template <typename Node, typename Digest> class SimpleITNormal
             commit(sender);
             return;
         }
-        mVotes[phase - 1].emplace(sender, digest);
+        mVotes[phase - 1].record(sender, digest);
     }
     // Simple-IT Figure 2: <commit, round>. The caller selects this round's
     // state; no value is attached. Early commits wait for local RBC delivery.
