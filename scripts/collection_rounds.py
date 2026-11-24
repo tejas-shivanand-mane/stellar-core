@@ -14,6 +14,10 @@ def check_round_settings(delay, points):
 
 
 def observed_rounds(logs, config, client_started_at):
+    required_config = {"collection_rounds", "num_nodes", "force_collect_after_sec"}
+    missing = required_config.difference(config)
+    if missing:
+        raise ValueError(f"Timed collection trial is missing settings: {', '.join(sorted(missing))}")
     count = config["collection_rounds"]
     logs = list(logs)
     if len(logs) != config["num_nodes"]:
@@ -45,7 +49,7 @@ def observed_rounds(logs, config, client_started_at):
     if observed:
         summary.update(first_collect_at=min(r["first_us"] for r in reports if r["collects"]) / 1e6,
                        last_slow_proposal_at=max(r["last_us"] for r in reports) / 1e6)
-        if summary["first_collect_at"] < client_started_at:
+        if client_started_at is not None and summary["first_collect_at"] < client_started_at:
             print("Collection began before client measurements started.")
     return summary
 
@@ -88,30 +92,44 @@ def plot_collection_rounds(session, save=True, show=True):
     import pandas as pd
 
     session = Path(session).expanduser()
-    trials = sorted(session.rglob("result.json"))
+    roots = {path.parent for path in session.rglob("result.json")}
+    # A local trial can finish the workload and fail in finalization before result.json exists.
+    roots.update(path.parent for path in session.glob("rounds*/repeat*/load*/run_config.json"))
     groups, summary = {}, []
-    for result_path in trials:
-        root = result_path.parent
-        result = json.loads(result_path.read_text())
-        if result.get("status") != "ok":
-            print(f"Excluded {root.relative_to(session)}: {result.get('error', result.get('status'))}")
+    for root in sorted(roots):
+        result_path = root / "result.json"
+        recovered = not result_path.exists()
+        try:
+            if recovered:
+                cfg = json.loads((root / "run_config.json").read_text())
+                result = observed_rounds(root.glob("nodes/node*/stellar-core.log"), cfg, None)
+            else:
+                result = json.loads(result_path.read_text())
+                if result.get("status") != "ok":
+                    print(f"Excluded {root.relative_to(session)}: {result.get('error', result.get('status'))}")
+                    continue
+                cfg = result["config"]
+            series = client_series(sorted(root.glob("client-*/client.log")), cfg)
+        except (OSError, KeyError, ValueError) as exc:
+            print(f"Excluded {root.relative_to(session)}: {exc}")
             continue
-        cfg = result["config"]
+        if recovered:
+            print(f"Recovered logged measurements from {root.relative_to(session)}. "
+                  "The client start timestamp was not saved; the collection marker is unavailable.")
         # Plot repetitions as distinct traces; compare round counts at fixed settings.
         delay = cfg.get("force_collect_after_sec")
         trigger = f"after{delay}s" if delay is not None else f"view{cfg['collection_start_view']}"
         key = (cfg["num_nodes"], trigger, cfg["active_clients"],
                cfg["client_threads"], cfg["max_in_flight"], cfg["batch_size"],
                cfg["client_duration_sec"], cfg["source_commit"])
-        series = client_series(sorted(root.glob("client-*/client.log")), cfg)
-        start = result["client_started_at"]
+        start = result.get("client_started_at")
         marker = result.get("first_collect_at")
-        offset = None if marker is None else marker - start
+        offset = marker - start if marker is not None and start is not None else None
         groups.setdefault(key, []).append((cfg["collection_rounds"], cfg["repetition"], offset, series))
-        summary.append(dict(nodes=key[0], server_interval_sec=delay, first_view=cfg.get("collection_start_view"), rounds=cfg["collection_rounds"],
+        summary.append(dict(nodes=key[0], recovered_from_logs=recovered, server_interval_sec=delay, first_view=cfg.get("collection_start_view"), rounds=cfg["collection_rounds"],
                             observed=result["observed_rounds"], repetition=cfg["repetition"],
                             first_collect_sec=offset, last_slow_proposal_sec=(
-                                result["last_slow_proposal_at"] - start if marker is not None else None)))
+                                result["last_slow_proposal_at"] - start if offset is not None else None)))
     # Older GCP folders record the requested attempts but no observed event times.
     for meta in sorted(session.glob("Collection_*/run_config.txt")):
         fields = dict(line.split("=", 1) for line in meta.read_text().splitlines() if "=" in line)
