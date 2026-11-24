@@ -5,52 +5,48 @@ import re
 from pathlib import Path
 
 
-def check_round_settings(first, points):
-    if type(first) is not int or not 1 <= first < 2**32:
-        raise ValueError("Choose a positive 32-bit starting view")
+def check_round_settings(delay, points):
+    if type(delay) is not int or not 0 <= delay < 2**31:
+        raise ValueError("Choose a nonnegative server uptime in seconds (below 2**31)")
     if (not points or any(type(n) is not int or not 0 <= n < 2**32 for n in points)
             or len(set(points)) != len(points)):
         raise ValueError("Choose distinct nonnegative 32-bit collection round counts")
 
 
 def observed_rounds(logs, config, client_started_at):
-    first, count = config["collection_start_view"], config["collection_rounds"]
+    count = config["collection_rounds"]
     logs = list(logs)
     if len(logs) != config["num_nodes"]:
         raise ValueError(f"Expected {config['num_nodes']} replica logs, found {len(logs)}")
-    phases = {"collect": {}, "proposal": {}}
-    event = re.compile(r"\[SHABDIZ COLLECTION ROUND\] view=(\d+) phase=(collect|proposal) unix_us=(\d+)")
-    last_commits = []
+    reports = []
     for path in logs:
-        last = 0
         with path.open(errors="replace") as stream:
-            for line in stream:
-                if "[FAST COMMITTED]" in line:
-                    match = re.search(r"\bview=(\d+)", line)
-                    if match:
-                        last = max(last, int(match[1]))
-                if "[SHABDIZ COLLECTION ROUND]" in line:
-                    match = event.search(line)
-                    if not match:
-                        raise ValueError(f"Malformed collection event in {path}")
-                    view, phase, stamp = int(match[1]), match[2], int(match[3])
-                    if not first <= view < first + count or view in phases[phase]:
-                        raise ValueError(f"Unexpected or duplicate {phase} in view {view}")
-                    phases[phase][view] = stamp / 1_000_000
-        last_commits.append(last)
-    for phase, events in phases.items():
-        if len(events) != count:
-            raise ValueError(f"Observed {phase} in {len(events)}/{count} configured views "
-                             f"(first view {first}, minimum final commit {min(last_commits)})")
-    if min(last_commits) < first + count:
-        raise ValueError(f"At least one replica did not commit past the window (minimum {min(last_commits)})")
-    summary = {"observed_rounds": count, "min_final_commit_view": min(last_commits)}
-    if count:
-        summary.update(first_collect_at=phases["collect"][first],
-                       last_slow_proposal_at=phases["proposal"][first + count - 1])
-        if not (client_started_at <= summary["first_collect_at"] and
-                summary["last_slow_proposal_at"] <= client_started_at + config["client_duration_sec"]):
-            raise ValueError("Collection was outside the client workload; adjust start view or duration")
+            lines = [line for line in stream if "[SHABDIZ TIMED COLLECTION]" in line]
+        if len(lines) != 1:
+            raise ValueError(f"{path}: expected one completed collection window, found {len(lines)}; "
+                             "check server uptime and trial duration")
+        r = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", lines[0])}
+        required = {"delay", "first", "rounds", "collects", "proposals", "armed_us",
+                    "first_us", "last_us", "committed"}
+        if not required <= r.keys():
+            raise ValueError(f"{path}: malformed collection summary")
+        if (r["delay"] != config["force_collect_after_sec"] or r["rounds"] != count or
+                r["committed"] < r["first"] + count or r["collects"] != r["proposals"] or
+                r["collects"] > count or bool(r["collects"]) != bool(r["first_us"]) or
+                bool(r["proposals"]) != bool(r["last_us"])):
+            raise ValueError(f"{path}: incomplete or inconsistent collection summary")
+        reports.append(r)
+    # Each view has a unique leader. Independently started server clocks can
+    # cover different view intervals, so use the counts the leaders observed.
+    observed = sum(r["collects"] for r in reports)
+    summary = dict(observed_rounds=observed, min_final_commit_view=min(r["committed"] for r in reports),
+                   first_armed_at=min(r["armed_us"] for r in reports) / 1e6,
+                   last_armed_at=max(r["armed_us"] for r in reports) / 1e6)
+    if observed:
+        summary.update(first_collect_at=min(r["first_us"] for r in reports if r["collects"]) / 1e6,
+                       last_slow_proposal_at=max(r["last_us"] for r in reports) / 1e6)
+        if summary["first_collect_at"] < client_started_at:
+            print("Collection began before client measurements started.")
     return summary
 
 
@@ -102,7 +98,9 @@ def plot_collection_rounds(session, save=True, show=True):
             continue
         cfg = result["config"]
         # Plot repetitions as distinct traces; compare round counts at fixed settings.
-        key = (cfg["num_nodes"], cfg["collection_start_view"], cfg["active_clients"],
+        delay = cfg.get("force_collect_after_sec")
+        trigger = f"after{delay}s" if delay is not None else f"view{cfg['collection_start_view']}"
+        key = (cfg["num_nodes"], trigger, cfg["active_clients"],
                cfg["client_threads"], cfg["max_in_flight"], cfg["batch_size"],
                cfg["client_duration_sec"], cfg["source_commit"])
         series = client_series(sorted(root.glob("client-*/client.log")), cfg)
@@ -110,7 +108,7 @@ def plot_collection_rounds(session, save=True, show=True):
         marker = result.get("first_collect_at")
         offset = None if marker is None else marker - start
         groups.setdefault(key, []).append((cfg["collection_rounds"], cfg["repetition"], offset, series))
-        summary.append(dict(nodes=key[0], first_view=key[1], rounds=cfg["collection_rounds"],
+        summary.append(dict(nodes=key[0], server_interval_sec=delay, first_view=cfg.get("collection_start_view"), rounds=cfg["collection_rounds"],
                             observed=result["observed_rounds"], repetition=cfg["repetition"],
                             first_collect_sec=offset, last_slow_proposal_sec=(
                                 result["last_slow_proposal_at"] - start if marker is not None else None)))
@@ -139,8 +137,8 @@ def plot_collection_rounds(session, save=True, show=True):
         out.mkdir(exist_ok=True)
     with plt.rc_context(style):
         for key, traces in groups.items():
-            n, view, clients, threads, limit, batch, duration, sha = key
-            tag = f"n{n}_v{view}_c{clients}_t{threads}_w{limit}_b{batch}_{duration}s_{sha[:8]}"
+            n, trigger, clients, threads, limit, batch, duration, sha = key
+            tag = f"n{n}_{trigger}_c{clients}_t{threads}_w{limit}_b{batch}_{duration}s_{sha[:8]}"
             for metric, label in [("throughput", "ACK throughput (ops/s)"), ("latency", "Mean ACK latency (ms)")]:
                 fig, ax = plt.subplots(figsize=(12, 8))
                 for rounds, rep, start, data in sorted(traces, key=lambda t: t[:2]):

@@ -31,6 +31,16 @@ constexpr uint32_t WIRE_VERSION = 1;
 constexpr uint32_t WORK_BATCH = 100;
 constexpr size_t BLOCK_CACHE_SIZE = 128;
 using Clock = std::chrono::steady_clock;
+// Each replica is a separate process. Include startup and peer discovery in
+// elapsed server time; the existing Shabdiz tick checks this clock.
+auto const nodeStartedAt = Clock::now();
+
+int64_t
+unixMicros()
+{
+    auto epoch = std::chrono::system_clock::now().time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(epoch).count();
+}
 
 Hash
 blockDigest(uint64_t view, Hash const& parent, std::string const& data)
@@ -116,7 +126,9 @@ struct ShabdizRuntime
     uint64_t generation = 0, forwardedView = 0;
     uint64_t fastProposals = 0, slowProposals = 0, collects = 0, wishes = 0;
     bool newWork = false, retryWork = false;
-    Clock::time_point deadline, retry, startedAt;
+    Clock::time_point deadline, retry;
+    uint64_t timedFirstView = 0, timedCollects = 0, timedProposals = 0;
+    int64_t armedAtUs = 0, firstCollectUs = 0, lastProposalUs = 0;
 
     size_t
     blockCacheSize() const
@@ -358,6 +370,16 @@ OverlayManagerImpl::pumpPaperShabdiz()
         r.slowProposals += out.message.kind == PaperShabdiz::Kind::SlowProposal;
         r.collects += out.message.kind == PaperShabdiz::Kind::Collect;
         r.wishes += out.message.kind == PaperShabdiz::Kind::Wish;
+        if (r.timedFirstView && r.engine->inCollectionWindow(out.message.view))
+        {
+            if (out.message.kind == PaperShabdiz::Kind::Collect && ++r.timedCollects == 1)
+                r.firstCollectUs = unixMicros();
+            if (out.message.kind == PaperShabdiz::Kind::SlowProposal)
+            {
+                ++r.timedProposals;
+                r.lastProposalUs = unixMicros();
+            }
+        }
         if (COLLECTION_START_VIEW &&
             (out.message.kind == PaperShabdiz::Kind::Collect ||
              out.message.kind == PaperShabdiz::Kind::SlowProposal) &&
@@ -377,6 +399,18 @@ OverlayManagerImpl::pumpPaperShabdiz()
             if (r.members.count(peer.first) &&
                 (!out.to || *out.to == peer.first))
                 peer.second->sendMessage(msg);
+    }
+    if (r.timedFirstView && r.engine->committed().view >= r.timedFirstView + MAX_COLLECT_ATTEMPTS)
+    {
+        // One summary per replica after the window, including replicas that
+        // did not lead any views. No per-round logging on the timed path.
+        CLOG_INFO(Overlay,
+                  "[SHABDIZ TIMED COLLECTION] delay={} first={} rounds={} collects={} proposals={} "
+                  "armed_us={} first_us={} last_us={} committed={}",
+                  FORCE_COLLECT_AFTER_SEC, r.timedFirstView, MAX_COLLECT_ATTEMPTS,
+                  r.timedCollects, r.timedProposals, r.armedAtUs, r.firstCollectUs,
+                  r.lastProposalUs, r.engine->committed().view);
+        r.timedFirstView = 0;
     }
     // Client ingress is transport, not an extra all-to-all consensus phase.
     // Forward to the next eligible proposer; it can buffer the work while
@@ -446,8 +480,7 @@ OverlayManagerImpl::tickPaperShabdiz()
         if (connected < required)
             return;
         r.started = true;
-        r.startedAt = Clock::now();
-        r.retry = r.startedAt + std::chrono::seconds(1);
+        r.retry = Clock::now() + std::chrono::seconds(1);
         if (mApp.getConfig().SEND_CUSTOM_MESSAGE && !g_clientListenerActive)
             startClientListener(CLIENT_PORT);
         r.engine->start();
@@ -474,11 +507,13 @@ OverlayManagerImpl::tickPaperShabdiz()
             r.newWork = true;
         }
     }
-    if (!COLLECTION_START_VIEW && !SHABDIZ_FAST_PATH_ONLY && !r.forced && Clock::now() - r.startedAt >=
-                         std::chrono::seconds(FORCE_COLLECT_AFTER_SEC))
+    if (!COLLECTION_START_VIEW && !SHABDIZ_FAST_PATH_ONLY && !r.forced &&
+        Clock::now() - nodeStartedAt >= std::chrono::seconds(FORCE_COLLECT_AFTER_SEC))
     {
         r.forced = true;
-        r.engine->forceSlowViews(MAX_COLLECT_ATTEMPTS);
+        r.armedAtUs = unixMicros();
+        r.timedFirstView = r.engine->view() + 1;
+        r.engine->setCollectionWindow(r.timedFirstView, MAX_COLLECT_ATTEMPTS);
     }
     r.engine->workAvailable();
     pumpPaperShabdiz();
