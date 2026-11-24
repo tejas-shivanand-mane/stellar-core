@@ -271,11 +271,12 @@ OverlayManagerImpl::initializePaperShabdiz()
         },
         NonPrune_MODE, SHABDIZ_FAST_PATH_ONLY);
     CLOG_INFO(Overlay,
-              "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin "
+              "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin skip_disconnected={} "
               "prepared_pipeline=true fast_path_only={} archive={} "
               "archive_format={} archive_batch_blocks={} "
               "archive_memory_blocks={}",
-              r->members.size(), r->engine->quorum(), SHABDIZ_FAST_PATH_ONLY,
+              r->members.size(), r->engine->quorum(), !SHABDIZ_FAST_PATH_ONLY,
+              SHABDIZ_FAST_PATH_ONLY,
               archiveOptions.memoryOnly ? "none" : archivePath.string(),
               archiveOptions.memoryOnly ? "memory_only" : "sqlite_zlib",
               archiveOptions.memoryOnly ? 0 : archiveOptions.batchBlocks,
@@ -364,13 +365,14 @@ OverlayManagerImpl::pumpPaperShabdiz()
                 peer.second->sendMessage(msg);
     }
     // Client ingress is transport, not an extra all-to-all consensus phase.
-    // Forward only to leader(v), and retry at view changes or the retry tick.
+    // Forward to the next eligible proposer; it can buffer the work while
+    // the quorum skips a disconnected slot. Retry on view changes or the retry tick.
     // The leader's paper proposal supplies the batch to all other replicas.
     if (forwardWork)
     {
         r.newWork = false;
         r.forwardedView = r.engine->view();
-        auto leader = r.engine->leader(r.engine->view());
+        auto const& leader = r.engine->workLeader();
         auto peer = peers.find(leader);
         if (!(leader == r.self) && peer != peers.end())
             for (auto const& ack : r.localAcks)
@@ -486,6 +488,30 @@ OverlayManagerImpl::tickPaperShabdiz()
                   "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of "
                   "elements: {}",
                   getRSS_MB(), r.engine->prepareHistorySize());
+        if (!SHABDIZ_FAST_PATH_ONLY)
+        {
+            // Read both authenticated maps without copying them. Refresh on
+            // the retry tick, including while a crashed leader owns the view.
+            auto const& inbound = getInboundAuthenticatedPeers();
+            auto const& outbound = getOutboundAuthenticatedPeers();
+            std::set<NodeID> unavailable;
+            for (auto const& id : r.members)
+                if (!(id == r.self) && !inbound.count(id) && !outbound.count(id))
+                    unavailable.insert(id);
+            if (r.engine->setUnavailableLeaders(std::move(unavailable)))
+            {
+                std::string excluded;
+                for (auto const& id : r.engine->unavailableLeaders())
+                {
+                    if (!excluded.empty())
+                        excluded += ",";
+                    excluded += mApp.getConfig().toShortString(id);
+                }
+                CLOG_INFO(Overlay, "[SHABDIZ LEADER POOL] eligible={} excluded={} quorum={}",
+                          r.members.size() - r.engine->unavailableLeaders().size(),
+                          excluded.empty() ? "none" : excluded, r.engine->quorum());
+            }
+        }
         r.engine->retransmit();
         r.newWork = true;
         r.retryWork = true;

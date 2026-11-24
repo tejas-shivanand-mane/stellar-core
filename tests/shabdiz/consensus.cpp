@@ -356,10 +356,40 @@ slowValidationBoundaries()
 }
 
 void
+leaderEligibility()
+{
+    Fixture f;
+    assert(f.e.view() == 1 && f.e.leader(1) == 0 && f.e.quorum() == 3);
+    f.e.setUnavailableLeaders({0, 1}); // too few reachable voters
+    assert(f.e.takeOutgoing().empty());
+    f.e.setUnavailableLeaders({0});
+    assert(f.e.workLeader() == 1);
+    auto out = f.e.takeOutgoing();
+    assert(count(out, Kind::Wish) == 1 && out.front().message.view == 2);
+    f.e.receive(1, msg(Kind::Wish, 2));
+    f.e.receive(1, msg(Kind::Wish, 2));
+    assert(f.e.view() == 1); // self plus one distinct sender is not a quorum
+    f.e.receive(2, msg(Kind::Wish, 2));
+    assert(f.e.view() == 2 && f.e.leader(2) == 1 && f.e.quorum() == 3);
+    f.e.setUnavailableLeaders({}); // the link authenticated again
+    f.enter(5);
+    assert(f.e.workLeader() == 0);
+    auto b = makeBlock(5);
+    f.e.receive(0, proposal(b));
+    assert(f.blocks.count(b.hash)); // proposal from the original slot owner is accepted
+    assert(count(f.e.takeOutgoing(), Kind::Wish) == 0);
+
+    Fixture fast(3, true);
+    fast.e.setUnavailableLeaders({0});
+    assert(fast.e.takeOutgoing().empty() && fast.e.view() == 1);
+}
+
+void
 network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         bool routedWork = false, bool fastPathOnly = false,
         size_t memoryBlocks = 0, uint64_t limit = 8,
-        std::vector<uint64_t> crashAfter = {})
+        std::vector<uint64_t> crashAfter = {}, bool skipDisconnected = false,
+        std::vector<int> crashOrder = {})
 {
     struct Delivery
     {
@@ -376,6 +406,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     std::vector<std::vector<Block>> executed(n);
     std::vector<Delivery> pending;
     std::vector<std::set<uint64_t>> availableWork(n);
+    std::set<int> offline(members.begin(), members.begin() + absent);
     size_t injected = 0;
     uint64_t forwardedView = 0;
     std::mt19937 rng(seed);
@@ -417,13 +448,13 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         if (routedWork && id == n - 1 && forwardedView != engines[id]->view())
         {
             forwardedView = engines[id]->view();
-            int leader = engines[id]->leader(forwardedView);
+            int leader = engines[id]->workLeader();
             if (leader == id)
             {
                 availableWork[id].insert(forwardedView);
                 engines[id]->workAvailable();
             }
-            else if (leader >= absent)
+            else if (!offline.count(leader))
                 pending.push_back(
                     {id, leader, msg(Kind::Prepare, forwardedView), true});
         }
@@ -438,7 +469,7 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
                        o.message.kind == Kind::GetBlock ||
                        o.message.kind == Kind::BlockData);
             for (int j = absent; j < n; ++j)
-                if (j != id && (!o.to || *o.to == j))
+                if (!offline.count(j) && j != id && (!o.to || *o.to == j))
                     pending.push_back({id, j, o.message});
         }
     };
@@ -461,10 +492,19 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
             if (injected < crashAfter.size() &&
                 engines.back()->committed().view >= crashAfter[injected])
             {
-                ++absent;
+                int victim = crashOrder.empty() ? absent + static_cast<int>(injected)
+                                                : crashOrder.at(injected);
+                assert(victim < n - 1 && !offline.count(victim));
+                offline.insert(victim);
                 ++injected;
             }
-            if (d.to < absent)
+            if (skipDisconnected && !offline.count(d.to))
+            {
+                // Observations arrive at different times on different hosts.
+                engines[d.to]->setUnavailableLeaders(offline);
+                drain(d.to);
+            }
+            if (offline.count(d.to))
                 continue;
             if (d.work)
             {
@@ -485,11 +525,17 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         }
         bool finished = true;
         for (int i = absent; i < n; ++i)
-            finished &= engines[i]->committed().view >= limit;
+            if (!offline.count(i))
+                finished &= engines[i]->committed().view >= limit;
         if (finished)
             break;
+        // With crash evidence, the live quorum must keep committing without
+        // any timer expiry, even when several consecutive owners are absent.
+        assert(!skipDisconnected);
         for (int i = absent; i < n; ++i)
         {
+            if (offline.count(i))
+                continue;
             engines[i]->timeout();
             engines[i]->retransmit();
             drain(i);
@@ -498,6 +544,8 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
     assert(injected == crashAfter.size());
     for (int i = absent; i < n; ++i)
     {
+        if (offline.count(i))
+            continue;
         if (engines[i]->committed().view < limit)
             std::cerr << "stalled n=" << n << " absent=" << absent
                       << " seed=" << seed << " slow=" << forceSlow
@@ -509,10 +557,10 @@ network(int n, int absent, unsigned seed, bool forceSlow, bool loseOldVotes,
         assert(engines[i]->committed().view >= limit);
         assert(engines[i]->retainedViews() <= 2);
         assert(engines[i]->prepareHistorySize() <= 3);
-        assert(executed[i].size() == executed[absent].size());
+        assert(executed[i].size() == executed.back().size());
         for (size_t j = 0; j < executed[i].size(); ++j)
         {
-            assert(executed[i][j].hash == executed[absent][j].hash);
+            assert(executed[i][j].hash == executed.back()[j].hash);
             if (j)
                 assert(executed[i][j].parent == executed[i][j - 1].hash);
         }
@@ -568,6 +616,7 @@ main()
     assert(stalled > 2s && stalled < 2200ms);
     assert(stellar::shabdizViewTimeout(15690) > stalled);
     assert(stellar::shabdizViewTimeout(UINT64_MAX) > stalled);
+    leaderEligibility();
     firstVoteCounts();
     fastPathOnlyBoundaries();
     fastPipeline();
@@ -589,6 +638,14 @@ main()
     // continue through several full rotations with exactly a quorum left.
     network(10, 0, 5, false, false, true, false, 0, 60, {7, 18, 29});
     ++schedules;
+    for (unsigned seed = 0; seed < 12; ++seed)
+    {
+        std::vector<int> victims = seed % 2 ? std::vector<int>{0, 1, 2}
+                                            : std::vector<int>{1, 6, 7};
+        network(10, 0, seed, false, false, true, false, 0, 80, {7, 18, 29},
+                true, victims);
+        ++schedules;
+    }
     network(48, 0, 1, false, false);
     network(48, 15, 2, true, false);
     schedules += 2;

@@ -118,6 +118,9 @@ template <typename Node, typename Hash> class ShabdizConsensus
     std::map<View, ViewState> mViews;
     std::map<Node, Pair> mReports;
     std::map<Node, View> mWishes;
+    // Transport observations affect leader eligibility only. The owner of a
+    // view number and the set of replicas allowed to vote never change.
+    std::set<Node> mUnavailableLeaders;
     std::map<View, std::vector<std::pair<Node, Message>>> mFuture;
     std::deque<std::pair<Node, Message>> mInbox;
     std::set<Hash> mMissing;
@@ -275,6 +278,37 @@ template <typename Node, typename Hash> class ShabdizConsensus
                 return true;
         }
         return false;
+    }
+    View
+    nextEligibleView(View slot) const
+    {
+        View next = slot;
+        while (mUnavailableLeaders.count(leader(next)))
+        {
+            if (next == std::numeric_limits<View>::max())
+                return slot;
+            ++next;
+        }
+        return next;
+    }
+    void
+    wishPastUnavailableLeader()
+    {
+        if (!mView || mUnavailableLeaders.empty())
+            return;
+        // Finish the preceding prepared block before asking peers to skip
+        // beyond its retained vote window. The ordinary recovery timeout
+        // remains available if that block cannot obtain its commit quorum.
+        if (mPrepared.view == mView - 1 && mCommitted.view < mPrepared.view)
+            return;
+        View next = nextEligibleView(mView);
+        if (next > mView && next > mHighestWish)
+        {
+            // Keep processing this view until a quorum advances. Replicas
+            // with different reachability still agree on each slot's owner.
+            mHighestWish = next;
+            emit(message(Kind::Wish, next));
+        }
     }
     void
     enter(View v)
@@ -717,7 +751,10 @@ template <typename Node, typename Hash> class ShabdizConsensus
                     changed |= votingRules(view.first, view.second);
                 }
                 if (!mFastPathOnly)
+                {
                     changed |= catchUp();
+                    wishPastUnavailableLeader();
+                }
                 if (mPrepared.view == mView &&
                     (mView == 0 || mCommitted.view >= mView - 1))
                 {
@@ -776,6 +813,33 @@ template <typename Node, typename Hash> class ShabdizConsensus
     leader(View v) const
     {
         return mMembers[(v ? v - 1 : 0) % mMembers.size()];
+    }
+    Node const&
+    workLeader() const
+    {
+        return leader(nextEligibleView(mView));
+    }
+    bool
+    setUnavailableLeaders(std::set<Node> unavailable)
+    {
+        if (mFastPathOnly)
+            return false;
+        // Require a connected voting quorum before accelerating rotation.
+        // If connectivity drops below this, use the ordinary synchronizer.
+        if (unavailable.size() > mF || unavailable.count(mSelf) ||
+            std::any_of(unavailable.begin(), unavailable.end(),
+                        [&](Node const& node) { return !member(node); }))
+            unavailable.clear();
+        if (mUnavailableLeaders == unavailable)
+            return false;
+        mUnavailableLeaders = std::move(unavailable);
+        drive();
+        return true;
+    }
+    std::set<Node> const&
+    unavailableLeaders() const
+    {
+        return mUnavailableLeaders;
     }
     void
     start()
