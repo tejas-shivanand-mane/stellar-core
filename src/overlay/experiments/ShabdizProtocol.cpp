@@ -264,6 +264,13 @@ OverlayManagerImpl::initializePaperShabdiz()
             return raw->batch(data, sha256(data)) != nullptr;
         },
         NonPrune_MODE, SHABDIZ_FAST_PATH_ONLY);
+    if (SHABDIZ_MEMORY_MODE != "none")
+    {
+        using Mode = PaperShabdiz::MemoryExperiment;
+        auto mode = SHABDIZ_MEMORY_MODE == "drop_votes" ? Mode::DropVotes : Mode::PausePruning;
+        r->engine->setMemoryExperiment(mode, memoryWindowStart(), memoryWindowPeriod(),
+                                       memoryWindowLength());
+    }
     if (COLLECTION_START_VIEW)
         r->engine->setCollectionWindow(COLLECTION_START_VIEW, MAX_COLLECT_ATTEMPTS);
     CLOG_INFO(Overlay,
@@ -515,6 +522,11 @@ OverlayManagerImpl::tickPaperShabdiz()
                   "elements: {}, view={} unix_us={} nonprune={}",
                   getRSS_MB(), r.engine->prepareHistorySize(), r.engine->view(),
                   unixMicros(), NonPrune_MODE);
+        if (r.engine->memoryExperimentEnabled())
+            CLOG_INFO(Overlay,
+                      "[SHABDIZ MEMORY WINDOW] view={} mode={} dropped_votes={} skipped_prunes={} unix_us={}",
+                      r.engine->view(), SHABDIZ_MEMORY_MODE,
+                      r.engine->droppedVotes(), r.engine->skippedPrunes(), unixMicros());
         if (!SHABDIZ_FAST_PATH_ONLY)
         {
             // Read both authenticated maps without copying them. Refresh on

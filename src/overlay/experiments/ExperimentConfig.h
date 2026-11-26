@@ -229,6 +229,28 @@ inline const bool SIMPLE_IT_OPTIMISTIC =
     SIMPLE_IT_MODE ? PROTOCOL == "simple_it" : defaults::SIMPLE_IT_OPTIMISTIC;
 inline const bool NonPrune_MODE =
     detail::boolean("STELLAR_EXPERIMENT_NONPRUNE", defaults::NonPrune_MODE);
+inline const std::string SHABDIZ_MEMORY_MODE = [] {
+    auto raw = std::getenv("STELLAR_EXPERIMENT_SHABDIZ_MEMORY_MODE");
+    std::string mode = raw ? raw : "none";
+    if (mode != "none" && mode != "drop_votes" && mode != "pause_pruning")
+        throw std::invalid_argument("Unknown Shabdiz memory experiment mode: " + mode);
+    return mode;
+}();
+inline uint64_t
+memoryWindowStart()
+{
+    return detail::number("STELLAR_EXPERIMENT_MEMORY_START", 30000, 1, UINT32_MAX);
+}
+inline uint64_t
+memoryWindowPeriod()
+{
+    return detail::number("STELLAR_EXPERIMENT_MEMORY_PERIOD", 10000, 2, UINT32_MAX);
+}
+inline uint64_t
+memoryWindowLength()
+{
+    return detail::number("STELLAR_EXPERIMENT_MEMORY_LENGTH", 3000, 1, UINT32_MAX);
+}
 inline const int CLIENT_PORT = static_cast<int>(detail::number(
     "STELLAR_EXPERIMENT_CLIENT_PORT", defaults::CLIENT_PORT, 1, 65535));
 inline const std::size_t SERVER_BATCH_SIZE = static_cast<std::size_t>(detail::number(

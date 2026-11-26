@@ -59,6 +59,7 @@ template <typename Node, typename Hash> class ShabdizConsensus
         GetBlock,
         BlockData
     };
+    enum class MemoryExperiment { None, DropVotes, PausePruning };
     struct Message
     {
         Kind kind = Kind::Prepare;
@@ -134,6 +135,16 @@ template <typename Node, typename Hash> class ShabdizConsensus
     bool mRunning = false, mStarted = false, mReportsDirty = false;
     bool mKeepPrepareHistory = false;
     bool mFastPathOnly = false;
+    MemoryExperiment mMemoryExperiment = MemoryExperiment::None;
+    View mMemoryStart = 0, mMemoryPeriod = 1, mMemoryLength = 0;
+    uint64_t mDroppedVotes = 0, mSkippedPrunes = 0;
+
+    bool
+    inMemoryWindow(View v) const
+    {
+        return v >= mMemoryStart && (v - mMemoryStart) % mMemoryPeriod < mMemoryLength;
+    }
+
     size_t mForceSlow = 0;
     View mWindowFirst = 0, mWindowCount = 0;
 
@@ -686,7 +697,9 @@ template <typename Node, typename Hash> class ShabdizConsensus
             {
                 mPrepared = p;
                 changed = true;
-                if (!mKeepPrepareHistory)
+                if (mMemoryExperiment == MemoryExperiment::PausePruning && inMemoryWindow(v))
+                    ++mSkippedPrunes;
+                else if (!mKeepPrepareHistory)
                     for (auto it = mPS.begin();
                          it != mPS.end() && it->view < v;)
                         it = mPS.erase(it);
@@ -849,10 +862,32 @@ template <typename Node, typename Hash> class ShabdizConsensus
         drive();
     }
     void
+    setMemoryExperiment(MemoryExperiment mode, View start, View period, View length)
+    {
+        if (!start || !length || length >= period || mStarted)
+            throw std::invalid_argument("Invalid Shabdiz memory experiment schedule");
+        mMemoryExperiment = mode;
+        mMemoryStart = start;
+        mMemoryPeriod = period;
+        mMemoryLength = length;
+    }
+    bool memoryExperimentEnabled() const { return mMemoryExperiment != MemoryExperiment::None; }
+    uint64_t droppedVotes() const { return mDroppedVotes; }
+    uint64_t skippedPrunes() const { return mSkippedPrunes; }
+    void
     receive(Node const& sender, Message const& m)
     {
         if (member(sender))
         {
+            // Classify incoming peer votes by their own view, including late and
+            // future deliveries. Locally emitted votes go directly to mInbox.
+            if (mMemoryExperiment == MemoryExperiment::DropVotes &&
+                (m.kind == Kind::Prepare || m.kind == Kind::Commit) &&
+                !(sender == mSelf) && inMemoryWindow(m.view))
+            {
+                ++mDroppedVotes;
+                return;
+            }
             mInbox.emplace_back(sender, m);
             drive();
         }

@@ -54,7 +54,8 @@ struct Fixture
 {
     std::map<std::string, Block> blocks;
     Engine e;
-    Fixture(int self = 3, bool fastPathOnly = false)
+    Fixture(int self = 3, bool fastPathOnly = false,
+            Engine::MemoryExperiment mode = Engine::MemoryExperiment::None)
         : e(
               self, {0, 1, 2, 3}, "g",
               [&](auto const& h) -> std::optional<Block> {
@@ -67,6 +68,8 @@ struct Fixture
               [](auto const&) -> std::optional<std::string> { return {}; },
               [](auto const& s) { return !s.empty(); }, false, fastPathOnly)
     {
+        if (mode != Engine::MemoryExperiment::None)
+            e.setMemoryExperiment(mode, 3, 5, 2);
         e.start();
         e.takeOutgoing();
     }
@@ -146,6 +149,46 @@ fastPipeline()
     f.vote(Kind::Commit, c, {0, 1, 2});
     assert(f.e.takeExecuted().empty());
     assert(f.e.retainedViews() == 2 && f.e.prepareHistorySize() == 1);
+}
+
+void
+memoryWindows()
+{
+    using Mode = Engine::MemoryExperiment;
+    for (auto mode : {Mode::None, Mode::PausePruning})
+    {
+        Fixture f(3, false, mode);
+        std::string parent = "g";
+        size_t skipped = 0;
+        for (uint64_t v = 1; v <= 10; ++v)
+        {
+            auto b = f.add(v, parent);
+            f.e.receive(f.e.leader(v), proposal(b));
+            f.vote(Kind::Prepare, b, {0, 1, 2});
+            f.vote(Kind::Commit, b, {0, 1, 2});
+            bool pause = mode == Mode::PausePruning &&
+                         (v == 3 || v == 4 || v == 8 || v == 9);
+            skipped += pause;
+            assert(f.e.prepareHistorySize() == (pause ? 2 + (v - 3) % 5 : 1));
+            assert(f.e.skippedPrunes() == skipped && f.e.droppedVotes() == 0);
+            assert(f.e.committed().view == v);
+            parent = b.hash;
+        }
+    }
+
+    Fixture f(3, false, Mode::DropVotes);
+    auto b = f.add(3);
+    for (auto kind : {Kind::Prepare, Kind::Commit})
+        for (uint64_t v = 1; v <= 10; ++v)
+            f.e.receive(0, msg(kind, v, {v, b.hash}));
+    assert(f.e.droppedVotes() == 8); // four affected views, two vote types
+    f.enter(3); // WISH messages are delivered
+    f.e.receive(0, msg(Kind::Committed, 0, {3, b.hash}));
+    f.e.receive(1, msg(Kind::Committed, 0, {3, b.hash}));
+    assert(f.e.committed().view == 3); // catch-up reports are still delivered
+    f.enter(10);
+    f.e.receive(0, msg(Kind::Commit, 4, {4, b.hash})); // late affected vote
+    assert(f.e.droppedVotes() == 9 && f.e.skippedPrunes() == 0);
 }
 
 void
@@ -635,6 +678,7 @@ main()
     fastPathOnlyBoundaries();
     fastPipeline();
     closeAndPrune();
+    memoryWindows();
     dependencies();
     slowProposalAndCatchup();
     malformedAndMissing();
