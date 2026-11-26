@@ -19,7 +19,6 @@
 #include <chrono>
 #include <filesystem>
 #include <limits>
-#include <unistd.h>
 
 namespace stellar
 {
@@ -29,7 +28,7 @@ namespace
 {
 constexpr uint32_t WIRE_VERSION = 1;
 constexpr uint32_t WORK_BATCH = 100;
-constexpr size_t BLOCK_CACHE_SIZE = 128;
+constexpr size_t BLOCK_CACHE_SIZE = ShabdizArchive::Options{}.memoryBlocks;
 using Clock = std::chrono::steady_clock;
 // Each replica is a separate process. Include startup and peer discovery in
 // elapsed server time; the existing Shabdiz tick checks this clock.
@@ -109,10 +108,9 @@ struct ShabdizRuntime
     NodeID self;
     std::set<NodeID> members;
     std::unique_ptr<PaperShabdiz> engine;
-    // Block storage, separate from retained consensus votes. Fast-only runs
-    // retain 100 recent blocks/markers in RAM; full-protocol runs use the
-    // packed archive.
-    std::unique_ptr<ShabdizArchive> archive;
+    // Bound both block and execution-marker history independently of recovery mode.
+    ShabdizArchive archive{std::filesystem::path{},
+                           ShabdizArchive::Options{true, BLOCK_CACHE_SIZE}};
     std::map<Hash, ShabdizBatch> parsed;
     std::deque<Hash> parsedOrder;
     std::map<Hash, PaperShabdiz::Block> cache;
@@ -130,13 +128,6 @@ struct ShabdizRuntime
     uint64_t timedFirstView = 0, timedCollects = 0, timedProposals = 0;
     int64_t armedAtUs = 0, firstCollectUs = 0, lastProposalUs = 0;
 
-    size_t
-    blockCacheSize() const
-    {
-        return SHABDIZ_FAST_PATH_ONLY ? ShabdizArchive::Options{}.memoryBlocks
-                                     : BLOCK_CACHE_SIZE;
-    }
-
     ShabdizBatch const*
     batch(std::string const& data, Hash const& id)
     {
@@ -148,7 +139,7 @@ struct ShabdizRuntime
             return nullptr;
         it = parsed.emplace(id, std::move(*result)).first;
         parsedOrder.push_back(id);
-        while (parsed.size() > blockCacheSize())
+        while (parsed.size() > BLOCK_CACHE_SIZE)
         {
             parsed.erase(parsedOrder.front());
             parsedOrder.pop_front();
@@ -165,9 +156,9 @@ struct ShabdizRuntime
         m.value = {b.view, b.hash};
         m.block = b;
         auto bytes = xdr::xdr_to_opaque(encode(m));
-        archive->put("b-" + binToHex(b.hash),
-                     std::string(reinterpret_cast<char const*>(bytes.data()),
-                                 bytes.size()));
+        archive.put("b-" + binToHex(b.hash),
+                    std::string(reinterpret_cast<char const*>(bytes.data()),
+                                bytes.size()));
         cacheBlock(b);
     }
     void
@@ -175,7 +166,7 @@ struct ShabdizRuntime
     {
         if (cache.emplace(b.hash, b).second)
             cacheOrder.push_back(b.hash);
-        while (cache.size() > blockCacheSize())
+        while (cache.size() > BLOCK_CACHE_SIZE)
         {
             cache.erase(cacheOrder.front());
             cacheOrder.pop_front();
@@ -187,7 +178,7 @@ struct ShabdizRuntime
         auto it = cache.find(h);
         if (it != cache.end())
             return it->second;
-        auto stored = archive->get("b-" + binToHex(h));
+        auto stored = archive.get("b-" + binToHex(h));
         if (!stored)
             return {};
         std::vector<char> bytes(stored->begin(), stored->end());
@@ -203,7 +194,7 @@ struct ShabdizRuntime
     bool
     executed(Hash const& h)
     {
-        return archive->contains("e-" + binToHex(h));
+        return archive.contains("e-" + binToHex(h));
     }
     bool
     addWork(Hash const& id, std::string const& data)
@@ -263,15 +254,6 @@ OverlayManagerImpl::initializePaperShabdiz()
     });
     if (r->members.size() < 4 || r->members.size() > 256)
         throw std::invalid_argument("Shabdiz requires 4..256 fixed members");
-    // Each experiment starts with genesis. This archive supports chain fetch,
-    // not crash/restart recovery of the consensus state.
-    auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
-    auto archivePath =
-        std::filesystem::path(cfg.BUCKET_DIR_PATH) /
-        ("shabdiz-" + std::to_string(getpid()) + "-" + std::to_string(stamp));
-    ShabdizArchive::Options archiveOptions;
-    archiveOptions.memoryOnly = SHABDIZ_FAST_PATH_ONLY;
-    r->archive = std::make_unique<ShabdizArchive>(archivePath, archiveOptions);
     auto raw = r.get();
     r->engine = std::make_unique<PaperShabdiz>(
         r->self, std::vector<NodeID>(r->members.begin(), r->members.end()),
@@ -286,15 +268,11 @@ OverlayManagerImpl::initializePaperShabdiz()
         r->engine->setCollectionWindow(COLLECTION_START_VIEW, MAX_COLLECT_ATTEMPTS);
     CLOG_INFO(Overlay,
               "[SHABDIZ CONFIG] members={} quorum={} leader=round-robin skip_disconnected={} "
-              "prepared_pipeline=true fast_path_only={} archive={} "
-              "archive_format={} archive_batch_blocks={} "
+              "prepared_pipeline=true fast_path_only={} archive=none "
+              "archive_format=memory_only archive_batch_blocks=0 "
               "archive_memory_blocks={}",
               r->members.size(), r->engine->quorum(), !SHABDIZ_FAST_PATH_ONLY,
-              SHABDIZ_FAST_PATH_ONLY,
-              archiveOptions.memoryOnly ? "none" : archivePath.string(),
-              archiveOptions.memoryOnly ? "memory_only" : "sqlite_zlib",
-              archiveOptions.memoryOnly ? 0 : archiveOptions.batchBlocks,
-              archiveOptions.memoryBlocks);
+              SHABDIZ_FAST_PATH_ONLY, BLOCK_CACHE_SIZE);
     if (cfg.SEND_CUSTOM_MESSAGE)
     {
         // Join a delayed commit's view to its configured validator name.
@@ -312,7 +290,6 @@ OverlayManagerImpl::pumpPaperShabdiz()
     auto& r = *mPaperShabdiz;
     if (r.pumping || !r.started)
         return;
-    r.archive->check();
     r.pumping = true;
     auto reset = gsl::finally([&r]() { r.pumping = false; });
     for (;;)
@@ -331,7 +308,7 @@ OverlayManagerImpl::pumpPaperShabdiz()
                     throw std::runtime_error("Invalid committed Shabdiz batch");
                 applyExperimentBatch(*batch, g_kvStore);
                 appliedTxns = batch->size();
-                r.archive->put("e-" + binToHex(id), {});
+                r.archive.put("e-" + binToHex(id), {});
                 auto acks = r.localAcks.find(id);
                 if (acks != r.localAcks.end())
                 {
@@ -570,7 +547,7 @@ OverlayManagerImpl::tickPaperShabdiz()
                   r.engine->view(), r.engine->prepared().view,
                   r.engine->committed().view, r.fastProposals, r.slowProposals,
                   r.collects, r.wishes);
-        auto archive = r.archive->stats();
+        auto archive = r.archive.stats();
         CLOG_INFO(
             Overlay,
             "[SHABDIZ ARCHIVE] pending_records={} pending_bytes={} "

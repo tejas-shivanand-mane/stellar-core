@@ -111,9 +111,8 @@ inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_MS = 2000;
 inline constexpr uint64_t SHABDIZ_VIEW_TIMEOUT_STEP_MS = 1;
 
 // Benchmark ablation only. Disable collection, WISH/view-timeout recovery and
-// COMMITTED-report catch-up. Preserve fast-path voting, normal view progress,
-// data fetching within the last 100 stored blocks. Retain 100 execution markers;
-// the disk archive is disabled, but normal diagnostic logging remains enabled.
+// COMMITTED-report catch-up. Preserve fast-path voting and normal view progress.
+// Both modes keep 100 recent blocks and 100 execution markers in memory.
 // Wait for all fixed peers before startup. A faulty/disconnected leader can
 // stall this mode.
 // Keep false when evaluating the complete protocol.
