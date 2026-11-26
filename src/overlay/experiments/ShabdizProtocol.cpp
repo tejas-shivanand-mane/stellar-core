@@ -512,8 +512,9 @@ OverlayManagerImpl::tickPaperShabdiz()
         // archived application blocks are separate from consensus retention.
         CLOG_INFO(Overlay,
                   "OverlayManagerImpl tick; MEMORY RSS: {} MB, number of "
-                  "elements: {}",
-                  getRSS_MB(), r.engine->prepareHistorySize());
+                  "elements: {}, view={} unix_us={} nonprune={}",
+                  getRSS_MB(), r.engine->prepareHistorySize(), r.engine->view(),
+                  unixMicros(), NonPrune_MODE);
         if (!SHABDIZ_FAST_PATH_ONLY)
         {
             // Read both authenticated maps without copying them. Refresh on
